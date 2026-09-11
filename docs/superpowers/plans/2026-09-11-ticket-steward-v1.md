@@ -432,3 +432,10 @@ Commands and behaviors exactly §9. `doctor` prints one line per check `[ok]`/`[
   - `workspace.setup` is required in config (no default); `init`/examples must include it and `prompt`.
   - `sweep` does not call `stores.deliveries.prune`; the worker's hourly sweep must.
   - Mustache must be imported as default (`import Mustache from "mustache"`).
+
+### Level 2a complete (T9, T12)
+
+- Pipeline: 16 end-to-end tests; suite 228 green. `PipelineDeps` matches the plan. The pipeline finds the current attempt row via `stores.attempts.forJob(jobId)` matched on `number === ctx.attempt`, so the worker MUST call `stores.attempts.start(jobId)` after every claim. Session id / operator instructions come from `ctx.trigger` for `agent.session`, else from the job row (`sessionId`/`promptBody`). Session `error` is emitted only for terminal non-retryable failures. `publishOnly` returns non-retryable failure if no stored result. Worktree kept for any non-succeeded outcome when `keepOnFailure`.
+- Fakes: `FakeTracker(issues[])` with `addIssue`, `getDescription`, `setDescription`, `comments`, `sessionActivities`, `uploads()`, `failNextWrite()`; `FakeBrain({ result, writeFiles, fail, usage })` with `runs`, `lastInput()`; `tmpRepo(promptTemplate)` → `{ root, dataDir, overlayDir, promptPath, repo, sha, mirror, cleanup }` (base branch `main`); `freeTcpPort()`.
+- Run a single test file with `npx vitest run <file>` (`pnpm test -- <file>` runs everything).
+- Ops docs written against spec §9 CLI; re-check README CLI table and docs/ops.md §4 after T11. Unit hard-codes `ReadWritePaths=/var/lib/ticket-steward`; steward user HOME is documented to live under dataDir because of `ProtectHome=yes`.
