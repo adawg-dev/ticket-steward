@@ -417,3 +417,18 @@ Commands and behaviors exactly §9. `doctor` prints one line per check `[ok]`/`[
 ## Progress log
 
 (Orchestrator writes here after each level.)
+
+### Level 0–1 complete (T1–T8)
+
+- All seven level-1 tasks merged by cherry-pick; 35 test files, 212 tests green; typecheck and lint clean.
+- Seam fix: `createLinearTracker` takes `{ tokens: TokenRepository }` (structural) rather than the `TokenStore` class.
+- Spec corrected: `denyPaths` = mirror path, SQLite file, overlayDir (not dataDir); `resolveSha` takes the bare branch name (mirror has no `origin/` refs; an `origin/` prefix is accepted and stripped).
+- Notes for T9–T12:
+  - `Mirror` exposes `path`; `Mirror.fetch()` re-sets the remote URL from the token each time.
+  - `JobStore.enqueue` of an `agent.session` event seeds `sessionId`/`promptBody`; `claimById` claims any non-running job. Succeeded-with-warning goes on the attempt row (`AttemptStore.finish({ error })`), Job has no warning column.
+  - `@linear/sdk` v95: workspace templates via `(await client.organization).templates()`; `createLinearTracker` throws without `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET` (doctor must surface).
+  - `codehostMcpSpec({ binPath, configPath, worktreePath, sha, secrets })` includes only PATH, HOME and defined codehost tokens. `recent_changes` defaults to 30 days.
+  - `runBrainDetached` forks `src/brain/runner.ts` via tsx when running from source, `dist/brain/runner.js` when built; the child env must include `NODE_ENV=test` for the `fake` brain kind in tests. `buildBrainEnv` prefers `ANTHROPIC_API_KEY` over `CLAUDE_CODE_OAUTH_TOKEN`.
+  - `workspace.setup` is required in config (no default); `init`/examples must include it and `prompt`.
+  - `sweep` does not call `stores.deliveries.prune`; the worker's hourly sweep must.
+  - Mustache must be imported as default (`import Mustache from "mustache"`).

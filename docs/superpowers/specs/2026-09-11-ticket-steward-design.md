@@ -257,7 +257,7 @@ interface BrainInput {
   maxTurns: number;
   model: string;
   mcpServers: Record<string, McpServerSpec>;   // codehost and playwright; both stdio with explicit command/args/env
-  denyPaths: string[];                   // absolute paths the policy denies for Bash/Edit/Write (mirror, dataDir, overlayDir)
+  denyPaths: string[];                   // absolute paths the policy denies for Bash/Edit/Write: the mirror, the SQLite file, overlayDir (NOT dataDir itself, which contains the worktree and artifacts)
 }
 interface BrainRun {
   ok: boolean;
@@ -406,7 +406,9 @@ Retry policy in the worker:
 Per job:
 
 1. `mirror.fetch()`: `git -C <dataDir>/repo.git fetch --prune origin` using the mirror's
-   stored fetch URL (a read-only deploy token). `resolveSha("origin/<baseBranch>")`.
+   stored fetch URL (a read-only deploy token). `resolveSha("<baseBranch>")` (a mirror
+   stores remote branches under `refs/heads`, so there is no `origin/` prefix; `resolveSha`
+   accepts and strips one for convenience).
 2. `worktree.create(jobId, attempt)`: `git worktree prune`; if the target path exists,
    `git worktree remove --force` it (fallback `rm -rf`); `git worktree add --detach <path> <sha>`;
    then `git -C <path> config --worktree remote.origin.pushurl /dev/null`
