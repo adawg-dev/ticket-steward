@@ -322,7 +322,7 @@ give `publish_failed`, and `steward jobs retry <id>` resumes at the publish step
 running the brain again.
 
 ```bash
-steward jobs retry 42     # requeue; publish-only when a result is stored
+steward jobs retry 42     # runs again now, inline; publish-only when a result is stored; stop serve first (shared run lock)
 steward jobs gc           # run retention now: worktrees, artifacts, transcripts, deliveries
 ```
 

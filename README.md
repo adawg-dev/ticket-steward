@@ -60,7 +60,7 @@ steward enrich KEY-123 --dry-run
 
 | Command | What it does |
 | --- | --- |
-| `steward init` | Writes `steward.config.ts`, `.env.example`, `prompts/enrich.md`, `skills/` into the current directory. Refuses to overwrite. |
+| `steward init [dir]` | Writes `steward.config.ts`, `.env.example`, `prompts/enrich.md`, `skills/` into `dir` (default: current directory). Refuses to overwrite. |
 | `steward doctor` | Runs every health check (config, secrets, user, modes, mirror, overlay, skills, Linear token, public URL, codehost MCP, Playwright, port), reports all, exits non-zero if any fails. |
 | `steward auth linear` | `actor=app` OAuth with `state`; starts a temporary listener when `serve` is not running. Clears `auth_broken`. |
 | `steward mirror init` \| `fetch` | Create or refresh the bare mirror. |
@@ -69,7 +69,7 @@ steward enrich KEY-123 --dry-run
 | `steward enrich <KEY\|UUID> [--dry-run]` | Enrich one ticket: enqueue if `serve` is up, else run inline. `--dry-run` prints the section and recorded writes. |
 | `steward jobs [--status s] [--limit n]` | List jobs. |
 | `steward jobs show <id>` | Job row, attempts, transcript path, artifacts listing, stored result. |
-| `steward jobs retry <id>` | Requeue; publish-only when a result is stored. |
+| `steward jobs retry <id>` | Runs the job again now, inline (publish-only when a result is stored). Needs `serve` stopped, since both take the run lock. |
 | `steward jobs gc` | Run retention now. |
 | `steward templates` | Issue templates for the workspace and allowlisted teams. |
 | `steward prompt show` \| `render <KEY>` | Print the prompt template, or the fully rendered prompt for a ticket. |

@@ -13,7 +13,8 @@
   "files": [
     "bin",
     "dist",
-    "prompts"
+    "prompts",
+    ".env.example"
   ],
   "engines": {
     "node": ">=22"
