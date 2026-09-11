@@ -1,5 +1,7 @@
-import { LINEAR_SCOPES, LinearAuth, buildAuthorizeUrl, exchangeCode, type TokenRepository } from "../../../src/tracker/linear/auth.js";
+import { openStores, type Stores } from "../../../src/store/index.js";
 import type { TokenPair } from "../../../src/store/tokens.js";
+import { LINEAR_SCOPES, LinearAuth, buildAuthorizeUrl, exchangeCode, type TokenRepository } from "../../../src/tracker/linear/auth.js";
+import { freshDataDir } from "../../store/helpers.js";
 
 class MemoryTokenRepository implements TokenRepository {
   pair: TokenPair | null = null;
@@ -31,6 +33,7 @@ const tokenResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 const rotated = { access_token: "access-new", token_type: "Bearer", expires_in: 86399, scope: "read", refresh_token: "refresh-new" };
+const rotatedElsewhere = (): TokenPair => ({ ...pair(minutes(60)), accessToken: "access-elsewhere", refreshToken: "refresh-elsewhere" });
 
 describe("buildAuthorizeUrl", () => {
   beforeEach(() => {
@@ -139,7 +142,7 @@ describe("LinearAuth.accessToken", () => {
     const fetchMock = vi.fn<typeof fetch>();
     const auth = new LinearAuth(repo, creds, fetchMock);
     repo.withImmediateTransaction = <T>(fn: () => T): T => {
-      repo.pair = { ...pair(minutes(60)), accessToken: "access-elsewhere", refreshToken: "refresh-elsewhere" };
+      repo.pair = rotatedElsewhere();
       return fn();
     };
     expect(await auth.accessToken()).toBe("access-elsewhere");
@@ -178,5 +181,78 @@ describe("LinearAuth.handleUnauthorized", () => {
     expect(await auth.handleUnauthorized()).toBe("access-new");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(repo.get()!.accessToken).toBe("access-new");
+  });
+
+  it("skips the network call when the stored refresh token already changed", async () => {
+    const repo = new MemoryTokenRepository();
+    repo.set(pair(minutes(60)));
+    const fetchMock = vi.fn<typeof fetch>();
+    const auth = new LinearAuth(repo, creds, fetchMock);
+    repo.withImmediateTransaction = <T>(fn: () => T): T => {
+      repo.pair = rotatedElsewhere();
+      return fn();
+    };
+    expect(await auth.handleUnauthorized()).toBe("access-elsewhere");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("LinearAuth with the SQLite token store", () => {
+  let stores: Stores;
+  let otherProcess: Stores;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    const dataDir = freshDataDir();
+    stores = openStores(dataDir);
+    otherProcess = openStores(dataDir);
+  });
+
+  afterEach(() => {
+    stores.db.close();
+    otherProcess.db.close();
+  });
+
+  it("refreshes inside the store's immediate transaction and persists the rotated pair", async () => {
+    stores.tokens.set(pair(minutes(1)));
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(tokenResponse(rotated));
+    const auth = new LinearAuth(stores.tokens, creds, fetchMock);
+
+    expect(await auth.accessToken()).toBe("access-new");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(otherProcess.tokens.get()?.accessToken).toBe("access-new");
+    expect(otherProcess.tokens.get()?.refreshToken).toBe("refresh-new");
+    expect(otherProcess.tokens.get()?.appUserId).toBe("app-user-1");
+  });
+
+  it("keeps the pair another process stored while the refresh request was in flight", async () => {
+    stores.tokens.set(pair(minutes(1)));
+    const external = rotatedElsewhere();
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+      otherProcess.tokens.set(external);
+      return tokenResponse(rotated);
+    });
+    const auth = new LinearAuth(stores.tokens, creds, fetchMock);
+
+    expect(await auth.accessToken()).toBe("access-elsewhere");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(stores.tokens.get()).toEqual(external);
+  });
+
+  it("returns the pair another process stored while the 401 recovery request was in flight", async () => {
+    stores.tokens.set(pair(minutes(60)));
+    const external = rotatedElsewhere();
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+      otherProcess.tokens.set(external);
+      return tokenResponse(rotated);
+    });
+    const auth = new LinearAuth(stores.tokens, creds, fetchMock);
+
+    expect(await auth.handleUnauthorized()).toBe("access-elsewhere");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(stores.tokens.get()).toEqual(external);
   });
 });

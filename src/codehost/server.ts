@@ -3,7 +3,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import type { McpServerSpec } from "../brain/types.js";
-import type { Secrets } from "../config/load.js";
 import { recentCommits } from "./gitlog.js";
 import type { CodeHost } from "./types.js";
 
@@ -44,19 +43,12 @@ export const startCodeHostMcpServer = async (p: { codehost: CodeHost; worktreePa
   await server.connect(new StdioServerTransport());
 };
 
-export const codehostMcpSpec = (p: {
-  binPath: string;
-  configPath: string;
-  worktreePath: string;
-  sha: string;
-  secrets: Secrets;
-}): McpServerSpec => {
-  const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir() };
-  if (p.secrets.GITLAB_TOKEN !== undefined) env.GITLAB_TOKEN = p.secrets.GITLAB_TOKEN;
-  if (p.secrets.GITHUB_TOKEN !== undefined) env.GITHUB_TOKEN = p.secrets.GITHUB_TOKEN;
-  return {
-    command: process.execPath,
-    args: [p.binPath, "mcp", "codehost", "--config", p.configPath, "--workspace", p.worktreePath, "--sha", p.sha],
-    env,
-  };
-};
+/**
+ * Spawn spec for `steward mcp codehost`. The env carries no secrets: the brain SDKs put MCP env on the
+ * `claude` command line, so the server process loads the codehost token itself from the config's `.env`.
+ */
+export const codehostMcpSpec = (p: { binPath: string; configPath: string; worktreePath: string; sha: string }): McpServerSpec => ({
+  command: process.execPath,
+  args: [p.binPath, "mcp", "codehost", "--config", p.configPath, "--workspace", p.worktreePath, "--sha", p.sha],
+  env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir() },
+});

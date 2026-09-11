@@ -93,13 +93,12 @@ describe("codehost MCP server", () => {
 });
 
 describe("codehostMcpSpec", () => {
-  it("spawns steward over node with only PATH, HOME and the codehost token in env", () => {
+  it("spawns steward over node with only PATH and HOME in env, leaving the token to the server's own config load", () => {
     const spec = codehostMcpSpec({
       binPath: "/opt/steward/bin/steward.js",
       configPath: "/etc/ticket-steward/steward.config.ts",
       worktreePath: "/var/lib/ticket-steward/work/1-1",
       sha: "abc123",
-      secrets: { GITLAB_TOKEN: "glpat-secret", LINEAR_CLIENT_SECRET: "never", MIRROR_TOKEN: "never" },
     });
 
     expect(spec.command).toBe(process.execPath);
@@ -114,19 +113,6 @@ describe("codehostMcpSpec", () => {
       "--sha",
       "abc123",
     ]);
-    expect(Object.keys(spec.env).sort()).toEqual(["GITLAB_TOKEN", "HOME", "PATH"]);
-    expect(spec.env.GITLAB_TOKEN).toBe("glpat-secret");
-  });
-
-  it("passes GITHUB_TOKEN when that is the configured codehost secret", () => {
-    const spec = codehostMcpSpec({
-      binPath: "/opt/steward/bin/steward.js",
-      configPath: "/etc/ticket-steward/steward.config.ts",
-      worktreePath: "/var/lib/ticket-steward/work/1-1",
-      sha: "abc123",
-      secrets: { GITHUB_TOKEN: "ghp_secret" },
-    });
-
-    expect(Object.keys(spec.env).sort()).toEqual(["GITHUB_TOKEN", "HOME", "PATH"]);
+    expect(Object.keys(spec.env).sort()).toEqual(["HOME", "PATH"]);
   });
 });
