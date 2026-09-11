@@ -1,6 +1,7 @@
 import { join } from "node:path";
+import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { acquireRunLock } from "../core/lock.js";
-import { publishOnly, runJob, type PipelineDeps } from "../core/pipeline.js";
+import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { logger } from "../log.js";
 import type { Attempt, AttemptPatch, Job } from "../store/index.js";
@@ -37,8 +38,10 @@ const errorMessage = (err: unknown): string => (err instanceof Error ? err.messa
 
 const firstLine = (text: string): string => text.split("\n")[0] ?? text;
 
-const isRetryable = (outcome: JobOutcome): boolean =>
+const isRetryable = (outcome: JobOutcome): outcome is Exclude<JobOutcome, { status: "succeeded" }> =>
   outcome.status === "publish_failed" || (outcome.status === "failed" && outcome.retryable);
+
+const isInterrupted = (outcome: JobOutcome): boolean => outcome.status === "failed" && outcome.error === INTERRUPTED_ERROR;
 
 const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
   if (outcome.status === "succeeded") return outcome.warning === undefined ? {} : { error: outcome.warning };
@@ -61,8 +64,7 @@ class Worker {
   private readonly backoffMs: number[];
   private readonly execute: typeof runJob;
   private readonly republish: typeof publishOnly;
-  private readonly timers = new Set<NodeJS.Timeout>();
-  private readonly retryIds: number[] = [];
+  private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly loopDone: Promise<void>;
   private readonly onSigterm = (): void => void this.stop();
@@ -84,7 +86,9 @@ class Worker {
     logger.info({ requeued, failed }, "worker started");
     this.sweepTimer = setInterval(() => void this.sweep(), deps.sweepMs ?? DEFAULT_SWEEP_MS).unref();
     process.once("SIGTERM", this.onSigterm);
-    this.loopDone = this.sweep().then(() => this.loop());
+    this.loopDone = this.sweep()
+      .then(() => this.loop())
+      .catch((err: unknown) => logger.error({ err: errorMessage(err) }, "worker loop crashed"));
   }
 
   state(): { running: number | null } {
@@ -100,11 +104,13 @@ class Worker {
     this.stopped = true;
     process.removeListener("SIGTERM", this.onSigterm);
     clearInterval(this.sweepTimer);
-    for (const timer of this.timers) clearTimeout(timer);
-    this.timers.clear();
+    this.abort.abort();
     this.wake?.();
-    await this.loopDone;
-    this.lock.release();
+    try {
+      await this.loopDone;
+    } finally {
+      this.lock.release();
+    }
     logger.info("worker stopped");
   }
 
@@ -121,9 +127,7 @@ class Worker {
 
   private claim(): Job | null {
     const { jobs, tokens } = this.deps.stores;
-    if (tokens.isAuthBroken()) return null;
-    const retryId = this.retryIds.shift();
-    return retryId === undefined ? jobs.claimNext() : jobs.claimById(retryId);
+    return tokens.isAuthBroken() ? null : jobs.claimNext();
   }
 
   private idle(): Promise<void> {
@@ -141,38 +145,54 @@ class Worker {
   }
 
   private async process(job: Job): Promise<void> {
-    const { stores } = this.deps;
-    const attempt = stores.attempts.start(job.id);
-    this.inFlight = { job, attempt };
-    const ctx = runContext(job, attempt);
-    const outcome = await this.run(job, ctx);
-    stores.jobs.finish(job.id, outcome);
-    stores.attempts.finish(attempt.id, attemptPatch(outcome));
-    this.inFlight = null;
-    logger.info({ jobId: job.id, attempt: attempt.number, status: outcome.status }, "job finished");
-    if (!isRetryable(outcome)) return;
-    if (job.attempts < this.maxAttempts) this.scheduleRetry(job);
-    else await this.reportExhausted(job, outcome);
+    const { stores, redactor } = this.deps;
+    try {
+      const attempt = stores.attempts.start(job.id);
+      this.inFlight = { job, attempt };
+      const outcome = redactOutcome(await this.run(job, runContext(job, attempt)), redactor);
+      await this.record(job, attempt, outcome);
+      logger.info({ jobId: job.id, attempt: attempt.number, status: outcome.status }, "job finished");
+    } catch (err) {
+      logger.error({ jobId: job.id, err: errorMessage(err) }, "job bookkeeping failed");
+      this.failBestEffort(job, errorMessage(err));
+    } finally {
+      this.inFlight = null;
+    }
   }
 
   private async run(job: Job, ctx: RunContext): Promise<JobOutcome> {
+    const deps: PipelineDeps = { ...this.deps, signal: this.abort.signal };
     try {
-      return job.result === null ? await this.execute(ctx, this.deps) : await this.republish(ctx, this.deps);
+      return job.result === null ? await this.execute(ctx, deps) : await this.republish(ctx, deps);
     } catch (err) {
       return { status: "failed", error: errorMessage(err), retryable: false };
     }
   }
 
-  private scheduleRetry(job: Job): void {
-    if (this.stopped) return;
-    const delay = this.backoffMs[job.attempts - 1] ?? this.backoffMs.at(-1) ?? 0;
-    const timer = setTimeout(() => {
-      this.timers.delete(timer);
-      this.retryIds.push(job.id);
-      this.wake?.();
-    }, delay);
-    this.timers.add(timer);
-    logger.info({ jobId: job.id, attempt: job.attempts, delayMs: delay }, "job retry scheduled");
+  /** Persists the outcome: interrupted runs stay queued, retryable ones wait out the backoff in the queue, the rest are terminal. */
+  private async record(job: Job, attempt: Attempt, outcome: JobOutcome): Promise<void> {
+    const { jobs, attempts } = this.deps.stores;
+    if (isInterrupted(outcome)) {
+      jobs.requeueInterrupted(this.maxAttempts);
+      return;
+    }
+    attempts.finish(attempt.id, attemptPatch(outcome));
+    if (isRetryable(outcome) && job.attempts < this.maxAttempts) {
+      const delay = this.backoffMs[job.attempts - 1] ?? this.backoffMs.at(-1) ?? 0;
+      jobs.scheduleRetry(job.id, new Date(Date.now() + delay), outcome.error);
+      logger.info({ jobId: job.id, attempt: job.attempts, delayMs: delay }, "job retry scheduled");
+      return;
+    }
+    jobs.finish(job.id, outcome);
+    if (isRetryable(outcome)) await this.reportExhausted(job, outcome);
+  }
+
+  private failBestEffort(job: Job, error: string): void {
+    try {
+      this.deps.stores.jobs.finish(job.id, { status: "failed", error, retryable: false });
+    } catch (err) {
+      logger.error({ jobId: job.id, err: errorMessage(err) }, "job could not be marked failed");
+    }
   }
 
   private async reportExhausted(job: Job, outcome: JobOutcome): Promise<void> {

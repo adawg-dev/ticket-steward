@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Mock } from "vitest";
+import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { acquireRunLock } from "../../src/core/lock.js";
 import type { publishOnly, runJob } from "../../src/core/pipeline.js";
@@ -19,6 +20,7 @@ import { FakeTracker } from "../fakes/fakeTracker.js";
 const NOW = new Date("2026-09-11T14:02:30.000Z");
 const SUCCEEDED: JobOutcome = { status: "succeeded" };
 const RETRYABLE: JobOutcome = { status: "failed", error: "mirror fetch failed", retryable: true };
+const INTERRUPTED: JobOutcome = { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
 
 const createdTrigger: TriggerEvent = {
   kind: "issue.created",
@@ -175,6 +177,104 @@ describe("startWorker", () => {
     expect(attempts[1]?.error).toBeNull();
   });
 
+  it("keeps a retryable failure queued with not_before while it waits for the backoff", async () => {
+    runJobMock.mockResolvedValue(RETRYABLE);
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    start({ backoffMs: [60_000] });
+
+    await vi.waitFor(() => {
+      expect(stores.jobs.get(jobId)?.notBefore).toEqual(expect.any(String));
+    });
+
+    const job = stores.jobs.get(jobId);
+    expect(job?.status).toBe("queued");
+    expect(job?.attempts).toBe(1);
+    expect(job?.error).toBe("mirror fetch failed");
+    expect(job?.finishedAt).toBeNull();
+    expect(stores.jobs.findQueued("issue-1")?.id).toBe(jobId);
+    expect(runJobMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the second attempt from a fresh worker when the first one stopped during the backoff", async () => {
+    runJobMock.mockResolvedValueOnce(RETRYABLE).mockResolvedValueOnce(SUCCEEDED);
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    const first = start({ backoffMs: [50] });
+    await vi.waitFor(() => {
+      expect(stores.jobs.get(jobId)?.notBefore).toEqual(expect.any(String));
+    });
+    await first.stop();
+    expect(runJobMock).toHaveBeenCalledTimes(1);
+
+    start({ backoffMs: [50] });
+
+    await waitForStatus(jobId, "succeeded");
+    expect(runJobMock).toHaveBeenCalledTimes(2);
+    expect(runJobMock.mock.calls[1]?.[0].attempt).toBe(2);
+    expect(stores.jobs.get(jobId)?.notBefore).toBeNull();
+  });
+
+  it("survives a store error while finishing a job and keeps processing", async () => {
+    const finishSpy = vi.spyOn(stores.jobs, "finish").mockImplementationOnce(() => {
+      throw new Error("Intended Test Error");
+    });
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    const handle = start();
+
+    await waitForStatus(jobId, "failed");
+    const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    await waitForStatus(laterJobId, "succeeded");
+
+    expect(finishSpy).toHaveBeenCalledTimes(3);
+    expect(handle.state()).toEqual({ running: null });
+  });
+
+  it("SIGTERM aborts the in-flight job, marks the attempt interrupted and leaves the job queued", async () => {
+    runJobMock.mockImplementationOnce(
+      (_ctx, deps) =>
+        new Promise<JobOutcome>((resolve) => {
+          deps.signal?.addEventListener("abort", () => resolve(INTERRUPTED), { once: true });
+        }),
+    );
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    const handle = start();
+    await vi.waitFor(() => {
+      expect(handle.state()).toEqual({ running: jobId });
+    });
+    const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+
+    process.emit("SIGTERM");
+
+    await waitForStatus(jobId, "queued");
+    await vi.waitFor(() => {
+      expect(acquireRunLock(dataDir)).not.toBeNull();
+    });
+    const [attempt] = stores.attempts.forJob(jobId);
+    expect(attempt?.error).toBe(INTERRUPTED_ERROR);
+    expect(attempt?.finishedAt).toEqual(expect.any(String));
+    expect(stores.jobs.get(jobId)?.attempts).toBe(1);
+    expect(stores.jobs.get(jobId)?.notBefore).toBeNull();
+    expect(stores.jobs.get(laterJobId)?.status).toBe("queued");
+    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(handle.state()).toEqual({ running: null });
+  });
+
+  it("fails an interrupted job that has used its last attempt", async () => {
+    runJobMock.mockResolvedValue(INTERRUPTED);
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    stores.jobs.claimById(jobId);
+    stores.jobs.finish(jobId, RETRYABLE);
+    stores.jobs.claimById(jobId);
+    stores.jobs.finish(jobId, RETRYABLE);
+    stores.jobs.requeue(jobId);
+    start();
+
+    await waitForStatus(jobId, "failed");
+
+    expect(stores.jobs.get(jobId)?.attempts).toBe(3);
+    expect(stores.jobs.get(jobId)?.error).toBe(INTERRUPTED_ERROR);
+    expect(stores.attempts.forJob(jobId)[0]?.error).toBe(INTERRUPTED_ERROR);
+  });
+
   it("fails after the last retryable attempt and reports the session error", async () => {
     runJobMock.mockResolvedValue(RETRYABLE);
     const jobId = stores.jobs.enqueue(sessionTrigger);
@@ -275,7 +375,7 @@ describe("startWorker", () => {
 
     expect(stores.jobs.get(interruptedId)?.attempts).toBe(2);
     expect(stores.jobs.get(exhaustedId)?.status).toBe("failed");
-    expect(stores.jobs.get(exhaustedId)?.error).toBe("interrupted");
+    expect(stores.jobs.get(exhaustedId)?.error).toBe(INTERRUPTED_ERROR);
     expect(runJobMock).toHaveBeenCalledTimes(1);
   });
 
