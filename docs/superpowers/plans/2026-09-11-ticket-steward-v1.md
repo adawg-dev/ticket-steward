@@ -439,3 +439,11 @@ Commands and behaviors exactly §9. `doctor` prints one line per check `[ok]`/`[
 - Fakes: `FakeTracker(issues[])` with `addIssue`, `getDescription`, `setDescription`, `comments`, `sessionActivities`, `uploads()`, `failNextWrite()`; `FakeBrain({ result, writeFiles, fail, usage })` with `runs`, `lastInput()`; `tmpRepo(promptTemplate)` → `{ root, dataDir, overlayDir, promptPath, repo, sha, mirror, cleanup }` (base branch `main`); `freeTcpPort()`.
 - Run a single test file with `npx vitest run <file>` (`pnpm test -- <file>` runs everything).
 - Ops docs written against spec §9 CLI; re-check README CLI table and docs/ops.md §4 after T11. Unit hard-codes `ReadWritePaths=/var/lib/ticket-steward`; steward user HOME is documented to live under dataDir because of `ProtectHome=yes`.
+
+### Level 2b complete (T10)
+
+- `buildServer(deps: ServerDeps)` where `ServerDeps = { config, secrets, stores, tracker, workerState, fetchImpl? }`; caller calls `app.listen({ port })`. Webhook replies `{ ok, action: enqueue|attach|skip|duplicate|ignored }`.
+- `startWorker(deps: PipelineDeps & WorkerOptions): WorkerHandle { state(), stop() }` — acquires `run.lock` synchronously and THROWS when held; registers its own SIGTERM → stop(); waits for the in-flight job (does not abort the brain; the pipeline kills the process group and systemd `TimeoutStopSec=120` bounds it). Defaults: poll 2 s, maxAttempts 3, backoff `[60_000, 300_000]`, hourly sweep incl. `deliveries.prune(7)`.
+- Retries: retryable/publish_failed outcomes are recorded via `jobs.finish`, then an in-process backoff timer re-claims with `claimById`; a restart during backoff leaves the job `failed`/`publish_failed` for `jobs retry`.
+- OAuth callback stores the pair with `appUserId` and clears `auth_broken`.
+- Suite: 38 files, 255 tests.
