@@ -1,8 +1,9 @@
 import { LinearTracker } from "../../../src/tracker/linear/client.js";
 import { createLinearTracker } from "../../../src/tracker/linear/index.js";
-import type { TokenPair, TokenStore } from "../../../src/store/tokens.js";
+import type { TokenPair } from "../../../src/store/tokens.js";
+import type { TokenRepository } from "../../../src/tracker/linear/auth.js";
 
-class MemoryTokenStore implements TokenStore {
+class MemoryTokenStore implements TokenRepository {
   private pair: TokenPair | null = null;
   private broken = false;
   get(): TokenPair | null {
@@ -11,20 +12,8 @@ class MemoryTokenStore implements TokenStore {
   set(pair: TokenPair): void {
     this.pair = pair;
   }
-  clear(): void {
-    this.pair = null;
-  }
-  createOauthState(): string {
-    return "state";
-  }
-  consumeOauthState(): boolean {
-    return true;
-  }
   setAuthBroken(v: boolean): void {
     this.broken = v;
-  }
-  isAuthBroken(): boolean {
-    return this.broken;
   }
   withImmediateTransaction<T>(fn: () => T): T {
     return fn();
