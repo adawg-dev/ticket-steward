@@ -69,7 +69,7 @@ steward enrich KEY-123 --dry-run
 | `steward enrich <KEY\|UUID> [--dry-run]` | Enrich one ticket: enqueue if `serve` is up, else run inline. `--dry-run` prints the section and recorded writes. |
 | `steward jobs [--status s] [--limit n]` | List jobs. |
 | `steward jobs show <id>` | Job row, attempts, transcript path, artifacts listing, stored result. |
-| `steward jobs retry <id>` | Runs the job again now, inline (publish-only when a result is stored). Needs `serve` stopped, since both take the run lock. |
+| `steward jobs retry <id>` | Runs the job again: requeues it for `serve` when that is running, otherwise runs it inline under the run lock (publish-only when a result is stored). |
 | `steward jobs gc` | Run retention now. |
 | `steward templates` | Issue templates for the workspace and allowlisted teams. |
 | `steward prompt show` \| `render <KEY>` | Print the prompt template, or the fully rendered prompt for a ticket. |

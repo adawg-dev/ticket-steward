@@ -227,7 +227,7 @@ curl -s https://steward.example.com/health
 For a ticket outside Linear's webhook path:
 
 ```bash
-steward enrich KEY-123 --dry-run    # prints the rendered section and recorded writes; touches nothing
+steward enrich KEY-123 --dry-run    # prints the rendered section and recorded writes; writes nothing, but takes run.lock (refused while serve runs)
 steward enrich KEY-123              # enqueues if serve is running, otherwise runs inline under run.lock
 ```
 
@@ -319,10 +319,12 @@ Which failures retry on their own (§5 of the spec): ticket fetch, mirror fetch,
 overlay and setup errors are retried up to 3 attempts. Brain timeout, exhausted turns and
 invalid output are terminal (`failed`). Tracker write failures after a result was saved
 give `publish_failed`, and `steward jobs retry <id>` resumes at the publish step without
-running the brain again.
+running the brain again. Between automatic attempts the job shows as `queued` with
+`notBefore` set to the end of the backoff; a restart during the backoff does not lose the
+retry.
 
 ```bash
-steward jobs retry 42     # runs again now, inline; publish-only when a result is stored; stop serve first (shared run lock)
+steward jobs retry 42     # requeues for serve when it is running, otherwise runs inline; publish-only when a result is stored
 steward jobs gc           # run retention now: worktrees, artifacts, transcripts, deliveries
 ```
 
@@ -365,5 +367,6 @@ steward prompt render KEY-123     # the exact prompt a job for KEY-123 would get
 
 Stopping: `systemctl stop ticket-steward` sends SIGTERM. The worker stops claiming,
 aborts the running brain, kills its process group, marks the attempt `interrupted`,
-releases `run.lock` and exits 0 within `TimeoutStopSec=120`. On the next start,
-interrupted jobs with fewer than 3 attempts are requeued.
+leaves the job `queued` (or `failed` with error `interrupted` when that was its last
+attempt), releases `run.lock` and exits 0 within `TimeoutStopSec=120`. A job left `running`
+by a crash is requeued the same way on the next start.
