@@ -152,7 +152,7 @@ const linearChecks = (loaded: LoadedConfig, stores: () => Stores, ctx: CliContex
 ];
 
 const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
-  const { config, secrets, configPath } = loaded;
+  const { config, configPath } = loaded;
   const healthUrl = `${config.server.publicUrl}/health`;
   return [
     {
@@ -165,7 +165,7 @@ const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
     {
       name: "codehost mcp",
       run: async () => {
-        const spec = codehostMcpSpec({ binPath, configPath, worktreePath: config.dataDir, sha: "HEAD", secrets });
+        const spec = codehostMcpSpec({ binPath, configPath, worktreePath: config.dataDir, sha: "HEAD" });
         const client = new Client({ name: "steward-doctor", version: "0.1.0" });
         const transport = new StdioClientTransport({ command: spec.command, args: spec.args, env: spec.env, stderr: "pipe" });
         try {

@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrainInput, BrainRun } from "../../src/brain/types.js";
-import type { StewardConfig } from "../../src/config/schema.js";
+import { INTERRUPTED_ERROR, runBrainDetached } from "../../src/brain/index.js";
+import type { FakeBrainPids } from "../../src/brain/fake.js";
+import type { BrainConfig, StewardConfig } from "../../src/config/schema.js";
 import { runJob, publishOnly, type PipelineDeps } from "../../src/core/pipeline.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { BrainResult } from "../../src/core/result.js";
@@ -10,6 +11,7 @@ import type { RunContext } from "../../src/core/types.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import { ReadOnlyTracker } from "../../src/tracker/readOnly.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
+import { isPortFree } from "../../src/workspace/retention.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
@@ -106,7 +108,7 @@ const makeConfig = (overrides: Partial<StewardConfig["workspace"]> = {}): Stewar
 
 const makeDeps = (
   brain: FakeBrain,
-  options: { config?: StewardConfig; tracker?: PipelineDeps["tracker"]; afterBrain?: () => void } = {},
+  options: { config?: StewardConfig; tracker?: PipelineDeps["tracker"]; afterBrain?: () => Promise<void> | void; signal?: AbortSignal } = {},
 ): PipelineDeps => ({
   config: options.config ?? makeConfig(),
   secrets: { ANTHROPIC_API_KEY: "sk-ant-test-key-value" },
@@ -121,10 +123,22 @@ const makeDeps = (
   now: () => NOW,
   runBrain: async (_config, input: BrainInput): Promise<BrainRun> => {
     const run = await brain.run(input, () => undefined);
-    options.afterBrain?.();
+    await options.afterBrain?.();
     return run;
   },
+  ...(options.signal === undefined ? {} : { signal: options.signal }),
 });
+
+/** The in-repo fake brain kind, run through the real detached runner (it only activates under NODE_ENV=test). */
+const fakeBrainConfig = { kind: "fake", model: "fake", maxTurns: 1, timeoutMinutes: 1 } as unknown as BrainConfig;
+
+const detachedDeps = (config: StewardConfig): PipelineDeps => {
+  const { runBrain: _ignored, ...deps } = makeDeps(brainWith(), { config: { ...config, brain: fakeBrainConfig } });
+  return {
+    ...deps,
+    runBrain: (brain, input, redactor, opts) => runBrainDetached(brain, { ...input, env: { ...input.env, NODE_ENV: "test" } }, redactor, opts),
+  };
+};
 
 const claimJob = (trigger: TriggerEvent): RunContext => {
   const jobId = stores.jobs.enqueue(trigger);
@@ -327,17 +341,112 @@ describe("runJob", () => {
     expect(input.workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
     expect(input.artifactsDir).toBe(join(repo.dataDir, "jobs", String(ctx.jobId), "artifacts"));
     expect(input.transcriptPath).toBe(join(repo.dataDir, "jobs", String(ctx.jobId), "attempt-1.jsonl"));
-    expect(input.denyPaths).toEqual([repo.mirror.path, join(repo.dataDir, "steward.db"), repo.overlayDir]);
+    expect(input.denyPaths).toEqual([repo.mirror.path, join(repo.dataDir, "steward.db"), repo.overlayDir, repo.root]);
     expect(Object.keys(input.mcpServers).sort()).toEqual(["codehost", "playwright"]);
     expect(input.env.ANTHROPIC_API_KEY).toBe("sk-ant-test-key-value");
     expect(input.env.STEWARD_PORT).toBe(String(port));
   });
 
-  it("stores the pre-write description on the attempt", async () => {
+  it("stores the pre-write description on the attempt without closing it", async () => {
     const ctx = claimJob(createdTrigger);
 
     await runJob(ctx, makeDeps(brainWith()));
 
-    expect(stores.attempts.forJob(ctx.jobId)[0]?.preWriteDescription).toBe("The adapter loses the final chunk.");
+    const [attempt] = stores.attempts.forJob(ctx.jobId);
+    expect(attempt?.preWriteDescription).toBe("The adapter loses the final chunk.");
+    expect(attempt?.transcriptPath).toBe(join(repo.dataDir, "jobs", String(ctx.jobId), "attempt-1.jsonl"));
+    expect(attempt?.finishedAt).toBeNull();
+  });
+
+  it("returns publish_failed and still cleans up when the artifacts dir vanished after the brain ran", async () => {
+    const ctx = claimJob(createdTrigger);
+    const artifactsDir = join(repo.dataDir, "jobs", String(ctx.jobId), "artifacts");
+    const deps = makeDeps(brainWith(), { config: makeConfig({ keepOnFailure: false }), afterBrain: () => rm(artifactsDir, { recursive: true, force: true }) });
+
+    const outcome = await runJob(ctx, deps);
+
+    expect(outcome).toEqual({ status: "publish_failed", error: expect.any(String) });
+    expect(stores.jobs.get(ctx.jobId)?.result).toEqual(brainResult);
+    expect(existsSync(join(repo.dataDir, "work", `${ctx.jobId}-1`))).toBe(false);
+  });
+
+  it("redacts the attachment drop note and the outcome error", async () => {
+    const ctx = claimJob(createdTrigger);
+    const escaping: BrainResult = { ...brainResult, attachments: [{ file: "../glpat-AbCdEfGhIjKlMnOpQrSt.png", caption: "Escape" }] };
+    tracker.failNextWrite();
+    const deps = { ...makeDeps(brainWith({ result: escaping })), redactor: new Redactor(["fake tracker write failure"]) };
+
+    const outcome = await runJob(ctx, deps);
+
+    expect(outcome).toEqual({ status: "publish_failed", error: "***" });
+    stores.jobs.finish(ctx.jobId, outcome);
+    stores.jobs.claimById(ctx.jobId);
+    stores.attempts.start(ctx.jobId);
+
+    await publishOnly({ ...ctx, attempt: 2 }, makeDeps(brainWith()));
+
+    expect(tracker.getDescription("issue-1")).toBe(
+      `The adapter loses the final chunk.\n\n${expectedSection(repo.sha, ctx.jobId, "\n\n_Note: Attachment `../***.png` dropped: file not found._")}`,
+    );
+  });
+
+  it("stores and throws the redacted setup tail", async () => {
+    const ctx = claimJob(createdTrigger);
+    const deps = { ...makeDeps(brainWith(), { config: makeConfig({ setup: ["echo glpat-AbCdEfGhIjKlMnOpQrSt; exit 1"] }) }) };
+
+    const outcome = await runJob(ctx, deps);
+
+    expect(outcome).toEqual({ status: "failed", error: "setup failed:\n$ echo ***; exit 1\n***\n[exit 1]\n", retryable: true });
+    expect(stores.attempts.forJob(ctx.jobId)[0]?.setupTail).toBe("$ echo ***; exit 1\n***\n[exit 1]\n");
+  });
+
+  it("classifies a setup that ran past the deadline as retryable with a timed-out tail", async () => {
+    const ctx = claimJob(createdTrigger);
+    const deps = makeDeps(brainWith(), { config: makeConfig({ setup: ["sleep 5"], setupTimeoutMinutes: 0.005 }) });
+
+    const outcome = await runJob(ctx, deps);
+
+    expect(outcome).toEqual({ status: "failed", error: expect.any(String), retryable: true });
+    expect(stores.attempts.forJob(ctx.jobId)[0]?.setupTail).toBe("$ sleep 5\n[timed out]\n");
+  });
+
+  it("reports an interrupted run when the signal aborts during setup", async () => {
+    const ctx = claimJob(createdTrigger);
+    const controller = new AbortController();
+    const deps = makeDeps(brainWith(), { config: makeConfig({ setup: ["sleep 5"] }), signal: controller.signal });
+
+    const running = runJob(ctx, deps);
+    controller.abort();
+    const outcome = await running;
+
+    expect(outcome).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+    expect(stores.attempts.forJob(ctx.jobId)[0]?.setupTail).toBe("$ sleep 5\n[interrupted]\n");
+    expect(tracker.sessionActivities("session-1")).toEqual([]);
+  });
+
+  it("uses a per-process worktree name for dry runs", async () => {
+    const ctx: RunContext = { jobId: 0, attempt: 1, issueId: "issue-1", identifier: "API-1", teamKey: "API", trigger: createdTrigger, dryRun: true };
+    const brain = brainWith();
+
+    await runJob(ctx, makeDeps(brain, { tracker: new ReadOnlyTracker(tracker) }));
+
+    expect(brain.lastInput().workspacePath).toBe(join(repo.dataDir, "work", `dry-${process.pid}`));
+  });
+
+  it("runs the brain detached, kills its process group and frees the port afterwards", async () => {
+    const ctx = claimJob(createdTrigger);
+    const listener = `node -e "require('net').createServer().listen(process.env.PORT)" >/dev/null 2>&1 &`;
+    const deps = detachedDeps(makeConfig({ setup: [listener], keepOnFailure: false }));
+
+    const outcome = await runJob(ctx, deps);
+
+    expect(outcome).toEqual({ status: "failed", error: expect.any(String), retryable: false });
+    expect(await isPortFree(port)).toBe(true);
+    const transcript = await readFile(join(repo.dataDir, "jobs", String(ctx.jobId), "attempt-1.jsonl"), "utf8");
+    const pids = JSON.parse(transcript.split("\n")[1] ?? "") as FakeBrainPids;
+    expect(pids.type).toBe("fake-pids");
+    expect(() => process.kill(pids.runnerPid, 0)).toThrow();
+    expect(() => process.kill(pids.sleepPid ?? -1, 0)).toThrow();
+    expect(existsSync(join(repo.dataDir, "work", `${ctx.jobId}-1`))).toBe(false);
   });
 });

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { z } from "zod";
-import { buildBrainEnv, runBrainDetached } from "../brain/index.js";
+import { buildBrainEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
 import type { Brain, BrainInput, BrainRun, McpServerSpec } from "../brain/types.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { CodeHost } from "../codehost/types.js";
@@ -41,6 +41,8 @@ export interface PipelineDeps {
   redactor: Redactor;
   now: () => Date;
   runBrain?: typeof runBrainDetached;
+  /** Aborted on shutdown: setup and the brain stop, and the outcome carries `INTERRUPTED_ERROR`. */
+  signal?: AbortSignal;
 }
 
 interface Session {
@@ -91,7 +93,7 @@ const resolveSession = (ctx: RunContext, deps: PipelineDeps): Session => {
 const jobPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths => {
   const jobDir = join(deps.config.dataDir, "jobs", String(ctx.jobId));
   return {
-    worktreeName: `${ctx.jobId}-${ctx.attempt}`,
+    worktreeName: ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`,
     workRoot: join(deps.config.dataDir, "work"),
     artifactsDir: join(jobDir, "artifacts"),
     transcriptPath: join(jobDir, `attempt-${ctx.attempt}.jsonl`),
@@ -101,7 +103,7 @@ const jobPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths => {
 const patchAttempt = (ctx: RunContext, deps: PipelineDeps, patch: AttemptPatch): void => {
   if (ctx.dryRun) return;
   const current = deps.stores.attempts.forJob(ctx.jobId).find((row) => row.number === ctx.attempt);
-  if (current !== undefined) deps.stores.attempts.finish(current.id, patch);
+  if (current !== undefined) deps.stores.attempts.patch(current.id, patch);
 };
 
 const playwrightMcpSpec = (): McpServerSpec => {
@@ -114,6 +116,12 @@ const playwrightMcpSpec = (): McpServerSpec => {
     args: [join(dirname(packagePath), relative)],
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir() },
   };
+};
+
+/** Masks secrets in the outcome's error or warning before it is stored or sent to the tracker. */
+export const redactOutcome = (outcome: JobOutcome, redactor: Redactor): JobOutcome => {
+  if (outcome.status === "succeeded") return outcome.warning === undefined ? outcome : { ...outcome, warning: redactor.redact(outcome.warning) };
+  return { ...outcome, error: redactor.redact(outcome.error) };
 };
 
 const redactResult = (result: BrainResult, redactor: Redactor): BrainResult => ({
@@ -137,10 +145,12 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, session: Session, pa
   const setup = await runSetup(config.workspace.setup, worktree.path, env, {
     timeoutMs: config.workspace.setupTimeoutMinutes * MINUTE_MS,
     tailBytes: SETUP_TAIL_BYTES,
+    ...(deps.signal === undefined ? {} : { signal: deps.signal }),
   });
   if (!setup.ok) {
-    patchAttempt(ctx, deps, { setupTail: deps.redactor.redact(setup.tail) });
-    throw new Error(`setup failed:\n${setup.tail}`);
+    const tail = deps.redactor.redact(setup.tail);
+    patchAttempt(ctx, deps, { setupTail: tail });
+    throw new Error(`setup failed:\n${tail}`);
   }
   const prompt = renderPrompt(await readFile(config.prompt, "utf8"), {
     ticket: renderTicketMarkdown(bundle),
@@ -158,7 +168,7 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, session: Session, pa
 };
 
 const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktree, prompt: string, env: Record<string, string>): BrainInput => {
-  const { config, secrets, mirror } = deps;
+  const { config, mirror } = deps;
   return {
     workspacePath: worktree.path,
     artifactsDir: paths.artifactsDir,
@@ -169,35 +179,40 @@ const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktree, pro
     maxTurns: config.brain.maxTurns,
     model: config.brain.model,
     mcpServers: {
-      codehost: codehostMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path, sha: worktree.sha, secrets }),
+      codehost: codehostMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path, sha: worktree.sha }),
       playwright: playwrightMcpSpec(),
     },
-    denyPaths: [mirror.path, join(config.dataDir, DB_FILENAME), config.workspace.overlayDir],
+    denyPaths: [mirror.path, join(config.dataDir, DB_FILENAME), config.workspace.overlayDir, dirname(deps.configPath)],
   };
 };
 
-const publish = async (ctx: RunContext, deps: PipelineDeps, session: Session, stored: BrainResult, sha: string, artifactsDir: string): Promise<JobOutcome> => {
-  const { tracker, config, codehost } = deps;
-  const result = redactResult(stored, deps.redactor);
+const uploadAttachments = async (deps: PipelineDeps, artifactsDir: string, result: BrainResult): Promise<{ uploaded: Array<{ url: string; caption: string }>; notes: string[] }> => {
   const { accepted, notes } = await resolveAttachments(artifactsDir, result.attachments);
   const uploaded: Array<{ url: string; caption: string }> = [];
   for (const item of accepted) {
     try {
-      const { url } = await tracker.uploadFile(item.path, item.contentType);
+      const { url } = await deps.tracker.uploadFile(item.path, item.contentType);
       uploaded.push({ url, caption: item.caption });
     } catch (err) {
       logger.warn({ file: item.path, err: errorMessage(err) }, "attachment upload failed");
       notes.push(`Attachment \`${basename(item.path)}\` dropped: upload failed.`);
     }
   }
-  const section = buildEnrichmentSection(result, uploaded, notes, {
-    now: deps.now(),
-    sha,
-    branch: config.workspace.baseBranch,
-    jobId: ctx.jobId,
-    permalink: (path, line) => codehost.permalink(path, sha, line),
-  });
+  return { uploaded, notes: notes.map((note) => deps.redactor.redact(note)) };
+};
+
+const publish = async (ctx: RunContext, deps: PipelineDeps, session: Session, stored: BrainResult, sha: string, artifactsDir: string): Promise<JobOutcome> => {
+  const { tracker, config, codehost } = deps;
+  const result = redactResult(stored, deps.redactor);
   try {
+    const { uploaded, notes } = await uploadAttachments(deps, artifactsDir, result);
+    const section = buildEnrichmentSection(result, uploaded, notes, {
+      now: deps.now(),
+      sha,
+      branch: config.workspace.baseBranch,
+      jobId: ctx.jobId,
+      permalink: (path, line) => codehost.permalink(path, sha, line),
+    });
     const current = await tracker.readDescription(ctx.issueId);
     patchAttempt(ctx, deps, { preWriteDescription: current });
     await tracker.writeDescription(ctx.issueId, replaceSection(current, section));
@@ -233,7 +248,7 @@ const execute = async (ctx: RunContext, deps: PipelineDeps, session: Session, on
   try {
     prepared = await prepare(ctx, deps, session, paths, env, onWorktree);
   } catch (err) {
-    return { status: "failed", error: errorMessage(err), retryable: true };
+    return { status: "failed", error: deps.signal?.aborted === true ? INTERRUPTED_ERROR : errorMessage(err), retryable: true };
   }
   const { worktree, prompt } = prepared;
   if (session.id !== null) {
@@ -247,12 +262,14 @@ const execute = async (ctx: RunContext, deps: PipelineDeps, session: Session, on
   }
   let run: BrainRun;
   try {
-    run = await (deps.runBrain ?? runBrainDetached)(config.brain, brainInput(deps, paths, worktree, prompt, env), deps.redactor);
+    run = await (deps.runBrain ?? runBrainDetached)(config.brain, brainInput(deps, paths, worktree, prompt, env), deps.redactor, {
+      ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+    });
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: false };
   }
   patchAttempt(ctx, deps, { transcriptPath: paths.transcriptPath, ...(run.usage === undefined ? {} : { usage: run.usage }) });
-  if (!run.ok) return { status: "failed", error: run.error ?? "brain run failed", retryable: false };
+  if (!run.ok) return { status: "failed", error: run.error ?? "brain run failed", retryable: run.error === INTERRUPTED_ERROR };
   const validated = validateResult(run.output);
   if (!validated.ok) return { status: "failed", error: validated.error, retryable: false };
   if (!ctx.dryRun) deps.stores.jobs.saveResult(ctx.jobId, validated.result, worktree.sha);
@@ -265,12 +282,17 @@ const reportTerminalFailure = async (deps: PipelineDeps, session: Session, outco
   await attempt("error", () => deps.tracker.agentSession.error(sessionId, `Enrichment failed: ${firstLine(outcome.error)}`));
 };
 
+const crashed = (err: unknown): JobOutcome => ({ status: "failed", error: errorMessage(err), retryable: false });
+
 export const runJob = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   const session = resolveSession(ctx, deps);
   const workspace: { worktree: Worktree | null } = { worktree: null };
-  const outcome = await execute(ctx, deps, session, (created) => {
-    workspace.worktree = created;
-  });
+  const outcome = redactOutcome(
+    await execute(ctx, deps, session, (created) => {
+      workspace.worktree = created;
+    }).catch(crashed),
+    deps.redactor,
+  );
   await cleanup(deps, workspace.worktree, outcome);
   await reportTerminalFailure(deps, session, outcome);
   return outcome;
