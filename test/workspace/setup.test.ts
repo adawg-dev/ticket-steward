@@ -47,6 +47,26 @@ describe("runSetup", () => {
     expect(result.tail).toBe("$ sleep 5\n[timed out]\n");
   });
 
+  it("shares one deadline across all commands", async () => {
+    const started = Date.now();
+
+    const result = await runSetup(["sleep 0.7", "sleep 5"], cwd, env, { timeoutMs: 1_000, tailBytes: 16_384 });
+
+    expect(result.ok).toBe(false);
+    expect(result.tail).toBe("$ sleep 0.7\n$ sleep 5\n[timed out]\n");
+    expect(Date.now() - started).toBeLessThan(1_500);
+  });
+
+  it("returns ok false with an interrupted marker when the signal aborts", async () => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 200);
+
+    const result = await runSetup(["sleep 5", "echo never > never.txt"], cwd, env, { timeoutMs: 10_000, tailBytes: 16_384, signal: controller.signal });
+
+    expect(result).toEqual({ ok: false, tail: "$ sleep 5\n[interrupted]\n" });
+    await expect(readFile(join(cwd, "never.txt"), "utf8")).rejects.toThrow();
+  });
+
   it("caps the tail to the last tailBytes bytes", async () => {
     const result = await runSetup(["printf abcdefghij"], cwd, env, { timeoutMs: 10_000, tailBytes: 4 });
 

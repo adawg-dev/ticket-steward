@@ -1,8 +1,9 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readdir, utimes, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 
-import { isPortFree, sweep } from "../../src/workspace/index.js";
+import { freePort, isPortFree, sweep } from "../../src/workspace/index.js";
 import { removeDir, tmpDir } from "./helpers.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -80,6 +81,36 @@ describe("sweep", () => {
     const result = await sweep({ workRoot: join(root, "nope"), jobsDir: join(root, "nada"), keptWorktrees: 3, days: 30, protect: [] });
 
     expect(result).toEqual({ removedWorktrees: [], removedJobDirs: [] });
+  });
+});
+
+/** A separate node process that listens on `port` and prints `ready` once bound. */
+const listenInChild = (port: number): Promise<ChildProcess> =>
+  new Promise((resolve) => {
+    const child = spawn(process.execPath, ["-e", `require("node:net").createServer().listen(${port}, "127.0.0.1", () => process.stdout.write("ready"))`], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    child.stdout?.once("data", () => resolve(child));
+  });
+
+describe("freePort", () => {
+  it("kills the process holding the port and reports its pid", async () => {
+    const probe = await listen(0);
+    await probe.close();
+    const holder = await listenInChild(probe.port);
+    expect(await isPortFree(probe.port)).toBe(false);
+
+    const result = await freePort(probe.port);
+
+    expect(result).toEqual({ killed: [holder.pid] });
+    await vi.waitFor(async () => expect(await isPortFree(probe.port)).toBe(true));
+  });
+
+  it("reports nothing killed for a free port", async () => {
+    const probe = await listen(0);
+    await probe.close();
+
+    expect(await freePort(probe.port)).toEqual({ killed: [] });
   });
 });
 

@@ -1,7 +1,11 @@
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { Mirror, injectToken } from "../../src/workspace/index.js";
-import { commitFile, makeSourceRepo, removeDir, tmpDir } from "./helpers.js";
+import { Mirror, createWorktree, injectToken } from "../../src/workspace/index.js";
+import { commitFile, git, makeSourceRepo, removeDir, serveGitHttp, tmpDir } from "./helpers.js";
+
+const TOKEN = "glpat-SECRET";
+const basicAuth = `Basic ${Buffer.from(`oauth2:${TOKEN}`).toString("base64")}`;
 
 describe("Mirror", () => {
   let root: string;
@@ -41,6 +45,35 @@ describe("Mirror", () => {
     await mirror.fetch();
 
     expect(await mirror.resolveSha("main")).toBe(next);
+  });
+
+  it("init creates the mirror and its parent directories with mode 0700", async () => {
+    const { repo } = await makeSourceRepo(root);
+    const mirrorPath = join(root, "data", "repo.git");
+
+    await Mirror.init(mirrorPath, repo);
+
+    expect((await stat(join(root, "data"))).mode & 0o777).toBe(0o700);
+    expect((await stat(mirrorPath)).mode & 0o777).toBe(0o700);
+  });
+
+  it("authenticates clone and fetch with the token but never writes it into the mirror or worktree config", async () => {
+    const { sha } = await makeSourceRepo(root);
+    const server = await serveGitHttp(root);
+    const plainUrl = `${server.url}/source`;
+    const mirrorPath = join(root, "repo.git");
+
+    const mirror = await Mirror.init(mirrorPath, injectToken(plainUrl, TOKEN));
+    await mirror.fetch();
+    const worktree = await createWorktree(mirror, join(root, "work"), "1-1", sha);
+
+    expect(await mirror.resolveSha("main")).toBe(sha);
+    expect(await git(mirrorPath, ["config", "--get", "remote.origin.url"])).toBe(plainUrl);
+    expect(await git(worktree.path, ["config", "--get", "remote.origin.url"])).toBe(plainUrl);
+    expect(await git(mirrorPath, ["config", "--list"])).not.toContain(TOKEN);
+    expect(server.authorizations.length).toBeGreaterThan(0);
+    expect(new Set(server.authorizations)).toEqual(new Set([basicAuth]));
+    await server.close();
   });
 });
 
