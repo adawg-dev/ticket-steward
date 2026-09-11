@@ -1,8 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync, unlinkSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireRunLock } from "../../src/core/lock.js";
+
+vi.mock("node:fs", { spy: true });
 
 let dataDir: string;
 
@@ -48,6 +51,22 @@ describe("acquireRunLock", () => {
     await writeFile(join(dataDir, "run.lock"), "garbage");
     const lock = acquireRunLock(dataDir);
     expect(lock).not.toBeNull();
+    lock?.release();
+  });
+
+  it("still acquires when another process removes the stale lock between the read and the unlink", async () => {
+    const exited = spawnSync(process.execPath, ["-e", "0"]);
+    const lockPath = join(dataDir, "run.lock");
+    await writeFile(lockPath, String(exited.pid));
+    vi.mocked(readFileSync).mockImplementationOnce(() => {
+      unlinkSync(lockPath);
+      return String(exited.pid);
+    });
+
+    const lock = acquireRunLock(dataDir);
+
+    expect(lock).not.toBeNull();
+    expect(readFileSync(lockPath, "utf8")).toBe(String(process.pid));
     lock?.release();
   });
 });

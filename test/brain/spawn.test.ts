@@ -1,8 +1,9 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { FakeBrainPids } from "../../src/brain/fake.js";
 import { runBrainDetached } from "../../src/brain/spawn.js";
-import type { BrainInput } from "../../src/brain/types.js";
+import { INTERRUPTED_ERROR, type BrainInput } from "../../src/brain/types.js";
 import type { BrainConfig } from "../../src/config/schema.js";
 import { Redactor } from "../../src/core/redact.js";
 
@@ -27,6 +28,19 @@ const input = (overrides: Partial<BrainInput>): BrainInput => ({
 
 const pidIsGone = (pid: number) => expect(() => process.kill(pid, 0)).toThrow();
 
+/** The fake brain's second transcript line carries its runner pid and the pid of the `sleep` it spawned. */
+const transcriptPids = async (transcriptPath: string): Promise<FakeBrainPids> => {
+  const [, pids] = (await readFile(transcriptPath, "utf8")).trim().split("\n");
+  return JSON.parse(pids ?? "") as FakeBrainPids;
+};
+
+const pidsAreGone = async (transcriptPath: string): Promise<void> => {
+  const { runnerPid, sleepPid } = await transcriptPids(transcriptPath);
+  expect(typeof sleepPid).toBe("number");
+  await vi.waitFor(() => pidIsGone(runnerPid));
+  await vi.waitFor(() => pidIsGone(sleepPid ?? -1));
+};
+
 describe("runBrainDetached", () => {
   beforeEach(async () => {
     vi.restoreAllMocks();
@@ -45,8 +59,27 @@ describe("runBrainDetached", () => {
     await vi.waitFor(() => pidIsGone(sleepPid));
   });
 
-  it("returns ok:false on timeout", async () => {
-    const run = await runBrainDetached(fakeBrain, input({ prompt: "hang forever", timeoutMs: 500 }), new Redactor([]));
+  it("returns ok:false on timeout and kills the runner and its children", async () => {
+    const brainInput = input({ prompt: "hang forever", timeoutMs: 5_000 });
+    const run = await runBrainDetached(fakeBrain, brainInput, new Redactor([]));
+    expect(run.ok).toBe(false);
+    expect(run.output).toBeUndefined();
+    await pidsAreGone(brainInput.transcriptPath);
+  });
+
+  it("settles as interrupted and kills the process group when the signal aborts", async () => {
+    const brainInput = input({ prompt: "hang forever" });
+    const controller = new AbortController();
+    const running = runBrainDetached(fakeBrain, brainInput, new Redactor([]), { signal: controller.signal });
+    await vi.waitFor(() => transcriptPids(brainInput.transcriptPath), { timeout: 15_000 });
+    controller.abort();
+    const run = await running;
+    expect(run).toEqual({ ok: false, output: undefined, error: INTERRUPTED_ERROR });
+    await pidsAreGone(brainInput.transcriptPath);
+  });
+
+  it("returns ok:false when the runner exits before reporting a result", async () => {
+    const run = await runBrainDetached(fakeBrain, input({ prompt: "crash now" }), new Redactor([]));
     expect(run.ok).toBe(false);
     expect(run.output).toBeUndefined();
   });
@@ -54,7 +87,12 @@ describe("runBrainDetached", () => {
   it("writes redacted lines to the transcript", async () => {
     const brainInput = input({});
     await runBrainDetached(fakeBrain, brainInput, new Redactor([SECRET]));
-    const transcript = await readFile(brainInput.transcriptPath, "utf8");
-    expect(transcript).toBe(`${JSON.stringify({ type: "fake", prompt: "investigate ***" })}\n`);
+    const [first] = (await readFile(brainInput.transcriptPath, "utf8")).split("\n");
+    expect(first).toBe(JSON.stringify({ type: "fake", prompt: "investigate ***" }));
+  });
+
+  it("still settles the run when the transcript cannot be written", async () => {
+    const run = await runBrainDetached(fakeBrain, input({ transcriptPath: "/dev/full" }), new Redactor([]));
+    expect(run.ok).toBe(true);
   });
 });

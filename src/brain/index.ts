@@ -5,6 +5,7 @@ import { createOpenAiAgentsBrain } from "./openaiAgents.js";
 import type { Brain } from "./types.js";
 
 export type { Brain, BrainInput, BrainRun, BrainUsage, McpServerSpec, BrainKind } from "./types.js";
+export { INTERRUPTED_ERROR } from "./types.js";
 export { buildBrainEnv } from "./env.js";
 export { evaluateTool } from "./policy.js";
 export type { PolicyDecision } from "./policy.js";

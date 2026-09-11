@@ -1,10 +1,14 @@
-import { query, type HookCallback, type McpServerConfig, type Options, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type HookCallback, type McpServerConfig, type Options, type SDKMessage, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 import { brainResultJsonSchema } from "../core/result.js";
 import { evaluateTool } from "./policy.js";
 import type { Brain, BrainInput, BrainUsage, OnMessage } from "./types.js";
 
 const ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*"];
+const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
 const FOLLOW_UP_PROMPT = "Stop investigating and emit the final structured result now.";
+
+/** The SDK's `query`, narrowed to what the brain consumes so tests can substitute an async generator. */
+export type QueryImpl = (p: { prompt: string; options: Options }) => AsyncIterable<SDKMessage>;
 
 const policyHook = (input: BrainInput): HookCallback => async (hookInput) => {
   if (hookInput.hook_event_name !== "PreToolUse") return {};
@@ -30,10 +34,10 @@ const usageOf = (result: SDKResultMessage): BrainUsage => ({
   costUsd: result.total_cost_usd,
 });
 
-const consume = async (prompt: string, options: Options, onMessage: OnMessage): Promise<SDKResultMessage | null> => {
+const consume = async (queryImpl: QueryImpl, prompt: string, options: Options, onMessage: OnMessage): Promise<SDKResultMessage | null> => {
   let result: SDKResultMessage | null = null;
   try {
-    for await (const message of query({ prompt, options })) {
+    for await (const message of queryImpl({ prompt, options })) {
       onMessage(JSON.stringify(message));
       if (message.type === "result") result = message;
     }
@@ -43,38 +47,41 @@ const consume = async (prompt: string, options: Options, onMessage: OnMessage): 
   return result;
 };
 
-export const createClaudeCodeBrain = (): Brain => ({
-  kind: "claude-code",
-  run: async (input, onMessage) => {
-    const abortController = new AbortController();
-    const timer = setTimeout(() => abortController.abort(), input.timeoutMs);
-    const options: Options = {
-      cwd: input.workspacePath,
-      maxTurns: input.maxTurns,
-      model: input.model,
-      permissionMode: "acceptEdits",
-      allowedTools: ALLOWED_TOOLS,
-      settingSources: ["project"],
-      mcpServers: mcpServers(input),
-      outputFormat: { type: "json_schema", schema: brainResultJsonSchema },
-      hooks: { PreToolUse: [{ matcher: "Bash|Edit|Write|MultiEdit", hooks: [policyHook(input)] }] },
-      abortController,
-    };
-    try {
-      let result = await consume(input.prompt, options, onMessage);
-      if (result?.subtype === "error_max_turns") {
-        result = await consume(FOLLOW_UP_PROMPT, { ...options, resume: result.session_id, maxTurns: 2 }, onMessage);
+export const createClaudeCodeBrain = (deps: { queryImpl?: QueryImpl } = {}): Brain => {
+  const queryImpl = deps.queryImpl ?? query;
+  return {
+    kind: "claude-code",
+    run: async (input, onMessage) => {
+      const abortController = new AbortController();
+      const timer = setTimeout(() => abortController.abort(), input.timeoutMs);
+      const options: Options = {
+        cwd: input.workspacePath,
+        maxTurns: input.maxTurns,
+        model: input.model,
+        permissionMode: "acceptEdits",
+        allowedTools: ALLOWED_TOOLS,
+        settingSources: ["project"],
+        mcpServers: mcpServers(input),
+        outputFormat: { type: "json_schema", schema: brainResultJsonSchema },
+        hooks: { PreToolUse: [{ matcher: POLICY_HOOK_MATCHER, hooks: [policyHook(input)] }] },
+        abortController,
+      };
+      try {
+        let result = await consume(queryImpl, input.prompt, options, onMessage);
+        if (result?.subtype === "error_max_turns") {
+          result = await consume(queryImpl, FOLLOW_UP_PROMPT, { ...options, resume: result.session_id, maxTurns: 2 }, onMessage);
+        }
+        if (result === null) return { ok: false, output: undefined, error: "brain produced no result message" };
+        if (result.subtype !== "success") return { ok: false, output: undefined, usage: usageOf(result), error: result.subtype };
+        if (result.structured_output === undefined) {
+          return { ok: false, output: undefined, usage: usageOf(result), error: "brain finished without structured output" };
+        }
+        return { ok: true, output: result.structured_output, usage: usageOf(result) };
+      } catch (err) {
+        return { ok: false, output: undefined, error: err instanceof Error ? err.message : String(err) };
+      } finally {
+        clearTimeout(timer);
       }
-      if (result === null) return { ok: false, output: undefined, error: "brain produced no result message" };
-      if (result.subtype !== "success") return { ok: false, output: undefined, usage: usageOf(result), error: result.subtype };
-      if (result.structured_output === undefined) {
-        return { ok: false, output: undefined, usage: usageOf(result), error: "brain finished without structured output" };
-      }
-      return { ok: true, output: result.structured_output, usage: usageOf(result) };
-    } catch (err) {
-      return { ok: false, output: undefined, error: err instanceof Error ? err.message : String(err) };
-    } finally {
-      clearTimeout(timer);
-    }
-  },
-});
+    },
+  };
+};

@@ -37,6 +37,10 @@ export const acquireRunLock = (dataDir: string): { release: () => void } | null 
   if (lock !== null) return lock;
   const holder = readHolderPid(lockPath);
   if (!Number.isNaN(holder) && isAlive(holder)) return null;
-  unlinkSync(lockPath);
+  try {
+    unlinkSync(lockPath);
+  } catch {
+    // another process cleared the stale lock first; tryCreate below decides who won
+  }
   return tryCreate(lockPath);
 };

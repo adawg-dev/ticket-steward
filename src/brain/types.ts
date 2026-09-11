@@ -32,6 +32,9 @@ export interface BrainRun {
   error?: string;
 }
 
+/** `BrainRun.error` when the run was aborted through the caller's AbortSignal. */
+export const INTERRUPTED_ERROR = "interrupted";
+
 export type BrainKind = BrainConfig["kind"];
 
 export interface Brain {
