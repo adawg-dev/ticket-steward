@@ -447,3 +447,10 @@ Commands and behaviors exactly §9. `doctor` prints one line per check `[ok]`/`[
 - Retries: retryable/publish_failed outcomes are recorded via `jobs.finish`, then an in-process backoff timer re-claims with `claimById`; a restart during backoff leaves the job `failed`/`publish_failed` for `jobs retry`.
 - OAuth callback stores the pair with `appUserId` and clears `auth_broken`.
 - Suite: 38 files, 255 tests.
+
+### Level 3 complete (T11) and final review
+
+- CLI landed (28 files, 23 tests); `init [dir]`, `jobs retry` requeues under `serve` else runs inline, doctor has 18 checks.
+- Final four-lens review (runtime, security, spec conformance, test quality) produced 35 findings; 32 confirmed by adversarial verification and fixed in eight commits. Highlights: mirror token no longer persisted in git config (sent as a per-process `extraHeader`), codehost token no longer on the claude argv, policy resolves relative paths and guards read tools, `.env` dir added to denyPaths, retries persisted as `queued` + `not_before`, SIGTERM aborts the brain and requeues, `runJob` cleans up on every path, dry-run takes the run lock and enforces the allowlist, redactor seeded with the Linear token pair, attempts stay open until the run ends.
+- Final state: 49 test files, 336 tests passing, 3 env-gated live tests skipped; `pnpm typecheck`, `pnpm lint`, `pnpm build` clean; CLI smoke test (init → mirror init → doctor) verified against a temporary repo.
+- Known gaps: `acquireRunLock` stale takeover narrowed but not fully atomic; live tests for Linear and both brains still need credentials (`STEWARD_LIVE_LINEAR=1`, `STEWARD_LIVE_BRAIN=1`).
