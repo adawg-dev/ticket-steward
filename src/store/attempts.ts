@@ -51,6 +51,11 @@ const PATCH_COLUMNS: Record<keyof AttemptPatch, string> = {
 
 const isPatchKey = (key: string): key is keyof AttemptPatch => key in PATCH_COLUMNS;
 
+const columnValues = (patch: AttemptPatch): Array<[string, string | null]> =>
+  Object.keys(patch)
+    .filter(isPatchKey)
+    .map((key) => [PATCH_COLUMNS[key], key === "usage" ? JSON.stringify(patch.usage) : (patch[key] ?? null)]);
+
 export class AttemptStore {
   private readonly insert;
   private readonly selectByJob;
@@ -69,13 +74,18 @@ export class AttemptStore {
     return toAttempt(row);
   }
 
+  /** Records mid-run details without closing the attempt. */
+  patch(id: number, patch: AttemptPatch): void {
+    this.update(id, columnValues(patch));
+  }
+
   finish(id: number, patch: AttemptPatch): void {
-    const keys = Object.keys(patch).filter(isPatchKey);
-    const assignments = keys.map((key) => `${PATCH_COLUMNS[key]} = ?`);
-    const values = keys.map((key) => (key === "usage" ? JSON.stringify(patch.usage) : patch[key] ?? null));
-    this.db
-      .prepare(`UPDATE attempts SET ${["finished_at = ?", ...assignments].join(", ")} WHERE id = ?`)
-      .run(nowIso(), ...values, id);
+    this.update(id, [["finished_at", nowIso()], ...columnValues(patch)]);
+  }
+
+  private update(id: number, columns: Array<[string, string | null]>): void {
+    if (columns.length === 0) return;
+    this.db.prepare(`UPDATE attempts SET ${columns.map(([column]) => `${column} = ?`).join(", ")} WHERE id = ?`).run(...columns.map(([, value]) => value), id);
   }
 
   forJob(jobId: number): Attempt[] {

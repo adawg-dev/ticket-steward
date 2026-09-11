@@ -60,6 +60,18 @@ describe("AttemptStore", () => {
     expect(attempts[1]?.usage).toEqual({ inputTokens: 10, outputTokens: 5, costUsd: 0.01 });
   });
 
+  it("patch records details without closing the attempt", () => {
+    const jobId = stores.jobs.enqueue(createdEvent);
+    const attempt = stores.attempts.start(jobId);
+
+    stores.attempts.patch(attempt.id, { transcriptPath: "/data/jobs/1/attempt-1.jsonl", setupTail: "pnpm install ok" });
+
+    const [stored] = stores.attempts.forJob(jobId);
+    expect(stored?.finishedAt).toBeNull();
+    expect(stored?.transcriptPath).toBe("/data/jobs/1/attempt-1.jsonl");
+    expect(stored?.setupTail).toBe("pnpm install ok");
+  });
+
   it("finish with an empty patch only sets finishedAt", () => {
     const jobId = stores.jobs.enqueue(createdEvent);
     const attempt = stores.attempts.start(jobId);

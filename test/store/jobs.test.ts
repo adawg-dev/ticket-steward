@@ -1,3 +1,4 @@
+import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import { brainResult, createdEvent, freshDataDir, sessionEvent } from "./helpers.js";
 
@@ -32,6 +33,7 @@ describe("JobStore", () => {
     expect(job?.error).toBeNull();
     expect(job?.startedAt).toBeNull();
     expect(job?.finishedAt).toBeNull();
+    expect(job?.notBefore).toBeNull();
   });
 
   it("claimNext returns the oldest queued job and marks it running", () => {
@@ -102,6 +104,61 @@ describe("JobStore", () => {
     expect(job?.resultSha).toBe("1a2b3c4");
   });
 
+  it("scheduleRetry keeps the job queued but hidden from claimNext until not_before", () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimNext();
+
+    stores.jobs.scheduleRetry(id, new Date(Date.now() + 60_000), "mirror fetch failed");
+
+    const job = stores.jobs.get(id);
+    expect(job?.status).toBe("queued");
+    expect(job?.error).toBe("mirror fetch failed");
+    expect(job?.finishedAt).toBeNull();
+    expect(job?.notBefore).toEqual(expect.any(String));
+    expect(stores.jobs.findQueued("issue-1")?.id).toBe(id);
+    expect(stores.jobs.claimNext()).toBeNull();
+  });
+
+  it("claimNext claims a scheduled retry once not_before has passed", () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimNext();
+    stores.jobs.scheduleRetry(id, new Date(Date.now() - 1_000), "mirror fetch failed");
+
+    const claimed = stores.jobs.claimNext();
+
+    expect(claimed?.id).toBe(id);
+    expect(claimed?.attempts).toBe(2);
+  });
+
+  it("requeue puts a finished job back in the queue and refuses a running one", () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimNext();
+    stores.jobs.finish(id, { status: "publish_failed", error: "linear 500" });
+
+    expect(stores.jobs.requeue(id)).toBe(true);
+
+    const job = stores.jobs.get(id);
+    expect(job?.status).toBe("queued");
+    expect(job?.finishedAt).toBeNull();
+    expect(job?.notBefore).toBeNull();
+    expect(stores.jobs.claimNext()?.id).toBe(id);
+    expect(stores.jobs.requeue(id)).toBe(false);
+    expect(stores.jobs.requeue(999)).toBe(false);
+  });
+
+  it("requeueInterrupted closes the dangling attempt of a running job", () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimNext();
+    stores.attempts.start(id);
+
+    stores.jobs.requeueInterrupted(3);
+
+    const [attempt] = stores.attempts.forJob(id);
+    expect(attempt?.finishedAt).toEqual(expect.any(String));
+    expect(attempt?.error).toBe(INTERRUPTED_ERROR);
+    expect(stores.jobs.get(id)?.status).toBe("queued");
+  });
+
   it("requeueInterrupted requeues running jobs under the attempt limit and fails the rest", () => {
     const fresh = stores.jobs.enqueue(createdEvent);
     const exhausted = stores.jobs.enqueue(sessionEvent);
@@ -118,7 +175,7 @@ describe("JobStore", () => {
     expect(outcome).toEqual({ requeued: 1, failed: 1 });
     expect(stores.jobs.get(fresh)?.status).toBe("queued");
     expect(stores.jobs.get(exhausted)?.status).toBe("failed");
-    expect(stores.jobs.get(exhausted)?.error).toBe("interrupted");
+    expect(stores.jobs.get(exhausted)?.error).toBe(INTERRUPTED_ERROR);
   });
 
   it("list filters by status and returns newest first within the limit", () => {

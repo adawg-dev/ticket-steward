@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import BetterSqlite3 from "better-sqlite3";
+import { z } from "zod";
 
 export type Database = BetterSqlite3.Database;
 
@@ -20,7 +21,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   error TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
-  finished_at TEXT
+  finished_at TEXT,
+  not_before TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_issue_status ON jobs (issue_id, status);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status);
@@ -63,6 +65,18 @@ CREATE TABLE IF NOT EXISTS flags (
 );
 `;
 
+/** Columns added after the first release; applied to databases created before them. */
+const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }> = [{ table: "jobs", column: "not_before", definition: "TEXT" }];
+
+const TableInfo = z.array(z.object({ name: z.string() }));
+
+const addMissingColumns = (db: Database): void => {
+  for (const { table, column, definition } of ADDED_COLUMNS) {
+    const present = TableInfo.parse(db.pragma(`table_info(${table})`)).some((row) => row.name === column);
+    if (!present) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+};
+
 export const DB_FILENAME = "steward.db";
 
 export const openDatabase = (dataDir: string): Database => {
@@ -73,6 +87,7 @@ export const openDatabase = (dataDir: string): Database => {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.exec(MIGRATIONS);
+  addMissingColumns(db);
   return db;
 };
 
