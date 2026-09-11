@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { INTERRUPTED_ERROR, runBrainDetached } from "../../src/brain/index.js";
 import type { FakeBrainPids } from "../../src/brain/fake.js";
+import type { BrainInput, BrainRun } from "../../src/brain/types.js";
 import type { BrainConfig, StewardConfig } from "../../src/config/schema.js";
 import { runJob, publishOnly, type PipelineDeps } from "../../src/core/pipeline.js";
 import { Redactor } from "../../src/core/redact.js";
@@ -132,13 +133,10 @@ const makeDeps = (
 /** The in-repo fake brain kind, run through the real detached runner (it only activates under NODE_ENV=test). */
 const fakeBrainConfig = { kind: "fake", model: "fake", maxTurns: 1, timeoutMinutes: 1 } as unknown as BrainConfig;
 
-const detachedDeps = (config: StewardConfig): PipelineDeps => {
-  const { runBrain: _ignored, ...deps } = makeDeps(brainWith(), { config: { ...config, brain: fakeBrainConfig } });
-  return {
-    ...deps,
-    runBrain: (brain, input, redactor, opts) => runBrainDetached(brain, { ...input, env: { ...input.env, NODE_ENV: "test" } }, redactor, opts),
-  };
-};
+const detachedDeps = (config: StewardConfig): PipelineDeps => ({
+  ...makeDeps(brainWith(), { config: { ...config, brain: fakeBrainConfig } }),
+  runBrain: (brain, input, redactor, opts) => runBrainDetached(brain, { ...input, env: { ...input.env, NODE_ENV: "test" } }, redactor, opts),
+});
 
 const claimJob = (trigger: TriggerEvent): RunContext => {
   const jobId = stores.jobs.enqueue(trigger);

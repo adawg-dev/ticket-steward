@@ -33,6 +33,16 @@ describe("Redactor", () => {
     expect(redactor.redact("postgres://steward:hunter22@db.local:5432/app")).toBe("postgres://***:***@db.local:5432/app");
   });
 
+  it("consults a secret provider on every call", () => {
+    const secrets: string[] = [];
+    const redactor = new Redactor(() => secrets);
+    expect(redactor.redact("token=rotated-token-value")).toBe("token=rotated-token-value");
+
+    secrets.push("rotated-token-value");
+
+    expect(redactor.redact("token=rotated-token-value")).toBe("token=***");
+  });
+
   it("escapes regex characters in known values", () => {
     const redactor = new Redactor(["a.b+c(d)e"]);
     expect(redactor.redact("value a.b+c(d)e and aXb+c(d)e")).toBe("value *** and aXb+c(d)e");

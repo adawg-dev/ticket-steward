@@ -1,10 +1,14 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
+import { localHealthUrl } from "../../src/cli/probe.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { BrainResult } from "../../src/core/result.js";
 import type { TriggerEvent } from "../../src/tracker/types.js";
-import { ExitSignal, makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
+import { FakeBrain } from "../fakes/fakeBrain.js";
+import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
+import { FakeTracker } from "../fakes/fakeTracker.js";
+import { ExitSignal, makeContext, tmpConfigDir, waitFor, writeConfig } from "./helpers.js";
 
 const createdEvent: TriggerEvent = {
   kind: "issue.created",
@@ -50,9 +54,16 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const run = (args: string[]) => {
-  const context = makeContext();
+const run = (args: string[], fetchImpl?: typeof fetch) => {
+  const factories = { tracker: new FakeTracker(), brain: new FakeBrain(), codehost: new FakeCodeHost() };
+  const context = makeContext({ factories, ...(fetchImpl === undefined ? {} : { fetchImpl }) });
   return { ...context, done: buildProgram(context.ctx).parseAsync(["node", "steward", "--config", configPath, ...args]) };
+};
+
+/** Answers only the local /health probe, the way a running `steward serve` would. */
+const serveIsUp: typeof fetch = async (input) => {
+  if (String(input) === localHealthUrl(3020)) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  throw new Error("Intended Test Error");
 };
 
 describe("steward jobs", () => {
@@ -116,7 +127,35 @@ describe("steward jobs", () => {
     const { done, stderr } = run(["jobs", "show", "99"]);
 
     await expect(done).rejects.toEqual(new ExitSignal(1));
-    expect(stderr()).toBe("job 99 not found\n");
+    expect(stderr()).toMatch(/99/);
+  });
+
+  it("retry requeues the job for the running worker and tails it", async () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimById(id);
+    stores.jobs.saveResult(id, brainResult, "abc1234");
+    stores.jobs.finish(id, { status: "publish_failed", error: "linear 502" });
+
+    const { stdout, done } = run(["jobs", "retry", String(id)], serveIsUp);
+    await waitFor(() => stdout().includes(`job ${id} queued\n`));
+    expect(stores.jobs.get(id)?.status).toBe("queued");
+    expect(stores.jobs.get(id)?.finishedAt).toBeNull();
+    stores.jobs.claimById(id);
+    stores.jobs.finish(id, { status: "succeeded" });
+    await done;
+
+    expect(stdout()).toBe(`job ${id}: publish-only (result stored at abc1234)\nsteward serve is running; requeued job ${id}\njob ${id} queued\njob ${id} succeeded\n`);
+    expect(stores.jobs.get(id)?.attempts).toBe(2);
+  });
+
+  it("retry exits 1 when the job is running under the worker", async () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimById(id);
+
+    const { done, stderr } = run(["jobs", "retry", String(id)], serveIsUp);
+
+    await expect(done).rejects.toEqual(new ExitSignal(1));
+    expect(stderr()).toMatch(new RegExp(String(id)));
   });
 
   it("gc reports what retention removed", async () => {

@@ -15,18 +15,22 @@ const DB_URL_CREDENTIALS = /(postgres(?:ql)?:\/\/)[^\s:/@]+:[^\s@]+@/g;
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-export class Redactor {
-  private readonly known: RegExp | null;
+const knownPattern = (knownSecrets: string[]): RegExp | null => {
+  const values = [...new Set(knownSecrets.filter((value) => value.length >= MIN_SECRET_LENGTH))].sort((a, b) => b.length - a.length);
+  return values.length === 0 ? null : new RegExp(values.map(escapeRegExp).join("|"), "g");
+};
 
-  constructor(knownSecrets: string[]) {
-    const values = [...new Set(knownSecrets.filter((value) => value.length >= MIN_SECRET_LENGTH))].sort(
-      (a, b) => b.length - a.length,
-    );
-    this.known = values.length === 0 ? null : new RegExp(values.map(escapeRegExp).join("|"), "g");
+export class Redactor {
+  private readonly secrets: () => string[];
+
+  /** A provider is consulted on every `redact()` call, so rotated values (e.g. the Linear token pair) are covered. */
+  constructor(knownSecrets: string[] | (() => string[])) {
+    this.secrets = typeof knownSecrets === "function" ? knownSecrets : () => knownSecrets;
   }
 
   redact(text: string): string {
-    const withoutKnown = this.known === null ? text : text.replace(this.known, MASK);
+    const known = knownPattern(this.secrets());
+    const withoutKnown = known === null ? text : text.replace(known, MASK);
     const withoutTokens = TOKEN_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, MASK), withoutKnown);
     return withoutTokens.replace(DB_URL_CREDENTIALS, `$1${MASK}:${MASK}@`);
   }

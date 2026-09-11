@@ -33,7 +33,7 @@ interface Check {
 const HEALTH_TIMEOUT_MS = 3_000;
 const MCP_TIMEOUT_MS = 10_000;
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
-const PLAYWRIGHT_CACHE = join(homedir(), ".cache", "ms-playwright");
+const playwrightBrowsersPath = (): string => process.env.PLAYWRIGHT_BROWSERS_PATH ?? join(homedir(), ".cache", "ms-playwright");
 const SENSITIVE_HOME_DIRS = [".ssh", ".kube"];
 
 const ViewerResponse = z.object({ data: z.object({ viewer: z.object({ id: z.string() }) }) });
@@ -132,7 +132,7 @@ const linearChecks = (loaded: LoadedConfig, stores: () => Stores, ctx: CliContex
     name: "linear token",
     run: async () => {
       const { LINEAR_CLIENT_ID: clientId, LINEAR_CLIENT_SECRET: clientSecret } = loaded.secrets;
-      if (stores().tokens.get() === null) return warn("no token stored; run steward auth linear");
+      if (stores().tokens.get() === null) return flunk("no token stored; run steward auth linear");
       if (clientId === undefined || clientSecret === undefined) return warn("cannot validate without LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET");
       const token = await new LinearAuth(stores().tokens, { clientId, clientSecret }, ctx.fetchImpl).accessToken();
       const response = await ctx.fetchImpl(LINEAR_GRAPHQL_URL, {
@@ -165,7 +165,7 @@ const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
     {
       name: "codehost mcp",
       run: async () => {
-        const spec = codehostMcpSpec({ binPath, configPath, worktreePath: config.dataDir, sha: "HEAD" });
+        const spec = (ctx.factories?.codehostMcpSpec ?? codehostMcpSpec)({ binPath, configPath, worktreePath: config.dataDir, sha: "HEAD" });
         const client = new Client({ name: "steward-doctor", version: "0.1.0" });
         const transport = new StdioClientTransport({ command: spec.command, args: spec.args, env: spec.env, stderr: "pipe" });
         try {
@@ -184,9 +184,10 @@ const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
     {
       name: "chromium",
       run: async () => {
-        const entries = existsSync(PLAYWRIGHT_CACHE) ? await readdir(PLAYWRIGHT_CACHE) : [];
+        const browsers = playwrightBrowsersPath();
+        const entries = existsSync(browsers) ? await readdir(browsers) : [];
         const chromium = entries.filter((entry) => entry.startsWith("chromium"));
-        return chromium.length > 0 ? ok(`${PLAYWRIGHT_CACHE}/${chromium[0]}`) : warn(`no chromium under ${PLAYWRIGHT_CACHE}; run npx playwright install chromium`);
+        return chromium.length > 0 ? ok(join(browsers, chromium[0] ?? "")) : flunk(`no chromium under ${browsers}; run npx playwright install chromium`);
       },
     },
     {

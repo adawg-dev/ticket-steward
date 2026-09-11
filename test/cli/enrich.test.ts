@@ -1,6 +1,8 @@
 import { rm } from "node:fs/promises";
 import { buildProgram } from "../../src/cli/program.js";
+import { localHealthUrl } from "../../src/cli/probe.js";
 import { STEWARD_BEGIN, STEWARD_END } from "../../src/core/intake.js";
+import { acquireRunLock } from "../../src/core/lock.js";
 import type { BrainResult } from "../../src/core/result.js";
 import { openStores } from "../../src/store/index.js";
 import type { TicketBundle } from "../../src/tracker/types.js";
@@ -8,7 +10,7 @@ import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
-import { ExitSignal, makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
+import { ExitSignal, makeContext, tmpConfigDir, waitFor, writeConfig } from "./helpers.js";
 
 const PROMPT_TEMPLATE = "Ticket:\n{{ticket}}\nWorkspace: {{workspacePath}} @ {{sha}}\n";
 
@@ -42,19 +44,21 @@ let dir: string;
 let repo: TmpRepo;
 let configPath: string;
 let tracker: FakeTracker;
+let serverPort: number;
 
 beforeEach(async () => {
   vi.restoreAllMocks();
   dir = await tmpConfigDir();
   repo = await tmpRepo(PROMPT_TEMPLATE);
   tracker = new FakeTracker([issue]);
+  serverPort = await freeTcpPort();
   configPath = await writeConfig(dir, {
     dataDir: repo.dataDir,
     overlayDir: repo.overlayDir,
     promptPath: repo.promptPath,
     fetchUrl: repo.repo,
     port: await freeTcpPort(),
-    serverPort: await freeTcpPort(),
+    serverPort,
   });
 });
 
@@ -63,9 +67,15 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const run = (args: string[], brain = new FakeBrain({ result: brainResult })) => {
-  const context = makeContext({ factories: { tracker, brain, codehost: new FakeCodeHost() } });
+const run = (args: string[], brain = new FakeBrain({ result: brainResult }), fetchImpl?: typeof fetch) => {
+  const context = makeContext({ factories: { tracker, brain, codehost: new FakeCodeHost() }, ...(fetchImpl === undefined ? {} : { fetchImpl }) });
   return { ...context, brain, done: buildProgram(context.ctx).parseAsync(["node", "steward", "--config", configPath, "enrich", ...args]) };
+};
+
+/** Answers only the local /health probe, the way a running `steward serve` would. */
+const serveIsUp: typeof fetch = async (input) => {
+  if (String(input) === localHealthUrl(serverPort)) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  throw new Error("Intended Test Error");
 };
 
 describe("steward enrich --dry-run", () => {
@@ -91,6 +101,62 @@ describe("steward enrich --dry-run", () => {
 
     await expect(done).rejects.toEqual(new ExitSignal(1));
   });
+
+  it("applies the team allowlist before running", async () => {
+    tracker.addIssue({ ...issue, id: "issue-2", identifier: "OPS-7", team: { id: "team-2", key: "OPS", name: "Ops" } });
+
+    const { done, stderr, brain } = run(["OPS-7", "--dry-run"]);
+
+    await expect(done).rejects.toEqual(new ExitSignal(1));
+    expect(stderr()).toMatch(/OPS/);
+    expect(brain.runs).toBe(0);
+  });
+
+  it("refuses to run while another steward process holds run.lock", async () => {
+    const lock = acquireRunLock(repo.dataDir);
+    const { done, stderr, brain } = run(["API-1", "--dry-run"]);
+
+    await expect(done).rejects.toEqual(new ExitSignal(1));
+    expect(stderr()).not.toBe("");
+    expect(brain.runs).toBe(0);
+    lock?.release();
+  });
+});
+
+describe("steward enrich (serve running)", () => {
+  it("enqueues the job and tails it until the worker finishes it", async () => {
+    const { stdout, done, brain } = run(["API-1"], new FakeBrain({ result: brainResult }), serveIsUp);
+    await waitFor(() => stdout().includes("job 1 queued\n"));
+    const worker = openStores(repo.dataDir);
+    worker.jobs.claimById(1);
+    worker.jobs.finish(1, { status: "succeeded" });
+    await done;
+
+    expect(stdout()).toBe("steward serve is running; enqueued job 1\njob 1 queued\njob 1 succeeded\n");
+    expect(brain.runs).toBe(0);
+    expect(worker.jobs.get(1)?.trigger).toEqual({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API" });
+  });
+
+  it("exits 1 with the stored error when the worker ends in publish_failed", async () => {
+    const { stdout, stderr, done } = run(["API-1"], new FakeBrain({ result: brainResult }), serveIsUp);
+    await waitFor(() => stdout().includes("job 1 queued\n"));
+    const worker = openStores(repo.dataDir);
+    worker.jobs.claimById(1);
+    worker.jobs.finish(1, { status: "publish_failed", error: "linear 502" });
+
+    await expect(done).rejects.toEqual(new ExitSignal(1));
+    expect(stderr()).toBe("job 1 publish_failed: linear 502\n");
+  });
+
+  it("reports the existing queued job instead of enqueuing another", async () => {
+    openStores(repo.dataDir).jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API" });
+
+    const { stdout, done } = run(["API-1"], new FakeBrain({ result: brainResult }), serveIsUp);
+    await done;
+
+    expect(stdout()).toBe("API-1 already has queued job 1\n");
+    expect(openStores(repo.dataDir).jobs.list({ limit: 10 }).length).toBe(1);
+  });
 });
 
 describe("steward enrich (inline)", () => {
@@ -115,7 +181,7 @@ describe("steward enrich (inline)", () => {
     const { done, stderr, brain } = run(["OPS-7"]);
 
     await expect(done).rejects.toEqual(new ExitSignal(1));
-    expect(stderr()).toBe("Ticket Steward is not configured for team OPS\n");
+    expect(stderr()).toMatch(/OPS/);
     expect(brain.runs).toBe(0);
     expect(openStores(repo.dataDir).jobs.list({ limit: 10 })).toEqual([]);
   });

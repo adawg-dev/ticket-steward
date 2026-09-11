@@ -4,11 +4,13 @@ import type { Command } from "commander";
 import { openStores, type Job, type JobStatus } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 import { fail, loadFromProgram, println, type CliContext } from "./context.js";
-import { reportOutcome, runInline } from "./inline.js";
+import { reportOutcome, runInline, tailJob } from "./inline.js";
 import { artifactsDir, jobsDir, workRoot } from "./paths.js";
+import { answers, localHealthUrl } from "./probe.js";
 import { buildRuntime } from "./runtime.js";
 
 const DEFAULT_LIMIT = 20;
+const HEALTH_TIMEOUT_MS = 2_000;
 const DELIVERY_RETENTION_DAYS = 7;
 const STATUSES: JobStatus[] = ["queued", "running", "succeeded", "failed", "publish_failed", "skipped"];
 
@@ -64,13 +66,19 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
 
   jobs
     .command("retry")
-    .description("run the job again now; publish-only when a result is stored")
+    .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when a result is stored")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
       const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);
-      const job = runtime.stores.jobs.get(id);
+      const { jobs } = runtime.stores;
+      const job = jobs.get(id);
       if (job === null) return fail(ctx, `job ${id} not found`);
       println(ctx, job.result === null ? `job ${id}: full run` : `job ${id}: publish-only (result stored at ${job.resultSha})`);
+      if (await answers(ctx.fetchImpl, localHealthUrl(runtime.loaded.config.server.port), HEALTH_TIMEOUT_MS)) {
+        if (!jobs.requeue(id)) return fail(ctx, `job ${id} is already running`);
+        println(ctx, `steward serve is running; requeued job ${id}`);
+        return reportOutcome(ctx, id, await tailJob(runtime.stores, id, ctx));
+      }
       reportOutcome(ctx, id, await runInline(runtime, id, ctx));
     });
 
