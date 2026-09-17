@@ -1,0 +1,57 @@
+{
+  "name": "ticket-steward",
+  "version": "0.1.0",
+  "description": "Linear ticket-enrichment bot: runs a coding agent against a fresh checkout and writes findings back to the ticket",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "steward": "bin/steward.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "prompts",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run --passWithNoTests",
+    "dev": "tsx src/cli/main.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.268",
+    "@gitbeaker/rest": "^43.8.0",
+    "@linear/sdk": "^95.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@octokit/rest": "^22.0.1",
+    "@openai/agents": "^0.18.0",
+    "@playwright/mcp": "^0.0.80",
+    "better-sqlite3": "^13.0.3",
+    "commander": "^15.0.0",
+    "dotenv": "^17.4.2",
+    "execa": "^10.0.1",
+    "fastify": "^5.12.3",
+    "jiti": "^2.7.0",
+    "mustache": "^4.2.0",
+    "pino": "^10.3.1",
+    "zod": "^4.6.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/mustache": "^4.2.6",
+    "@types/node": "^22.20.2",
+    "eslint": "^9.39.5",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^4.1.11"
+  }
+}

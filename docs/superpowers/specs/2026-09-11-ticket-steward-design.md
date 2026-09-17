@@ -257,7 +257,7 @@ interface BrainInput {
   maxTurns: number;
   model: string;
   mcpServers: Record<string, McpServerSpec>;   // codehost and playwright; both stdio with explicit command/args/env
-  denyPaths: string[];                   // absolute paths the policy denies for Bash/Edit/Write (mirror, dataDir, overlayDir)
+  denyPaths: string[];                   // absolute paths the policy denies for Bash/Edit/Write: the mirror, the SQLite file, overlayDir (NOT dataDir itself, which contains the worktree and artifacts)
 }
 interface BrainRun {
   ok: boolean;
@@ -374,7 +374,9 @@ interface JobStore {
   claimNext(): Job | null;                                    // atomic UPDATE … WHERE status='queued'
   claimById(id: number): Job | null;
   saveResult(id: number, result: BrainResult, sha: string): void;   // enables publish-only retry
-  finish(id: number, outcome: JobOutcome): void;
+  finish(id: number, outcome: JobOutcome): void;                  // terminal outcomes
+  scheduleRetry(id: number, notBefore: Date, error: string): void; // back to queued, hidden from claimNext until notBefore
+  requeue(id: number): boolean;                                   // steward jobs retry while serve is running
   get(id: number): Job | null;
   list(filter: { status?: JobStatus; limit: number }): Job[];
   requeueInterrupted(maxAttempts: number): { requeued: number; failed: number };
@@ -389,7 +391,11 @@ visible as an attempt without `finishedAt`.
 Retry policy in the worker:
 
 - Steps 1–2 failures (ticket fetch, mirror fetch, worktree, overlay, setup) are
-  infrastructure errors: retry up to 3 attempts total with 1 min / 5 min backoff.
+  infrastructure errors: retry up to 3 attempts total with 1 min / 5 min backoff. Between
+  attempts the job is `queued` with `not_before` set to the end of the backoff: `claimNext`
+  skips it until then, `findQueued` still sees it (so a new trigger attaches instead of
+  duplicating), `/health` counts it as queued, and a restart during the backoff loses
+  nothing.
 - Step 4–5 failures (brain timeout, max turns exhausted after the follow-up query, invalid
   output) are terminal: `failed`, no retry.
 - Step 6–8 failures after `saveResult` → `publish_failed`. `steward jobs retry <id>`, or
@@ -406,7 +412,9 @@ Retry policy in the worker:
 Per job:
 
 1. `mirror.fetch()`: `git -C <dataDir>/repo.git fetch --prune origin` using the mirror's
-   stored fetch URL (a read-only deploy token). `resolveSha("origin/<baseBranch>")`.
+   stored fetch URL (a read-only deploy token). `resolveSha("<baseBranch>")` (a mirror
+   stores remote branches under `refs/heads`, so there is no `origin/` prefix; `resolveSha`
+   accepts and strips one for convenience).
 2. `worktree.create(jobId, attempt)`: `git worktree prune`; if the target path exists,
    `git worktree remove --force` it (fallback `rm -rf`); `git worktree add --detach <path> <sha>`;
    then `git -C <path> config --worktree remote.origin.pushurl /dev/null`
@@ -431,8 +439,7 @@ Per job:
 `steward mirror init` creates the mirror (`git clone --mirror <fetchUrl>`) and enables
 `extensions.worktreeConfig`. `steward overlay sync --from <checkout>` copies gitignored
 `.env*` files (excluding `node_modules`, `.next`, `dist`) into `overlayDir` with 0600/0700
-modes and refuses when a value matches `overlay.denyPatterns` (default: hostnames
-containing `prod`) unless `--allow-pattern` is given.
+modes and refuses when any value matches `/prod/i` unless `--allow-pattern` is given.
 
 `retention.sweep()` runs on worker start and every hour: worktrees beyond the kept count,
 artifacts and transcripts older than `retention.days` (default 30), deliveries older than
@@ -613,8 +620,9 @@ refresh failure sets `auth_broken`; the worker stops claiming, `/health` returns
 
 Worker loop: acquire `run.lock`; `requeueInterrupted`; `retention.sweep()`; then loop:
 claim → attempt row → `runJob` → `finish`; sleep 2 s when idle; sweep hourly. SIGTERM:
-stop claiming, abort the brain, kill its process group, mark the attempt `interrupted`,
-release the lock, exit 0.
+stop claiming, abort the brain, kill its process group, mark the attempt `interrupted` and
+leave the job `queued` (or `failed` with error `interrupted` when that was its last
+attempt), release the lock, exit 0.
 
 ## 12. Security posture
 

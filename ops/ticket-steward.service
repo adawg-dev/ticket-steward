@@ -1,0 +1,47 @@
+# Ticket Steward systemd unit.
+#
+# Install the `steward` binary so that it is on PATH for the steward user, either
+#   npm i -g ticket-steward
+# or from a checkout:
+#   git clone <repo> /opt/ticket-steward && cd /opt/ticket-steward
+#   pnpm install --frozen-lockfile && pnpm build
+#   ln -s /opt/ticket-steward/bin/steward.js /usr/local/bin/steward
+#
+# WorkingDirectory holds steward.config.ts and .env. Secrets stay in that .env (the
+# steward parses it into memory); do not add EnvironmentFile= here, or the secrets
+# would leak into the process environment and into every child the brain spawns.
+#
+# ReadWritePaths must match `dataDir` in steward.config.ts. If you point dataDir
+# somewhere else, change it here too.
+#
+#   sudo cp ops/ticket-steward.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ticket-steward
+#   journalctl -u ticket-steward -f
+
+[Unit]
+Description=Ticket Steward (Linear ticket enrichment)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=steward
+Group=steward
+WorkingDirectory=/etc/ticket-steward
+ExecStart=/usr/bin/env steward serve
+Environment=NODE_ENV=production
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=120
+LimitNOFILE=65536
+
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ticket-steward
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
