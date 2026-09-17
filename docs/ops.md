@@ -38,11 +38,12 @@ id steward
 sudo -u steward ls -la /var/lib/ticket-steward
 ```
 
-Install the tools for that user:
+Install pnpm system-wide (the steward user has no writable global npm prefix, and
+`~/.local/bin` is not on PATH under systemd), then Chromium for the steward user:
 
 ```bash
-sudo -u steward -H bash -lc 'corepack enable --install-directory ~/.local/bin || npm i -g pnpm'
-sudo -u steward -H bash -lc 'npx playwright install chromium'
+sudo npm i -g pnpm            # or: sudo corepack enable
+sudo -u steward -H bash -lc 'npx --yes playwright@latest install chromium'
 ```
 
 Install the steward CLI so `steward` is on PATH for every user (pick one):
