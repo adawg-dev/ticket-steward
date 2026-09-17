@@ -67,7 +67,7 @@ const userCheck: Check = {
 };
 
 const secretChecks = ({ config, secrets }: LoadedConfig): Check[] => {
-  const brainKeys = config.brain.kind === "claude-code" ? ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] : ["OPENAI_API_KEY"];
+  const brainKeys = config.brain.kind === "claude-code" ? ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] : ["OPENAI_API_KEY"];
   const codehostKey = config.codehost.kind === "gitlab" ? "GITLAB_TOKEN" : "GITHUB_TOKEN";
   return [
     {

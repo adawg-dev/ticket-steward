@@ -4,9 +4,12 @@ import type { BrainConfig } from "../config/schema.js";
 
 const credentialEnv = (secrets: Secrets, brain: BrainConfig): Record<string, string> => {
   if (brain.kind === "claude-code") {
-    if (secrets.ANTHROPIC_API_KEY !== undefined) return { ANTHROPIC_API_KEY: secrets.ANTHROPIC_API_KEY };
-    if (secrets.CLAUDE_CODE_OAUTH_TOKEN !== undefined) return { CLAUDE_CODE_OAUTH_TOKEN: secrets.CLAUDE_CODE_OAUTH_TOKEN };
-    return {};
+    const env: Record<string, string> = {};
+    if (secrets.ANTHROPIC_BASE_URL !== undefined) env.ANTHROPIC_BASE_URL = secrets.ANTHROPIC_BASE_URL;
+    if (secrets.ANTHROPIC_API_KEY !== undefined) return { ...env, ANTHROPIC_API_KEY: secrets.ANTHROPIC_API_KEY };
+    if (secrets.ANTHROPIC_AUTH_TOKEN !== undefined) return { ...env, ANTHROPIC_AUTH_TOKEN: secrets.ANTHROPIC_AUTH_TOKEN };
+    if (secrets.CLAUDE_CODE_OAUTH_TOKEN !== undefined) return { ...env, CLAUDE_CODE_OAUTH_TOKEN: secrets.CLAUDE_CODE_OAUTH_TOKEN };
+    return env;
   }
   const env: Record<string, string> = {};
   if (secrets.OPENAI_API_KEY !== undefined) env.OPENAI_API_KEY = secrets.OPENAI_API_KEY;

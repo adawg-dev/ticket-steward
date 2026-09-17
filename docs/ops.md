@@ -70,8 +70,13 @@ token as the steward user and put that in `.env` instead:
 sudo -u steward -H bash -lc 'cd ~ && claude setup-token'   # prints CLAUDE_CODE_OAUTH_TOKEN
 ```
 
-`ANTHROPIC_API_KEY` wins if both are present. The steward never relies on an interactive
-login in `~/.claude`.
+Or route the claude-code brain through an Anthropic-compatible gateway such as your own
+Concentrate AI deployment: set `ANTHROPIC_BASE_URL=https://api.concentrate.ai` and
+`ANTHROPIC_AUTH_TOKEN=<sk-cn key>`. For the openai-agents brain the equivalent is
+`OPENAI_BASE_URL=https://api.concentrate.ai/v1` and `OPENAI_API_KEY=<sk-cn key>`.
+
+Precedence for claude-code: `ANTHROPIC_API_KEY`, then `ANTHROPIC_AUTH_TOKEN`, then
+`CLAUDE_CODE_OAUTH_TOKEN`. The steward never relies on an interactive login in `~/.claude`.
 
 ### 1.3 Repo tokens
 

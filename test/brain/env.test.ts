@@ -34,6 +34,13 @@ describe("buildBrainEnv", () => {
     expect(env.CI).toBe("1");
   });
 
+  it("claude-code through a gateway gets ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN", () => {
+    const env = buildBrainEnv({ ANTHROPIC_AUTH_TOKEN: "sk-cn-v1-gateway-key", ANTHROPIC_BASE_URL: "https://api.concentrate.ai", OPENAI_API_KEY: allSecrets.OPENAI_API_KEY }, claudeCode, 4100);
+    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", ...BASE_KEYS]);
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("sk-cn-v1-gateway-key");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://api.concentrate.ai");
+  });
+
   it("claude-code without an API key falls back to CLAUDE_CODE_OAUTH_TOKEN", () => {
     const env = buildBrainEnv({ CLAUDE_CODE_OAUTH_TOKEN: allSecrets.CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY: allSecrets.OPENAI_API_KEY }, claudeCode, 4100);
     expect(Object.keys(env).sort()).toEqual(["CI", "CLAUDE_CODE_OAUTH_TOKEN", ...BASE_KEYS.slice(1)]);

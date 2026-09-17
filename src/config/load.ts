@@ -16,6 +16,8 @@ export const SecretsSchema = z.object({
   GITLAB_TOKEN: z.string().optional(),
   GITHUB_TOKEN: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_AUTH_TOKEN: z.string().optional(),
+  ANTHROPIC_BASE_URL: z.string().optional(),
   CLAUDE_CODE_OAUTH_TOKEN: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().optional(),
