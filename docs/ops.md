@@ -51,13 +51,16 @@ sudo -u steward -H bash -lc 'cd ~ && npx --yes playwright@latest install chromiu
 Install the steward CLI so `steward` is on PATH for every user (pick one):
 
 ```bash
-# a) from the npm registry
+# a) from the npm registry (only once the package is published)
 sudo npm i -g ticket-steward
 
-# b) from a checkout
+# b) from a checkout (works today; use -b <branch> to pin a branch)
 sudo git clone <ticket-steward repo> /opt/ticket-steward
 cd /opt/ticket-steward && sudo pnpm install --frozen-lockfile && sudo pnpm build
 sudo ln -s /opt/ticket-steward/bin/steward.js /usr/local/bin/steward
+
+# later updates
+cd /opt/ticket-steward && sudo git pull && sudo pnpm install --frozen-lockfile && sudo pnpm build
 ```
 
 Brain credential: either put an `ANTHROPIC_API_KEY` in `.env`, or mint a Claude Code
