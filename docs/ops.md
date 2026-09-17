@@ -39,11 +39,13 @@ sudo -u steward ls -la /var/lib/ticket-steward
 ```
 
 Install pnpm system-wide (the steward user has no writable global npm prefix, and
-`~/.local/bin` is not on PATH under systemd), then Chromium for the steward user:
+`~/.local/bin` is not on PATH under systemd), then Chromium for the steward user.
+Every `sudo -u steward` command below starts with `cd` because the steward user cannot
+read your own home directory:
 
 ```bash
 sudo npm i -g pnpm            # or: sudo corepack enable
-sudo -u steward -H bash -lc 'npx --yes playwright@latest install chromium'
+sudo -u steward -H bash -lc 'cd ~ && npx --yes playwright@latest install chromium'
 ```
 
 Install the steward CLI so `steward` is on PATH for every user (pick one):
@@ -62,7 +64,7 @@ Brain credential: either put an `ANTHROPIC_API_KEY` in `.env`, or mint a Claude 
 token as the steward user and put that in `.env` instead:
 
 ```bash
-sudo -u steward -H bash -lc 'claude setup-token'   # prints CLAUDE_CODE_OAUTH_TOKEN
+sudo -u steward -H bash -lc 'cd ~ && claude setup-token'   # prints CLAUDE_CODE_OAUTH_TOKEN
 ```
 
 `ANTHROPIC_API_KEY` wins if both are present. The steward never relies on an interactive
@@ -91,10 +93,12 @@ refuses to overwrite existing files. Replace the generated config with the kicko
 example and fill in the secrets:
 
 ```bash
-sudo -u steward cp examples/kickoff/steward.config.ts /etc/ticket-steward/steward.config.ts
-sudo -u steward cp -r examples/kickoff/skills/. /etc/ticket-steward/skills/
-sudo -u steward cp examples/kickoff/.env.example /etc/ticket-steward/.env
-sudo -u steward chmod 0600 /etc/ticket-steward/.env
+# run from your checkout; the steward user cannot read your home directory
+sudo cp examples/kickoff/steward.config.ts /etc/ticket-steward/steward.config.ts
+sudo cp -r examples/kickoff/skills/. /etc/ticket-steward/skills/
+sudo cp examples/kickoff/.env.example /etc/ticket-steward/.env
+sudo chown -R steward:steward /etc/ticket-steward
+sudo chmod 0600 /etc/ticket-steward/.env
 sudoedit -u steward /etc/ticket-steward/.env
 ```
 
