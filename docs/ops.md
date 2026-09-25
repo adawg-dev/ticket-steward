@@ -84,7 +84,9 @@ Two separate tokens, deliberately:
 
 - **`MIRROR_TOKEN`** — a **read-only** GitLab deploy token (scope `read_repository`) or a
   GitHub fine-grained token with `contents: read`. It is injected into
-  `workspace.fetchUrl` when the mirror is created or fetched. It is the only credential
+  `workspace.fetchUrl` when the mirror is created or fetched. A GitLab deploy token only
+  authenticates with its own username, so set `MIRROR_USERNAME` to the username shown when
+  the token was created (access tokens need no username). It is the only credential
   that can touch the repository, and it cannot push.
 - **`GITLAB_TOKEN`** / **`GITHUB_TOKEN`** — `read_api` (GitLab) or `pull_requests: read`
   (GitHub). Used by the codehost MCP server to map commits to MRs/PRs. It reaches that

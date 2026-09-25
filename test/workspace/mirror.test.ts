@@ -90,6 +90,18 @@ describe("injectToken", () => {
     );
   });
 
+  it("uses the given username, e.g. a GitLab deploy token's own username", () => {
+    expect(injectToken("https://gitlab.com/group/repo.git", "gldt-abc", "ticket-steward-mirror")).toBe(
+      "https://ticket-steward-mirror:gldt-abc@gitlab.com/group/repo.git",
+    );
+  });
+
+  it("falls back to the host default for an empty username", () => {
+    expect(injectToken("https://gitlab.com/group/repo.git", "glpat-abc", "")).toBe(
+      "https://oauth2:glpat-abc@gitlab.com/group/repo.git",
+    );
+  });
+
   it("returns the url unchanged without a token", () => {
     expect(injectToken("https://gitlab.com/group/repo.git", undefined)).toBe("https://gitlab.com/group/repo.git");
   });

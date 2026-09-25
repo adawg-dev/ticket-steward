@@ -13,7 +13,7 @@ export const registerMirror = (program: Command, ctx: CliContext): void => {
     .action(async () => {
       const { config, secrets } = await loadFromProgram(program, ctx);
       const path = mirrorPath(config.dataDir);
-      await Mirror.init(path, injectToken(config.workspace.fetchUrl, secrets.MIRROR_TOKEN));
+      await Mirror.init(path, injectToken(config.workspace.fetchUrl, secrets.MIRROR_TOKEN, secrets.MIRROR_USERNAME));
       println(ctx, `mirror created at ${path}`);
     });
 

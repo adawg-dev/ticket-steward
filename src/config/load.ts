@@ -12,6 +12,7 @@ export const SecretsSchema = z.object({
   LINEAR_API_KEY: z.string().optional(),
   LINEAR_WEBHOOK_SECRET: z.string().optional(),
   MIRROR_TOKEN: z.string().optional(),
+  MIRROR_USERNAME: z.string().optional(),
   GITLAB_TOKEN: z.string().optional(),
   GITHUB_TOKEN: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),

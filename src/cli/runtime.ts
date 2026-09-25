@@ -22,7 +22,7 @@ export interface Runtime {
 }
 
 export const openMirror = (loaded: LoadedConfig): Mirror =>
-  new Mirror(mirrorPath(loaded.config.dataDir), injectToken(loaded.config.workspace.fetchUrl, loaded.secrets.MIRROR_TOKEN));
+  new Mirror(mirrorPath(loaded.config.dataDir), injectToken(loaded.config.workspace.fetchUrl, loaded.secrets.MIRROR_TOKEN, loaded.secrets.MIRROR_USERNAME));
 
 /** Secrets from `.env` (including `LINEAR_API_KEY`) and the overlay are collected once. */
 export const buildRedactor = async (loaded: LoadedConfig): Promise<Redactor> => {
