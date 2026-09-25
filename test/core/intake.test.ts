@@ -12,7 +12,9 @@ const created: TriggerEvent = {
 
 const cli: TriggerEvent = { kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API" };
 
-const base = { allowlist: ["API"], priorSuccess: false, hasQueuedJob: false };
+const base = { allowlist: ["API"], gatewayIssues: "enrich" as const, priorSuccess: false, hasQueuedJob: false };
+
+const gatewayFooter = "\n\n---\n\n_Routed by ticket-gateway · class `gateway` (p=0.91, margin 0.40, auto) → API · reported by Ana via Slack /ticket_";
 
 describe("shouldEnqueue", () => {
   beforeEach(() => {
@@ -62,5 +64,22 @@ describe("shouldEnqueue", () => {
 
   it("enqueues cli otherwise", () => {
     expect(shouldEnqueue({ ...base, event: cli })).toEqual({ action: "enqueue" });
+  });
+
+  it("enqueues a gateway issue by default", () => {
+    expect(shouldEnqueue({ ...base, event: { ...created, description: `Body${gatewayFooter}` } })).toEqual({ action: "enqueue" });
+  });
+
+  it("skips a gateway issue when gatewayIssues is skip", () => {
+    const decision = shouldEnqueue({ ...base, gatewayIssues: "skip", event: { ...created, description: `Body${gatewayFooter}` } });
+    expect(decision).toEqual({ action: "skip", reason: "API-1 was created by ticket-gateway, which enriches its own tickets (tracker.gatewayIssues: skip)" });
+  });
+
+  it("still enqueues a non-gateway issue when gatewayIssues is skip", () => {
+    expect(shouldEnqueue({ ...base, gatewayIssues: "skip", event: created })).toEqual({ action: "enqueue" });
+  });
+
+  it("never skips a cli run", () => {
+    expect(shouldEnqueue({ ...base, gatewayIssues: "skip", event: cli })).toEqual({ action: "enqueue" });
   });
 });

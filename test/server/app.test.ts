@@ -16,10 +16,10 @@ let stores: Stores;
 let tracker: FakeTracker;
 let app: FastifyInstance;
 
-const makeConfig = (): StewardConfig => ({
+const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich"): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"] },
+  tracker: { kind: "linear", teams: ["API"], gatewayIssues },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",
@@ -109,6 +109,23 @@ describe("buildServer", () => {
         deliveryId: "delivery-1",
         description: "The adapter loses the final chunk.",
       });
+    });
+
+    it("skips a gateway-created issue when gatewayIssues is skip", async () => {
+      await app.close();
+      app = buildServer({
+        config: makeConfig("skip"),
+        secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
+        stores,
+        tracker,
+        workerState: () => WORKER_IDLE,
+      });
+      const description = "Body\n\n---\n\n_Routed by ticket-gateway · class `gateway` (p=0.91, margin 0.40, auto) → API · reported by Ana via Slack /ticket_";
+      const response = await post("Issue", "delivery-1", issueCreatePayload("API", description));
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ok: true, action: "skip" });
+      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
     it("answers 200 for a repeated delivery without a second job", async () => {

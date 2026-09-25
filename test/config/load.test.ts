@@ -8,7 +8,7 @@ import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: "./data",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear", teams: ["API"] },
+  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich" },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "concentrateai/kickoff" },
   workspace: {
     fetchUrl: "https://gitlab.com/concentrateai/kickoff.git",

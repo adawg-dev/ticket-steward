@@ -29,10 +29,16 @@ describe("StewardConfigSchema", () => {
     expect(parsed.workspace.portRewrite).toBeUndefined();
     expect(parsed.retention).toEqual({ keptWorktrees: 3, days: 30 });
     expect(parsed.tracker.teams).toEqual([]);
+    expect(parsed.tracker.gatewayIssues).toBe("enrich");
   });
 
   it("rejects a config missing a required field", () => {
     expect(StewardConfigSchema.safeParse({ ...minimalInput, dataDir: undefined }).success).toBe(false);
+  });
+
+  it("rejects an unknown tracker.gatewayIssues value", () => {
+    const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { kind: "linear", gatewayIssues: "sometimes" } });
+    expect(result.success).toBe(false);
   });
 
   it("rejects an unknown brain kind", () => {

@@ -46,6 +46,7 @@ const intake = (deps: ServerDeps, event: WebhookEvent): Intake =>
     const decision = shouldEnqueue({
       event,
       allowlist: deps.config.tracker.teams,
+      gatewayIssues: deps.config.tracker.gatewayIssues,
       priorSuccess: jobs.hasSucceeded(event.issueId),
       hasQueuedJob: jobs.findQueued(event.issueId) !== null,
     });

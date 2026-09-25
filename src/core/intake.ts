@@ -1,4 +1,5 @@
 import type { TriggerEvent } from "../tracker/types.js";
+import { isGatewayIssue } from "./gateway.js";
 
 export const STEWARD_BEGIN = "<!-- ticket-steward:begin -->";
 export const STEWARD_END = "<!-- ticket-steward:end -->";
@@ -8,12 +9,16 @@ export type IntakeDecision = { action: "enqueue" } | { action: "attach" } | { ac
 export const shouldEnqueue = (input: {
   event: TriggerEvent;
   allowlist: string[];
+  gatewayIssues: "enrich" | "skip";
   priorSuccess: boolean;
   hasQueuedJob: boolean;
 }): IntakeDecision => {
-  const { event, allowlist, priorSuccess, hasQueuedJob } = input;
+  const { event, allowlist, gatewayIssues, priorSuccess, hasQueuedJob } = input;
   if (allowlist.length > 0 && !allowlist.includes(event.teamKey)) {
     return { action: "skip", reason: `Ticket Steward is not configured for team ${event.teamKey}` };
+  }
+  if (event.kind === "issue.created" && gatewayIssues === "skip" && isGatewayIssue(event.description)) {
+    return { action: "skip", reason: `${event.identifier} was created by ticket-gateway, which enriches its own tickets (tracker.gatewayIssues: skip)` };
   }
   if (event.kind === "issue.created" && priorSuccess) {
     return { action: "skip", reason: `${event.identifier} was already enriched` };

@@ -79,7 +79,7 @@ let port: number;
 const makeConfig = (overrides: Partial<StewardConfig["workspace"]> = {}): StewardConfig => ({
   dataDir: repo.dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"] },
+  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich" },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: repo.repo,

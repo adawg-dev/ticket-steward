@@ -59,6 +59,7 @@ export const registerEnrich = (program: Command, ctx: CliContext): void => {
       const decision = shouldEnqueue({
         event,
         allowlist: config.tracker.teams,
+        gatewayIssues: config.tracker.gatewayIssues,
         priorSuccess: opts.dryRun ? false : jobs.hasSucceeded(id),
         hasQueuedJob: opts.dryRun ? false : jobs.findQueued(id) !== null,
       });

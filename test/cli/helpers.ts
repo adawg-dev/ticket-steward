@@ -66,7 +66,7 @@ import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: ${JSON.stringify(p.dataDir)},
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ${JSON.stringify(p.teams ?? ["API"])} },
+  tracker: { kind: "linear", teams: ${JSON.stringify(p.teams ?? ["API"])}, gatewayIssues: "enrich" },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: ${JSON.stringify(p.fetchUrl)},
