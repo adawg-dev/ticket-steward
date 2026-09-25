@@ -225,7 +225,7 @@ curl -s https://adam.concentrate.ai/health
 
 **State of the host on 2026-09-25:**
 - `/etc/ticket-steward/.env` was installed from the owner's `~/ticket-steward/.env`. It has `LINEAR_API_KEY`, `LINEAR_WEBHOOK_SECRET`, `MIRROR_TOKEN`, `MIRROR_USERNAME`, `GITLAB_TOKEN`, `GITLAB_WEBHOOK_SECRET`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
-- The **claude-code brain credential is missing.** Either add one, or set `brain.kind` to `openai-agents` before `doctor`.
+- The brain is `openai-agents` (`gpt-5.5`), switched by the owner on 2026-09-25. It authenticates with `OPENAI_API_KEY` and `OPENAI_BASE_URL`. `doctor`'s "brain credential" check should pass. Task 15's openai-agents output-schema change is on the live path, so review it carefully.
 - `steward.config.ts` already has `bugLabels` and `review.botUsername`.
 
 ## Facts the next session should not re-derive
