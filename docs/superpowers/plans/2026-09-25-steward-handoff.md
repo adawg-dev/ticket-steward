@@ -196,13 +196,37 @@ return { completed, final }
    - the final review verdict.
 
    Commit it.
-4. Report to the owner. Include the Task 19 prerequisites from the repro/review plan (the owner-only steps) as a checklist:
+4. Report to the owner. Point to the **Deploy** section below. Include the Task 19 prerequisites from the repro/review plan (the owner-only steps) as a checklist:
    - rebuild and reinstall;
    - update `/etc/ticket-steward/.env`, which means removing `LINEAR_CLIENT_*` and adding `LINEAR_API_KEY`, `MIRROR_USERNAME=ticket-steward-mirror`, a `GITLAB_TOKEN` with `api` scope, and a GitLab webhook secret;
    - update `/etc/ticket-steward/steward.config.ts`, which means adding `bugLabels` and `review` and copying `prompts/review.md`;
    - add a Cloudflare Access Bypass for `adam.concentrate.ai/webhooks/*` and route the tunnel to `localhost:3020`;
    - create the GitLab "Merge request events" webhook at `https://adam.concentrate.ai/webhooks/gitlab`;
    - confirm the Linear webhook URL is `https://adam.concentrate.ai/webhooks/linear`.
+
+## Deploy (owner, or the session if the owner allows sudo)
+
+Run this after the workflow finishes. It installs from the local branch, with no push needed:
+
+```bash
+cd /opt/ticket-steward
+sudo git -c safe.directory='*' fetch /home/admin/ticket-steward feat/linear-api-key:feat/linear-api-key
+sudo git checkout feat/linear-api-key
+sudo pnpm install --frozen-lockfile && sudo pnpm build
+# the installed prompts are copies, so refresh them (compat Task 5 and Task 9 changed enrich.md; Task 15 added review.md)
+sudo cp -p /etc/ticket-steward/prompts/enrich.md /etc/ticket-steward/prompts/enrich.md.bak-$(date +%Y%m%d)
+sudo install -o steward -g steward -m 644 prompts/enrich.md prompts/review.md /etc/ticket-steward/prompts/
+sudo -u steward -H bash -lc 'cd /etc/ticket-steward && steward doctor'
+# the systemd unit is not installed yet (as of 2026-09-25)
+sudo cp ops/ticket-steward.service /etc/systemd/system/ticket-steward.service
+sudo systemctl daemon-reload && sudo systemctl enable --now ticket-steward
+curl -s https://adam.concentrate.ai/health
+```
+
+**State of the host on 2026-09-25:**
+- `/etc/ticket-steward/.env` was installed from the owner's `~/ticket-steward/.env`. It has `LINEAR_API_KEY`, `LINEAR_WEBHOOK_SECRET`, `MIRROR_TOKEN`, `MIRROR_USERNAME`, `GITLAB_TOKEN`, `GITLAB_WEBHOOK_SECRET`, `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
+- The **claude-code brain credential is missing.** Either add one, or set `brain.kind` to `openai-agents` before `doctor`.
+- `steward.config.ts` already has `bugLabels` and `review.botUsername`.
 
 ## Facts the next session should not re-derive
 
