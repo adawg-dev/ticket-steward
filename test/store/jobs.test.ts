@@ -123,6 +123,20 @@ describe("JobStore", () => {
     expect(claimed?.attempts).toBe(2);
   });
 
+  it("releaseClaim puts a claimed job back in the queue and refunds the claimed attempt", () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimNext();
+
+    stores.jobs.releaseClaim(id, "linear 401");
+
+    const job = stores.jobs.get(id);
+    expect(job?.status).toBe("queued");
+    expect(job?.attempts).toBe(0);
+    expect(job?.error).toBe("linear 401");
+    expect(job?.notBefore).toBeNull();
+    expect(stores.jobs.claimNext()?.id).toBe(id);
+  });
+
   it("requeue puts a finished job back in the queue and refuses a running one", () => {
     const id = stores.jobs.enqueue(createdEvent);
     stores.jobs.claimNext();

@@ -375,7 +375,7 @@ describe("startWorker", () => {
     expect(runJobMock).not.toHaveBeenCalled();
   });
 
-  it("stops claiming after a job hits a rejected API key and keeps that job queued for a retry", async () => {
+  it("stops claiming after a job hits a rejected API key and keeps that job queued with its attempt refunded", async () => {
     runJobMock.mockImplementationOnce(async () => {
       tracker.rejectApiKey();
       return { status: "failed", error: "Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked.", retryable: true };
@@ -391,9 +391,28 @@ describe("startWorker", () => {
 
     expect(runJobMock).toHaveBeenCalledTimes(1);
     expect(stores.jobs.get(firstId)?.status).toBe("queued");
-    expect(stores.jobs.get(firstId)?.attempts).toBe(1);
+    expect(stores.jobs.get(firstId)?.attempts).toBe(0);
+    expect(stores.jobs.get(firstId)?.notBefore).toBeNull();
     expect(stores.jobs.get(secondId)?.status).toBe("queued");
     expect(stores.jobs.get(secondId)?.attempts).toBe(0);
+  });
+
+  it("does not fail a job on its last attempt when that attempt hits a rejected API key", async () => {
+    runJobMock.mockImplementationOnce(async () => {
+      tracker.rejectApiKey();
+      return { status: "publish_failed", error: "Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked." };
+    });
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    start({ maxAttempts: 1 });
+
+    await vi.waitFor(() => {
+      expect(stores.attempts.forJob(jobId)[0]?.finishedAt).not.toBeNull();
+    });
+    await sleep(30);
+
+    expect(stores.jobs.get(jobId)?.status).toBe("queued");
+    expect(stores.jobs.get(jobId)?.attempts).toBe(0);
+    expect(runJobMock).toHaveBeenCalledTimes(1);
   });
 
   it("sweeps worktrees beyond the kept count on start", async () => {

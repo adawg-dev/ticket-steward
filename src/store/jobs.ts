@@ -67,6 +67,7 @@ export class JobStore {
   private readonly storeResult;
   private readonly complete;
   private readonly deferRetry;
+  private readonly unclaim;
   private readonly reopen;
   private readonly selectById;
   private readonly selectByStatus;
@@ -96,6 +97,9 @@ export class JobStore {
     );
     this.deferRetry = db.prepare<[string, string, number]>(
       "UPDATE jobs SET status = 'queued', not_before = ?, error = ?, finished_at = NULL WHERE id = ?",
+    );
+    this.unclaim = db.prepare<[string, number]>(
+      "UPDATE jobs SET status = 'queued', attempts = MAX(attempts - 1, 0), not_before = NULL, error = ?, finished_at = NULL WHERE id = ?",
     );
     this.reopen = db.prepare<[number]>(
       "UPDATE jobs SET status = 'queued', not_before = NULL, finished_at = NULL WHERE id = ? AND status != 'running'",
@@ -154,6 +158,11 @@ export class JobStore {
   /** Puts the job back in the queue, invisible to claimNext until `notBefore` (ISO). */
   scheduleRetry(id: number, notBefore: Date, error: string): void {
     this.deferRetry.run(notBefore.toISOString(), error, id);
+  }
+
+  /** Puts a claimed job back in the queue and gives back the attempt the claim counted. */
+  releaseClaim(id: number, error: string): void {
+    this.unclaim.run(error, id);
   }
 
   /** Re-queues a finished job for the worker; false when the job is running or unknown. */

@@ -350,8 +350,9 @@ rejected LINEAR_API_KEY (401): the key is invalid or revoked", and the first occ
 logged at `error` level ("Linear API key rejected; the worker stops claiming jobs until the
 steward restarts"). From then on, until the process restarts:
 
-- the worker stops claiming jobs; the job that hit the 401 goes back to the queue with its
-  normal retry backoff, and new webhook deliveries keep queueing;
+- the worker stops claiming jobs; the job that hit the 401 goes back to the queue with
+  the attempt refunded (so it is never failed for the key), and new webhook deliveries
+  keep queueing;
 - `GET /health` returns 503 with `apiKeyRejected: true`;
 - `steward doctor` reports `[fail]` on the `linear api key` line;
 - the systemd unit stays up, since the process is healthy, so the signal is `/health`,

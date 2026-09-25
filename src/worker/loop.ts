@@ -167,7 +167,7 @@ class Worker {
     }
   }
 
-  /** Persists the outcome: interrupted runs stay queued, retryable ones wait out the backoff in the queue, the rest are terminal. */
+  /** Persists the outcome: interrupted runs stay queued, a run that hit a rejected API key goes back to the queue with its attempt refunded, retryable ones wait out the backoff in the queue, the rest are terminal. */
   private async record(job: Job, attempt: Attempt, outcome: JobOutcome): Promise<void> {
     const { jobs, attempts } = this.deps.stores;
     if (isInterrupted(outcome)) {
@@ -175,6 +175,11 @@ class Worker {
       return;
     }
     attempts.finish(attempt.id, attemptPatch(outcome));
+    if (outcome.status !== "succeeded" && this.deps.tracker.apiKeyRejected()) {
+      jobs.releaseClaim(job.id, outcome.error);
+      logger.warn({ jobId: job.id }, "job returned to the queue: Linear rejected the API key");
+      return;
+    }
     if (isRetryable(outcome) && job.attempts < this.maxAttempts) {
       const delay = this.backoffMs[job.attempts - 1] ?? this.backoffMs.at(-1) ?? 0;
       jobs.scheduleRetry(job.id, new Date(Date.now() + delay), outcome.error);
