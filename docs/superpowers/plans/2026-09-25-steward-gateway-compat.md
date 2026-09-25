@@ -17,6 +17,15 @@
 - The decisions recorded below, from the 2026-09-25 session with the owner.
 - They supersede the sidecar-first design in `~/ticket-gateway/docs/ticket-gateway/steward-integration.proposed.md`. That design is kept as the future "sidecar mode", and its socket API is **out of scope** here.
 
+**Follow-on plan (2026-09-25):** bug reproduction and GitLab merge-request review. The spec is `docs/superpowers/specs/2026-09-25-steward-repro-mr-review-design.md`, and the plan is `docs/superpowers/plans/2026-09-25-steward-repro-mr-review.md`.
+
+Execution order:
+1. This plan's Tasks 2–6.
+2. That plan's Tasks 8–18.
+3. That plan's Task 19 (owner-run). **This plan's Task 7 is folded into it.**
+
+Handoff procedure: `docs/superpowers/plans/2026-09-25-steward-handoff.md`.
+
 ### Decisions (2026-09-25)
 
 1. **Linear auth is a personal API key only (`LINEAR_API_KEY`).** OAuth is removed, and so are agent sessions (the @mention flow), because those exist only for OAuth apps. **Done:** `f213323` + `3e614be` on `feat/linear-api-key`.
@@ -580,6 +589,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ---
 
 ### Task 7: Live verification (owner-run; creates and edits real Linear issues)
+
+> **Superseded:** these checks run as part of Task 19 in `2026-09-25-steward-repro-mr-review.md`, after the repro and review work lands. Keep this list as the reference for the gateway-specific checks.
 
 Run this after the steward is deployed (per `docs/ops.md`, with `LINEAR_API_KEY`, `LINEAR_WEBHOOK_SECRET`, the Cloudflare public hostname for `server.publicUrl`, and the manual webhook) and the gateway has done its live pass (gateway plan Task 16).
 
