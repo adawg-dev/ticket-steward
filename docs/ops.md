@@ -205,6 +205,15 @@ comment and upload appears as the user who owns the key, so give it a user of it
 There is no authorization step: the key is read from `.env` when the process starts.
 `steward doctor` (next section) confirms it works and names the user it authenticates as.
 
+**ticket-gateway.** ticket-gateway issues arrive through the same Issues webhook. Nothing
+else to configure.
+
+Config reference: `tracker.gatewayIssues` is `"enrich"` (default) or `"skip"`. Keep
+`"enrich"` while the gateway runs with `enrichment.mode: off`; use `"skip"` only in the
+future sidecar mode, where the gateway enriches through the steward itself (`auto`/`on`).
+Any other combination either enriches gateway tickets twice or never enriches them.
+`steward enrich <KEY>` always runs, whatever `gatewayIssues` says.
+
 ### 1.8 Doctor, then start the service
 
 ```bash

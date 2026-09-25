@@ -104,6 +104,17 @@ export default defineConfig({
 });
 ```
 
+## Running alongside ticket-gateway
+
+ticket-gateway files Slack tickets into Linear Triage. The steward enriches them like any other new issue: the Issues webhook fires, the steward recognises the gateway's footer line (`Routed by ticket-gateway · …`), tells the brain it came from the Slack form, and puts the Enrichment section above that footer.
+
+| Setup | gateway `enrichment.mode` | steward `tracker.gatewayIssues` |
+| --- | --- | --- |
+| Steward standalone (current) | `off` | `enrich` (default) |
+| Future sidecar mode (gateway calls the steward over a socket) | `auto` / `on` | `skip` |
+
+Any other combination either enriches gateway tickets twice or never enriches them. The allowlist in `tracker.teams` must include every team the gateway routes to (API, RSPNS, CC, MSGS, USRAPP, STFAPP, PLAT, OPS). `steward enrich <KEY>` always runs, whatever `gatewayIssues` says.
+
 ## Security posture
 
 - **Dedicated user.** Runs as the `steward` system user with its own HOME, no ssh keys,
