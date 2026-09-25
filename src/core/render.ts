@@ -1,3 +1,4 @@
+import { gatewayFooterStart } from "./gateway.js";
 import { STEWARD_BEGIN, STEWARD_END } from "./intake.js";
 import type { BrainResult } from "./result.js";
 
@@ -58,8 +59,11 @@ export const buildEnrichmentSection = (
 export const replaceSection = (description: string, section: string): string => {
   const begin = description.indexOf(STEWARD_BEGIN);
   const end = description.indexOf(STEWARD_END, begin);
-  if (begin === -1 || end === -1) return description === "" ? section : `${description}\n\n${section}`;
-  return `${description.slice(0, begin)}${section}${description.slice(end + STEWARD_END.length)}`;
+  if (begin !== -1 && end !== -1) return `${description.slice(0, begin)}${section}${description.slice(end + STEWARD_END.length)}`;
+  if (description === "") return section;
+  const footer = gatewayFooterStart(description);
+  if (footer === null) return `${description}\n\n${section}`;
+  return `${description.slice(0, footer).trimEnd()}\n\n${section}\n\n${description.slice(footer)}`;
 };
 
 export const buildComment = (result: BrainResult, jobId: number): string =>

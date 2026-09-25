@@ -6,6 +6,7 @@ import {
   truncate,
 } from "../../src/core/render.js";
 import { STEWARD_BEGIN, STEWARD_END } from "../../src/core/intake.js";
+import { isGatewayIssue } from "../../src/core/gateway.js";
 import type { BrainResult } from "../../src/core/result.js";
 import type { SectionMeta } from "../../src/core/render.js";
 
@@ -81,6 +82,32 @@ describe("buildEnrichmentSection", () => {
 });
 
 describe("replaceSection", () => {
+  const footer = "_Routed by ticket-gateway · class `gateway` (p=0.91, margin 0.40, auto) → API · reported by Ana via Slack /ticket_";
+  const section = `${STEWARD_BEGIN}\n## Enrichment\nbody\n${STEWARD_END}`;
+
+  it("inserts above the gateway footer rule", () => {
+    const description = `Body\n\n## Slack conversation\n\n> **author:** hi\n\n---\n\n${footer}`;
+    expect(replaceSection(description, section)).toBe(`Body\n\n## Slack conversation\n\n> **author:** hi\n\n${section}\n\n---\n\n${footer}`);
+  });
+
+  it("inserts above a normalized footer rule", () => {
+    const normalizedFooter = footer.replace(/^_|_$/g, "*");
+    const description = `Body\n\n* * *\n\n${normalizedFooter}`;
+    expect(replaceSection(description, section)).toBe(`Body\n\n${section}\n\n* * *\n\n${normalizedFooter}`);
+  });
+
+  it("replaces in place and keeps the footer last", () => {
+    const old = `${STEWARD_BEGIN}\n## Enrichment\nold\n${STEWARD_END}`;
+    const description = `Body\n\n${old}\n\n---\n\n${footer}`;
+    const out = replaceSection(description, section);
+    expect(out).toBe(`Body\n\n${section}\n\n---\n\n${footer}`);
+    expect(isGatewayIssue(out)).toBe(true);
+  });
+
+  it("appends when there is no gateway footer", () => {
+    expect(replaceSection("Body", section)).toBe(`Body\n\n${section}`);
+  });
+
   it("replaces an existing section between the markers", () => {
     const description = `Intro\n\n${STEWARD_BEGIN}\nold\n${STEWARD_END}\n\nOutro`;
     const section = `${STEWARD_BEGIN}\nnew\n${STEWARD_END}`;
