@@ -1,6 +1,21 @@
 export type TriggerEvent =
   | { kind: "issue.created"; issueId: string; identifier: string; teamKey: string; deliveryId: string; description: string }
-  | { kind: "cli"; issueId: string; identifier: string; teamKey: string };
+  | { kind: "cli"; issueId: string; identifier: string; teamKey: string }
+  | {
+      kind: "mr.review";
+      deliveryId: string;
+      projectId: number;
+      projectPath: string;
+      mrIid: number;
+      mrUrl: string;
+      headSha: string;
+      linearKey: string;
+      teamKey: string;
+      reason: "opened" | "reviewer_added" | "push";
+    };
+
+export type ReviewTrigger = Extract<TriggerEvent, { kind: "mr.review" }>;
+export type IssueTrigger = Exclude<TriggerEvent, { kind: "mr.review" }>;
 
 export interface TicketBundle {
   id: string;

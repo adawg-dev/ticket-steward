@@ -12,7 +12,7 @@ import type { BrainResult } from "../../src/core/result.js";
 import type { RunContext } from "../../src/core/types.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import { ReadOnlyTracker } from "../../src/tracker/readOnly.js";
-import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
+import type { IssueTrigger, TicketBundle } from "../../src/tracker/types.js";
 import { isPortFree } from "../../src/workspace/retention.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
@@ -41,7 +41,7 @@ const issue: TicketBundle = {
   templates: [],
 };
 
-const createdTrigger: TriggerEvent = {
+const createdTrigger: IssueTrigger = {
   kind: "issue.created",
   issueId: "issue-1",
   identifier: "API-1",
@@ -130,7 +130,7 @@ const detachedDeps = (config: StewardConfig): PipelineDeps => ({
   runBrain: (brain, input, redactor, opts) => runBrainDetached(brain, { ...input, env: { ...input.env, NODE_ENV: "test" } }, redactor, opts),
 });
 
-const claimJob = (trigger: TriggerEvent): RunContext => {
+const claimJob = (trigger: IssueTrigger): RunContext => {
   const jobId = stores.jobs.enqueue(trigger);
   stores.jobs.claimById(jobId);
   stores.attempts.start(jobId);

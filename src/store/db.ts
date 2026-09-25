@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at TEXT NOT NULL,
   started_at TEXT,
   finished_at TEXT,
-  not_before TEXT
+  not_before TEXT,
+  kind TEXT NOT NULL DEFAULT 'enrich',
+  subject TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_issue_status ON jobs (issue_id, status);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status);
@@ -58,7 +60,14 @@ CREATE TABLE IF NOT EXISTS repros (
 `;
 
 /** Columns added after the first release; applied to databases created before them. */
-const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }> = [{ table: "jobs", column: "not_before", definition: "TEXT" }];
+const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }> = [
+  { table: "jobs", column: "not_before", definition: "TEXT" },
+  { table: "jobs", column: "kind", definition: "TEXT NOT NULL DEFAULT 'enrich'" },
+  { table: "jobs", column: "subject", definition: "TEXT" },
+];
+
+/** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */
+const POST_MIGRATIONS = "CREATE INDEX IF NOT EXISTS jobs_subject_status ON jobs (subject, status);";
 
 /** Tables of the removed Linear OAuth flow; dropped so stored OAuth tokens do not linger on disk. */
 const DROPPED_TABLES = ["tokens", "oauth_state", "flags"];
@@ -87,6 +96,7 @@ export const openDatabase = (dataDir: string): Database => {
   db.pragma("busy_timeout = 5000");
   db.exec(MIGRATIONS);
   addMissingColumns(db);
+  db.exec(POST_MIGRATIONS);
   dropRemovedTables(db);
   return db;
 };

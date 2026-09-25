@@ -1,4 +1,4 @@
-import type { TriggerEvent } from "../tracker/types.js";
+import type { IssueTrigger } from "../tracker/types.js";
 import { isGatewayIssue } from "./gateway.js";
 
 export const STEWARD_BEGIN = "<!-- ticket-steward:begin -->";
@@ -7,7 +7,7 @@ export const STEWARD_END = "<!-- ticket-steward:end -->";
 export type IntakeDecision = { action: "enqueue" } | { action: "attach" } | { action: "skip"; reason: string };
 
 export const shouldEnqueue = (input: {
-  event: TriggerEvent;
+  event: IssueTrigger;
   allowlist: string[];
   gatewayIssues: "enrich" | "skip";
   priorSuccess: boolean;

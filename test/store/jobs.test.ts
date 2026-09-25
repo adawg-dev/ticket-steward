@@ -1,5 +1,7 @@
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import { openStores, type Stores } from "../../src/store/index.js";
+import { reviewSubject } from "../../src/store/jobs.js";
+import type { ReviewTrigger } from "../../src/tracker/types.js";
 import { brainResult, createdEvent, freshDataDir, secondEvent } from "./helpers.js";
 
 let stores: Stores;
@@ -201,5 +203,50 @@ describe("JobStore", () => {
     expect(all[0]?.id).toBe(c);
     expect(all[1]?.id).toBe(b);
     expect(stores.jobs.get(a)?.status).toBe("running");
+  });
+});
+
+const review = (headSha: string, deliveryId = `d-${headSha}`): ReviewTrigger => ({
+  kind: "mr.review",
+  deliveryId,
+  projectId: 42,
+  projectPath: "acme/repo",
+  mrIid: 7,
+  mrUrl: "https://gitlab.example/acme/repo/-/merge_requests/7",
+  headSha,
+  linearKey: "API-1",
+  teamKey: "API",
+  reason: "push",
+});
+
+describe("review jobs", () => {
+  it("stores kind and subject", () => {
+    const id = stores.jobs.enqueue(review("a".repeat(40)));
+    expect(stores.jobs.get(id)).toMatchObject({ kind: "review", subject: "mr:42!7", issueId: "API-1", identifier: "API-1", teamKey: "API" });
+    expect(stores.jobs.get(stores.jobs.enqueue(createdEvent))).toMatchObject({ kind: "enrich", subject: null });
+  });
+
+  it("keeps enrichment dedupe blind to review jobs", () => {
+    const id = stores.jobs.enqueue({ ...review("a".repeat(40)), linearKey: "issue-1" });
+    stores.jobs.claimById(id);
+    stores.jobs.finish(id, { status: "succeeded" });
+    expect(stores.jobs.hasSucceeded("issue-1")).toBe(false);
+    stores.jobs.enqueue({ ...review("b".repeat(40)), linearKey: "issue-1" });
+    expect(stores.jobs.findQueued("issue-1")).toBeNull();
+  });
+
+  it("finds a queued review by subject and replaces its trigger", () => {
+    const id = stores.jobs.enqueue(review("a".repeat(40)));
+    expect(stores.jobs.findQueuedBySubject(reviewSubject(42, 7))?.id).toBe(id);
+    expect(stores.jobs.replaceTrigger(id, review("b".repeat(40)))).toBe(true);
+    const job = stores.jobs.get(id);
+    expect(job?.trigger.kind === "mr.review" ? job.trigger.headSha : null).toBe("b".repeat(40));
+  });
+
+  it("does not replace the trigger of a running review", () => {
+    const id = stores.jobs.enqueue(review("a".repeat(40)));
+    stores.jobs.claimById(id);
+    expect(stores.jobs.findQueuedBySubject(reviewSubject(42, 7))).toBeNull();
+    expect(stores.jobs.replaceTrigger(id, review("b".repeat(40)))).toBe(false);
   });
 });

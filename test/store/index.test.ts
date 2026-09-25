@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
+import BetterSqlite3 from "better-sqlite3";
 import { openStores, transaction } from "../../src/store/index.js";
 import { createdEvent, freshDataDir } from "./helpers.js";
 
@@ -52,6 +53,19 @@ describe("openStores", () => {
     expect(tables).not.toContain("tokens");
     expect(tables).not.toContain("oauth_state");
     expect(tables).not.toContain("flags");
+    stores.db.close();
+  });
+
+  it("adds the job kind and subject columns to an existing database", () => {
+    const dir = freshDataDir();
+    const old = new BetterSqlite3(join(dir, "steward.db"));
+    old.exec(`CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT NOT NULL, identifier TEXT NOT NULL, team_key TEXT NOT NULL,
+      trigger TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, session_id TEXT, prompt_body TEXT, result TEXT,
+      result_sha TEXT, error TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)`);
+    old.prepare("INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at) VALUES ('i', 'API-1', 'API', '{\"kind\":\"cli\",\"issueId\":\"i\",\"identifier\":\"API-1\",\"teamKey\":\"API\"}', 'succeeded', '2026-01-01')").run();
+    old.close();
+    const stores = openStores(dir);
+    expect(stores.jobs.list({ limit: 5 })[0]).toMatchObject({ kind: "enrich", subject: null });
     stores.db.close();
   });
 

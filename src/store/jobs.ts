@@ -1,7 +1,11 @@
 import type { BrainResult } from "../core/result.js";
 import type { JobOutcome } from "../core/types.js";
-import type { TriggerEvent } from "../tracker/types.js";
+import type { ReviewTrigger, TriggerEvent } from "../tracker/types.js";
 import { nowIso, type Database } from "./db.js";
+
+export type JobKind = "enrich" | "review";
+
+export const reviewSubject = (projectId: number, mrIid: number): string => `mr:${projectId}!${mrIid}`;
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "publish_failed" | "skipped";
 
@@ -10,6 +14,8 @@ export interface Job {
   issueId: string;
   identifier: string;
   teamKey: string;
+  kind: JobKind;
+  subject: string | null;
   trigger: TriggerEvent;
   status: JobStatus;
   attempts: number;
@@ -27,6 +33,8 @@ interface JobRow {
   issue_id: string;
   identifier: string;
   team_key: string;
+  kind: JobKind;
+  subject: string | null;
   trigger: string;
   status: JobStatus;
   attempts: number;
@@ -44,6 +52,8 @@ const toJob = (row: JobRow): Job => ({
   issueId: row.issue_id,
   identifier: row.identifier,
   teamKey: row.team_key,
+  kind: row.kind,
+  subject: row.subject,
   trigger: JSON.parse(row.trigger) as TriggerEvent,
   status: row.status,
   attempts: row.attempts,
@@ -56,11 +66,27 @@ const toJob = (row: JobRow): Job => ({
   notBefore: row.not_before,
 });
 
+interface JobColumns {
+  issueId: string;
+  identifier: string;
+  teamKey: string;
+  kind: JobKind;
+  subject: string | null;
+}
+
+/** A review job is keyed by its Linear key until the worker resolves it; its subject names the MR. */
+const jobColumns = (event: TriggerEvent): JobColumns =>
+  event.kind === "mr.review"
+    ? { issueId: event.linearKey, identifier: event.linearKey, teamKey: event.teamKey, kind: "review", subject: reviewSubject(event.projectId, event.mrIid) }
+    : { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, kind: "enrich", subject: null };
+
 const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?";
 
 export class JobStore {
   private readonly insert;
   private readonly selectQueued;
+  private readonly selectQueuedBySubject;
+  private readonly swapTrigger;
   private readonly existsSucceeded;
   private readonly claimOldest;
   private readonly claimOne;
@@ -77,15 +103,21 @@ export class JobStore {
   private readonly closeRunningAttempts;
 
   constructor(private readonly db: Database) {
-    this.insert = db.prepare<[string, string, string, string, string]>(
-      `INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at)
-       VALUES (?, ?, ?, ?, 'queued', ?)`,
+    this.insert = db.prepare<[string, string, string, string, string, JobKind, string | null]>(
+      `INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at, kind, subject)
+       VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
     );
     this.selectQueued = db.prepare<[string], JobRow>(
-      "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' ORDER BY id LIMIT 1",
+      "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' AND kind = 'enrich' ORDER BY id LIMIT 1",
     );
     this.existsSucceeded = db.prepare<[string], { found: number }>(
-      "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded') AS found",
+      "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded' AND kind = 'enrich') AS found",
+    );
+    this.selectQueuedBySubject = db.prepare<[string], JobRow>(
+      "SELECT * FROM jobs WHERE subject = ? AND status = 'queued' ORDER BY id LIMIT 1",
+    );
+    this.swapTrigger = db.prepare<[string, string, string, string, number]>(
+      "UPDATE jobs SET trigger = ?, issue_id = ?, identifier = ?, team_key = ? WHERE id = ? AND status = 'queued'",
     );
     this.claimOldest = db.prepare<[string, string], JobRow>(
       `${CLAIM} WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND (not_before IS NULL OR not_before <= ?) ORDER BY id LIMIT 1) RETURNING *`,
@@ -122,8 +154,28 @@ export class JobStore {
   }
 
   enqueue(event: TriggerEvent): number {
-    const { lastInsertRowid } = this.insert.run(event.issueId, event.identifier, event.teamKey, JSON.stringify(event), nowIso());
+    const columns = jobColumns(event);
+    const { lastInsertRowid } = this.insert.run(
+      columns.issueId,
+      columns.identifier,
+      columns.teamKey,
+      JSON.stringify(event),
+      nowIso(),
+      columns.kind,
+      columns.subject,
+    );
     return Number(lastInsertRowid);
+  }
+
+  findQueuedBySubject(subject: string): Job | null {
+    const row = this.selectQueuedBySubject.get(subject);
+    return row === undefined ? null : toJob(row);
+  }
+
+  /** Points a still-queued review at a newer push; false once the job has been claimed. */
+  replaceTrigger(id: number, trigger: ReviewTrigger): boolean {
+    const columns = jobColumns(trigger);
+    return this.swapTrigger.run(JSON.stringify(trigger), columns.issueId, columns.identifier, columns.teamKey, id).changes === 1;
   }
 
   findQueued(issueId: string): Job | null {

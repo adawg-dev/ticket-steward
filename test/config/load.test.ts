@@ -121,6 +121,27 @@ describe("loadConfig", () => {
   });
 });
 
+describe("loadConfig review", () => {
+  it("resolves review.prompt against the config dir", async () => {
+    await writeFile(join(dir, "steward.config.ts"), configSource(`review: { botUsername: "steward-bot", prompt: "./prompts/review.md" },`));
+    const { config } = await loadConfig({ cwd: dir });
+    expect(config.review).toEqual({ botUsername: "steward-bot", prompt: join(dir, "prompts", "review.md"), allowForks: false, maxComments: 15 });
+  });
+
+  it("leaves review undefined when it is not configured", async () => {
+    await writeFile(join(dir, "steward.config.ts"), configSource());
+    const { config } = await loadConfig({ cwd: dir });
+    expect(config.review).toBeUndefined();
+  });
+
+  it("reads the GitLab webhook secrets from .env", async () => {
+    await writeFile(join(dir, "steward.config.ts"), configSource());
+    await writeFile(join(dir, ".env"), "GITLAB_WEBHOOK_SECRET=gl-secret\nGITLAB_WEBHOOK_SIGNING_TOKEN=gl-signing\n");
+    const { secrets } = await loadConfig({ cwd: dir });
+    expect(secrets).toEqual({ GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_WEBHOOK_SIGNING_TOKEN: "gl-signing" });
+  });
+});
+
 describe("SecretsSchema", () => {
   it("accepts LINEAR_API_KEY and LINEAR_WEBHOOK_SECRET", () => {
     expect(SecretsSchema.parse({ LINEAR_API_KEY: "lin_api_test", LINEAR_WEBHOOK_SECRET: "whsec" })).toEqual({

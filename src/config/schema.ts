@@ -45,6 +45,18 @@ export const StewardConfigSchema = z.object({
     port: z.number().int().positive(),
     publicUrl: z.string(),
   }),
+  review: z
+    .object({
+      botUsername: z.string().min(1),
+      prompt: z.string(),
+      allowForks: z.boolean().default(false),
+      maxComments: z.number().int().positive().default(15),
+    })
+    .optional(),
+}).superRefine((config, ctx) => {
+  if (config.review !== undefined && config.codehost.kind !== "gitlab") {
+    ctx.addIssue({ code: "custom", path: ["review"], message: 'review requires codehost.kind "gitlab"' });
+  }
 });
 
 export type StewardConfig = z.infer<typeof StewardConfigSchema>;
