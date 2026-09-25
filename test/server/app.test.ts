@@ -19,7 +19,7 @@ let app: FastifyInstance;
 const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich"): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues },
+  tracker: { kind: "linear", teams: ["API"], gatewayIssues, bugLabels: ["Bug"] },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",

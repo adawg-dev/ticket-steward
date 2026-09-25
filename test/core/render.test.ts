@@ -16,6 +16,7 @@ const result: BrainResult = {
   enrichment: "Look at `src/handler.ts:12` and `src/handler.ts`.",
   attachments: [],
   confidence: "high",
+  repro: null,
 };
 
 const permalink: SectionMeta["permalink"] = (path, line) =>

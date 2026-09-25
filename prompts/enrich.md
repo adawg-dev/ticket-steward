@@ -27,7 +27,33 @@ The team uses these templates. Decide which one the ticket content actually matc
 3. State a probable cause (for bugs) or an implementation approach (for features), then list concrete next steps for the engineer who picks this up.
 4. For UI tickets, if a screenshot would clarify the issue, start the app on port {{stewardPort}} using the steward-provided skill (it reads `STEWARD_PORT`), take screenshots with the Playwright tools, save them under `{{artifactsDir}}`, and list them in `attachments`. Stop the app when you are done.
 5. Reference files as `relative/path.ts:line` (relative to `{{workspacePath}}`, wrapped in backticks). The steward turns these into permalinks. Experimental edits inside the checkout are fine while you investigate; never commit, never push, and never touch anything outside `{{workspacePath}}` and `{{artifactsDir}}`.
-6. Finish with the structured result.
+6. Reproduce (bug tickets only), as described below.
+7. Finish with the structured result.
+
+{{#isBug}}
+## Reproduce the bug
+
+This ticket is labelled as a bug, so also try to reproduce it. Work only against the app started from this checkout on port {{stewardPort}} (the steward skill starts it and uses the sandbox credentials already in the checkout). Never call staging or production URLs, and never use credentials other than the ones in the checkout.
+
+Choose the most direct method that shows the bug:
+
+- `test`: add one focused test file to the workspace and run only that file;
+- `script`: add a small script (node, tsx or bash) and run it;
+- `http`: call the local app with curl or a similar one-liner;
+- `browser`: drive the local app with the Playwright tools.
+
+Record exactly what you did in `repro`, because the steward replays it later on the merge request that fixes the bug, with no other context:
+
+- `command`: the single shell command, run from `{{workspacePath}}`, that shows the bug (null only for `browser`);
+- `steps`: numbered, concrete steps (routes, personas, inputs, clicks), enough for someone else to repeat them;
+- `files`: every file you created for the reproduction, as paths relative to `{{workspacePath}}` (the steward saves them with the recipe; leave them in place);
+- `expected` and `observed`: what should happen and what actually happened, quoting the decisive output.
+
+Set `status` to `reproduced` only if you saw the bug happen yourself; otherwise `not_reproduced`, and say why in `observed`. Do not run the full test suite, lint or typecheck.
+{{/isBug}}
+{{^isBug}}
+This ticket is not labelled as a bug: set `repro` to null.
+{{/isBug}}
 
 ## Result contract
 
@@ -38,5 +64,6 @@ Return a single JSON object with exactly these keys:
 - `enrichment`: the markdown body of the Enrichment section. Use short headings such as "Where to look", "Probable cause", "Next steps", and "Related changes". Do not repeat the ticket.
 - `attachments`: a list of `{ "file": <path relative to {{artifactsDir}}>, "caption": <short caption> }`. Only files you saved under `{{artifactsDir}}` with the extensions png, jpg, jpeg, gif, webp, txt, log, or json and smaller than 10 MB are published; anything else is dropped. Use `[]` when there are none.
 - `confidence`: `"low"`, `"medium"`, or `"high"`, reflecting how sure you are about the cause or approach.
+- `repro`: {{#isBug}}`{ "status": "reproduced" | "not_reproduced", "method": "test" | "script" | "http" | "browser", "command": <string or null>, "steps": [<string>], "files": [<workspace-relative path>], "expected": <string>, "observed": <string> }`{{/isBug}}{{^isBug}}`null`{{/isBug}}
 
 Do not include credentials, tokens, or environment variable values in any field.

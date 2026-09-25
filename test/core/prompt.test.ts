@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { renderPrompt } from "../../src/core/prompt.js";
 import type { PromptVars } from "../../src/core/prompt.js";
@@ -13,6 +14,7 @@ const vars: PromptVars = {
   teamName: "API Team",
   stewardPort: 4100,
   gateway: null,
+  isBug: false,
 };
 
 describe("renderPrompt", () => {
@@ -48,5 +50,35 @@ describe("renderPrompt", () => {
     expect(out).toContain("filed through ticket-gateway");
     expect(out).toContain("routed it as class `billing` to team PLAT");
     expect(out).toContain("untrusted");
+  });
+});
+
+const shipped = readFileSync(new URL("../../prompts/enrich.md", import.meta.url), "utf8");
+const reproVars = (isBug: boolean): PromptVars => ({
+  ticket: "T",
+  templates: "",
+  workspacePath: "/w",
+  baseBranch: "main",
+  sha: "abc",
+  artifactsDir: "/a",
+  teamKey: "API",
+  teamName: "API",
+  stewardPort: 4100,
+  gateway: null,
+  isBug,
+});
+
+describe("enrich prompt reproduction section", () => {
+  it("asks for a reproduction on bug tickets", () => {
+    const text = renderPrompt(shipped, reproVars(true));
+    expect(text).toContain("## Reproduce the bug");
+    expect(text).toContain("port 4100");
+    expect(text).not.toContain("set `repro` to null");
+  });
+
+  it("tells the brain to return a null repro otherwise", () => {
+    const text = renderPrompt(shipped, reproVars(false));
+    expect(text).not.toContain("## Reproduce the bug");
+    expect(text).toContain("set `repro` to null");
   });
 });

@@ -17,6 +17,7 @@ export const StewardConfigSchema = z.object({
     teams: z.array(z.string()).default([]),
     /** "skip" only when ticket-gateway enriches its own tickets through the steward (sidecar mode); otherwise both would enrich them. */
     gatewayIssues: z.enum(["enrich", "skip"]).default("enrich"),
+    bugLabels: z.array(z.string()).default(["Bug"]),
   }),
   codehost: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("gitlab"), baseUrl: z.string(), project: z.string() }),

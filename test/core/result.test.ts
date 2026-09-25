@@ -6,6 +6,7 @@ const valid = {
   enrichment: "Look at `src/handler.ts:12`.",
   attachments: [],
   confidence: "high",
+  repro: null,
 };
 
 describe("validateResult", () => {
@@ -41,18 +42,57 @@ describe("validateResult", () => {
 });
 
 describe("brainResultJsonSchema", () => {
-  it("requires all five top-level keys", () => {
+  it("requires all six top-level keys", () => {
     expect(brainResultJsonSchema.required).toEqual([
       "template",
       "summary",
       "enrichment",
       "attachments",
       "confidence",
+      "repro",
     ]);
   });
 
   it("carries no length constraints", () => {
     expect(JSON.stringify(brainResultJsonSchema)).not.toContain("minLength");
     expect(JSON.stringify(brainResultJsonSchema)).not.toContain("maxLength");
+  });
+});
+
+const base = {
+  template: { matched: null, conforms: true, missing: [] },
+  summary: "s",
+  enrichment: "e",
+  attachments: [],
+  confidence: "high",
+};
+
+const repro = {
+  status: "reproduced",
+  method: "test",
+  command: "pnpm --filter api vitest run test/repro-api-1.test.ts",
+  steps: ["Run the focused test"],
+  files: ["apps/api/test/repro-api-1.test.ts"],
+  expected: "The final chunk is delivered",
+  observed: "The stream ends one chunk early",
+};
+
+describe("validateResult repro", () => {
+  it("accepts a null repro and a full recipe", () => {
+    expect(validateResult({ ...base, repro: null }).ok).toBe(true);
+    expect(validateResult({ ...base, repro }).ok).toBe(true);
+  });
+
+  it("requires the repro key", () => {
+    expect(validateResult(base).ok).toBe(false);
+  });
+
+  it("requires a command unless the method is browser", () => {
+    expect(validateResult({ ...base, repro: { ...repro, command: null } })).toEqual({ ok: false, error: "repro.command is required unless repro.method is browser" });
+    expect(validateResult({ ...base, repro: { ...repro, method: "browser", command: null } }).ok).toBe(true);
+  });
+
+  it("requires steps for a browser recipe", () => {
+    expect(validateResult({ ...base, repro: { ...repro, method: "browser", command: null, steps: [] } })).toEqual({ ok: false, error: "repro.steps is empty" });
   });
 });

@@ -56,6 +56,7 @@ const brainResult: BrainResult = {
   enrichment: "See `src/adapter.ts:12`.",
   attachments: [],
   confidence: "high",
+  repro: null,
 };
 
 const expectedSection = (sha: string, jobId: number, extra = ""): string =>
@@ -81,7 +82,7 @@ let port: number;
 const makeConfig = (overrides: Partial<StewardConfig["workspace"]> = {}): StewardConfig => ({
   dataDir: repo.dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich" },
+  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich", bugLabels: ["Bug"] },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: repo.repo,
@@ -162,6 +163,22 @@ describe("runJob", () => {
     expect(tracker.comments("issue-1")).toEqual([expectedComment(ctx.jobId)]);
     expect(stores.jobs.get(ctx.jobId)?.result).toEqual(brainResult);
     expect(stores.jobs.get(ctx.jobId)?.resultSha).toBe(repo.sha);
+  });
+
+  it("stores the recipe for a bug ticket", async () => {
+    const recipe = { status: "reproduced" as const, method: "http" as const, command: "curl -s localhost:4100/x", steps: [], files: [], expected: "200", observed: "500" };
+    const ctx = claimJob(createdTrigger);
+    const outcome = await runJob(ctx, makeDeps(brainWith({ result: { ...brainResult, repro: recipe } })));
+    expect(outcome.status).toBe("succeeded");
+    expect(stores.jobs.get(ctx.jobId)?.result?.repro).toEqual(recipe);
+  });
+
+  it("drops the recipe for a ticket without a bug label", async () => {
+    tracker.addIssue({ ...issue, labels: ["Feature"] });
+    const recipe = { status: "reproduced" as const, method: "http" as const, command: "curl -s localhost:4100/x", steps: [], files: [], expected: "200", observed: "500" };
+    const ctx = claimJob(createdTrigger);
+    await runJob(ctx, makeDeps(brainWith({ result: { ...brainResult, repro: recipe } })));
+    expect(stores.jobs.get(ctx.jobId)?.result?.repro).toBeNull();
   });
 
   it("keeps a description edit made while the brain was running", async () => {

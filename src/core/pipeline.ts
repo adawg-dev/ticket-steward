@@ -12,7 +12,8 @@ import { gatewayRoute, isGatewayIssue } from "./gateway.js";
 import { renderPrompt } from "./prompt.js";
 import type { Redactor } from "./redact.js";
 import { buildComment, buildEnrichmentSection, replaceSection } from "./render.js";
-import { validateResult, type BrainResult } from "./result.js";
+import { isBugTicket, normalizeRepro } from "./repro.js";
+import { validateResult, type BrainResult, type Repro } from "./result.js";
 import type { JobOutcome, RunContext } from "./types.js";
 import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, patchAttempt, prepareWorkspace, redactOutcome, type JobPaths } from "./workspace.js";
 
@@ -23,13 +24,26 @@ interface Prepared {
   bundle: TicketBundle;
   worktree: Worktree;
   prompt: string;
+  isBug: boolean;
 }
+
+const redactRepro = (repro: Repro | null, redactor: Redactor): Repro | null =>
+  repro === null
+    ? null
+    : {
+        ...repro,
+        command: repro.command === null ? null : redactor.redact(repro.command),
+        steps: repro.steps.map((step) => redactor.redact(step)),
+        expected: redactor.redact(repro.expected),
+        observed: redactor.redact(repro.observed),
+      };
 
 const redactResult = (result: BrainResult, redactor: Redactor): BrainResult => ({
   ...result,
   summary: redactor.redact(result.summary),
   enrichment: redactor.redact(result.enrichment),
   attachments: result.attachments.map((item) => ({ ...item, caption: redactor.redact(item.caption) })),
+  repro: redactRepro(result.repro, redactor),
 });
 
 const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env: Record<string, string>, onWorktree: (worktree: Worktree) => void): Promise<Prepared> => {
@@ -38,6 +52,7 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env
   await mirror.fetch();
   const sha = await mirror.resolveSha(config.workspace.baseBranch);
   const worktree = await prepareWorkspace(ctx, deps, paths, env, sha, onWorktree);
+  const isBug = isBugTicket(bundle.labels, config.tracker.bugLabels);
   const prompt = renderPrompt(await readFile(config.prompt, "utf8"), {
     ticket: renderTicketMarkdown(bundle),
     templates: renderTemplatesMarkdown(bundle),
@@ -49,8 +64,9 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env
     teamName: bundle.team.name,
     stewardPort: config.workspace.port,
     gateway: isGatewayIssue(bundle.description) ? (gatewayRoute(bundle.description) ?? { className: "unknown", teamKey: "unknown" }) : null,
+    isBug,
   });
-  return { bundle, worktree, prompt };
+  return { bundle, worktree, prompt, isBug };
 };
 
 const uploadAttachments = async (deps: PipelineDeps, artifactsDir: string, result: BrainResult): Promise<{ uploaded: Array<{ url: string; caption: string }>; notes: string[] }> => {
@@ -118,8 +134,9 @@ const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktre
   if (!run.ok) return { status: "failed", error: run.error ?? "brain run failed", retryable: run.error === INTERRUPTED_ERROR };
   const validated = validateResult(run.output);
   if (!validated.ok) return { status: "failed", error: validated.error, retryable: false };
-  if (!ctx.dryRun) deps.stores.jobs.saveResult(ctx.jobId, validated.result, worktree.sha);
-  return publish(ctx, deps, validated.result, worktree.sha, paths.artifactsDir);
+  const result = normalizeRepro(validated.result, prepared.isBug);
+  if (!ctx.dryRun) deps.stores.jobs.saveResult(ctx.jobId, result, worktree.sha);
+  return publish(ctx, deps, result, worktree.sha, paths.artifactsDir);
 };
 
 export const runJob = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {

@@ -30,4 +30,5 @@ export const brainResult: BrainResult = {
   enrichment: "See `src/adapter.ts:12`.",
   attachments: [],
   confidence: "high",
+  repro: null,
 };

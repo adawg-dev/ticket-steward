@@ -14,6 +14,8 @@ export interface PromptVars {
   stewardPort: number;
   /** Set for tickets filed through ticket-gateway (Slack intake); null otherwise. */
   gateway: { className: string; teamKey: string } | null;
+  /** The ticket carries one of `tracker.bugLabels`, so the brain is asked to reproduce it. */
+  isBug: boolean;
 }
 
 const verbatim = (value: string): string => value;

@@ -37,6 +37,7 @@ const brainResult: BrainResult = {
   enrichment: "See `src/adapter.ts:12`.",
   attachments: [],
   confidence: "high",
+  repro: null,
 };
 
 let dataDir: string;
@@ -49,7 +50,7 @@ let worker: WorkerHandle | null;
 const makeConfig = (): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich" },
+  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich", bugLabels: ["Bug"] },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",

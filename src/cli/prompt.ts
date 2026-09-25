@@ -3,6 +3,7 @@ import type { Command } from "commander";
 import { renderTemplatesMarkdown, renderTicketMarkdown } from "../core/context.js";
 import { gatewayRoute, isGatewayIssue } from "../core/gateway.js";
 import { renderPrompt } from "../core/prompt.js";
+import { isBugTicket } from "../core/repro.js";
 import { loadFromProgram, type CliContext } from "./context.js";
 import { artifactsDir } from "./paths.js";
 import { openMirror, openTracker } from "./runtime.js";
@@ -47,6 +48,7 @@ export const registerPrompt = (program: Command, ctx: CliContext): void => {
           teamName: bundle.team.name,
           stewardPort: config.workspace.port,
           gateway: isGatewayIssue(bundle.description) ? (gatewayRoute(bundle.description) ?? { className: "unknown", teamKey: "unknown" }) : null,
+          isBug: isBugTicket(bundle.labels, config.tracker.bugLabels),
         }),
       );
     });

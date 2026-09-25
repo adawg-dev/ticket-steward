@@ -30,6 +30,7 @@ describe("StewardConfigSchema", () => {
     expect(parsed.retention).toEqual({ keptWorktrees: 3, days: 30 });
     expect(parsed.tracker.teams).toEqual([]);
     expect(parsed.tracker.gatewayIssues).toBe("enrich");
+    expect(parsed.tracker.bugLabels).toEqual(["Bug"]);
   });
 
   it("rejects a config missing a required field", () => {
