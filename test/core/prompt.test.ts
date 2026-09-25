@@ -12,6 +12,7 @@ const vars: PromptVars = {
   teamKey: "API",
   teamName: "API Team",
   stewardPort: 4100,
+  gateway: null,
 };
 
 describe("renderPrompt", () => {
@@ -38,5 +39,14 @@ describe("renderPrompt", () => {
     expect(rendered).toContain("API Team");
     expect(rendered).toContain("4100");
     expect(rendered).toContain("Reference files as `relative/path.ts:line`");
+  });
+
+  it("renders the gateway block only for gateway tickets", async () => {
+    const template = await readFile("prompts/enrich.md", "utf8");
+    expect(renderPrompt(template, vars)).not.toContain("ticket-gateway");
+    const out = renderPrompt(template, { ...vars, gateway: { className: "billing", teamKey: "PLAT" } });
+    expect(out).toContain("filed through ticket-gateway");
+    expect(out).toContain("routed it as class `billing` to team PLAT");
+    expect(out).toContain("untrusted");
   });
 });

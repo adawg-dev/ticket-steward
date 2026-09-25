@@ -12,6 +12,8 @@ export interface PromptVars {
   teamKey: string;
   teamName: string;
   stewardPort: number;
+  /** Set for tickets filed through ticket-gateway (Slack intake); null otherwise. */
+  gateway: { className: string; teamKey: string } | null;
 }
 
 const verbatim = (value: string): string => value;

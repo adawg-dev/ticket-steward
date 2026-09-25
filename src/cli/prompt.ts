@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { Command } from "commander";
 import { renderTemplatesMarkdown, renderTicketMarkdown } from "../core/context.js";
+import { gatewayRoute, isGatewayIssue } from "../core/gateway.js";
 import { renderPrompt } from "../core/prompt.js";
 import { loadFromProgram, type CliContext } from "./context.js";
 import { artifactsDir } from "./paths.js";
@@ -45,6 +46,7 @@ export const registerPrompt = (program: Command, ctx: CliContext): void => {
           teamKey,
           teamName: bundle.team.name,
           stewardPort: config.workspace.port,
+          gateway: isGatewayIssue(bundle.description) ? (gatewayRoute(bundle.description) ?? { className: "unknown", teamKey: "unknown" }) : null,
         }),
       );
     });

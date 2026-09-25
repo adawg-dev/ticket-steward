@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { INTERRUPTED_ERROR, runBrainDetached } from "../../src/brain/index.js";
 import type { FakeBrainPids } from "../../src/brain/fake.js";
 import type { BrainInput, BrainRun } from "../../src/brain/types.js";
@@ -19,6 +20,7 @@ import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 
 const PROMPT_TEMPLATE = "Ticket:\n{{ticket}}\n\nWorkspace: {{workspacePath}} @ {{sha}}\n";
+const DEFAULT_PROMPT_PATH = fileURLToPath(new URL("../../prompts/enrich.md", import.meta.url));
 const NOW = new Date("2026-09-11T14:02:30.000Z");
 
 const issue: TicketBundle = {
@@ -316,6 +318,29 @@ describe("runJob", () => {
     expect(Object.keys(input.mcpServers).sort()).toEqual(["codehost", "playwright"]);
     expect(input.env.ANTHROPIC_API_KEY).toBe("sk-ant-test-key-value");
     expect(input.env.STEWARD_PORT).toBe(String(port));
+  });
+
+  it("tells the brain about a ticket-gateway ticket and its routing", async () => {
+    const gatewayIssue: TicketBundle = {
+      ...issue,
+      description: "The adapter loses the final chunk.\n\n---\n\n_Routed by ticket-gateway · class `billing` (p=0.91, margin 0.40, auto) → PLAT · reported by Ana via Slack /ticket_",
+    };
+    tracker = new FakeTracker([gatewayIssue]);
+    const ctx = claimJob(createdTrigger);
+    const brain = brainWith();
+
+    await runJob(ctx, makeDeps(brain, { config: { ...makeConfig(), prompt: DEFAULT_PROMPT_PATH } }));
+
+    expect(brain.lastInput().prompt).toContain("routed it as class `billing` to team PLAT");
+  });
+
+  it("leaves the gateway block out of the prompt for an ordinary ticket", async () => {
+    const ctx = claimJob(createdTrigger);
+    const brain = brainWith();
+
+    await runJob(ctx, makeDeps(brain, { config: { ...makeConfig(), prompt: DEFAULT_PROMPT_PATH } }));
+
+    expect(brain.lastInput().prompt).not.toContain("ticket-gateway");
   });
 
   it("stores the pre-write description on the attempt without closing it", async () => {

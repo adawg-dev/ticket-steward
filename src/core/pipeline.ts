@@ -22,6 +22,7 @@ import { copySkills } from "../workspace/skills.js";
 import { createWorktree, type Worktree } from "../workspace/worktree.js";
 import { resolveAttachments } from "./attachments.js";
 import { renderTemplatesMarkdown, renderTicketMarkdown } from "./context.js";
+import { gatewayRoute, isGatewayIssue } from "./gateway.js";
 import { renderPrompt } from "./prompt.js";
 import type { Redactor } from "./redact.js";
 import { buildComment, buildEnrichmentSection, replaceSection } from "./render.js";
@@ -137,6 +138,7 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env
     teamKey: ctx.teamKey,
     teamName: bundle.team.name,
     stewardPort: config.workspace.port,
+    gateway: isGatewayIssue(bundle.description) ? (gatewayRoute(bundle.description) ?? { className: "unknown", teamKey: "unknown" }) : null,
   });
   return { bundle, worktree, prompt };
 };
