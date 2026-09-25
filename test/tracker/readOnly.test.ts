@@ -22,9 +22,7 @@ const bundle: TicketBundle = {
 const writeDescriptionMock = vi.fn<Tracker["writeDescription"]>();
 const postCommentMock = vi.fn<Tracker["postComment"]>();
 const uploadFileMock = vi.fn<Tracker["uploadFile"]>();
-const thoughtMock = vi.fn<Tracker["agentSession"]["thought"]>();
-const responseMock = vi.fn<Tracker["agentSession"]["response"]>();
-const errorMock = vi.fn<Tracker["agentSession"]["error"]>();
+const apiKeyRejectedMock = vi.fn<Tracker["apiKeyRejected"]>();
 
 const inner: Tracker = {
   kind: "linear",
@@ -34,7 +32,7 @@ const inner: Tracker = {
   writeDescription: writeDescriptionMock,
   postComment: postCommentMock,
   uploadFile: uploadFileMock,
-  agentSession: { thought: thoughtMock, response: responseMock, error: errorMock },
+  apiKeyRejected: apiKeyRejectedMock,
 };
 
 describe("ReadOnlyTracker", () => {
@@ -56,21 +54,20 @@ describe("ReadOnlyTracker", () => {
     const tracker = new ReadOnlyTracker(inner);
     await tracker.writeDescription("issue-uuid-1", "new description");
     await tracker.postComment("issue-uuid-1", "a comment");
-    await tracker.agentSession.thought("session-1", "thinking");
-    await tracker.agentSession.response("session-1", "done");
-    await tracker.agentSession.error("session-1", "oops");
     expect(tracker.writes).toEqual([
       { method: "writeDescription", args: ["issue-uuid-1", "new description"] },
       { method: "postComment", args: ["issue-uuid-1", "a comment"] },
-      { method: "agentSession.thought", args: ["session-1", "thinking"] },
-      { method: "agentSession.response", args: ["session-1", "done"] },
-      { method: "agentSession.error", args: ["session-1", "oops"] },
     ]);
     expect(writeDescriptionMock).not.toHaveBeenCalled();
     expect(postCommentMock).not.toHaveBeenCalled();
-    expect(thoughtMock).not.toHaveBeenCalled();
-    expect(responseMock).not.toHaveBeenCalled();
-    expect(errorMock).not.toHaveBeenCalled();
+  });
+
+  it("reports the inner tracker's API key state", () => {
+    const tracker = new ReadOnlyTracker(inner);
+    apiKeyRejectedMock.mockReturnValue(false);
+    expect(tracker.apiKeyRejected()).toBe(false);
+    apiKeyRejectedMock.mockReturnValue(true);
+    expect(tracker.apiKeyRejected()).toBe(true);
   });
 
   it("returns a file:// url for uploads and records the call", async () => {

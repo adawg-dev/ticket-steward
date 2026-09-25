@@ -9,8 +9,7 @@ import { StewardConfigSchema } from "./schema.js";
 import type { StewardConfig } from "./schema.js";
 
 export const SecretsSchema = z.object({
-  LINEAR_CLIENT_ID: z.string().optional(),
-  LINEAR_CLIENT_SECRET: z.string().optional(),
+  LINEAR_API_KEY: z.string().optional(),
   LINEAR_WEBHOOK_SECRET: z.string().optional(),
   MIRROR_TOKEN: z.string().optional(),
   GITLAB_TOKEN: z.string().optional(),

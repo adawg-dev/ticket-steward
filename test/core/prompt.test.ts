@@ -12,7 +12,6 @@ const vars: PromptVars = {
   teamKey: "API",
   teamName: "API Team",
   stewardPort: 4100,
-  operatorInstructions: "Focus on the auth middleware.",
 };
 
 describe("renderPrompt", () => {
@@ -38,7 +37,6 @@ describe("renderPrompt", () => {
     expect(rendered).toContain("/tmp/jobs/42/artifacts");
     expect(rendered).toContain("API Team");
     expect(rendered).toContain("4100");
-    expect(rendered).toContain("Focus on the auth middleware.");
     expect(rendered).toContain("Reference files as `relative/path.ts:line`");
   });
 });

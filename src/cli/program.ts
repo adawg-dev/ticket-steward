@@ -1,5 +1,4 @@
 import { Command } from "commander";
-import { registerAuth } from "./auth.js";
 import { defaultContext, exitWith, type CliContext } from "./context.js";
 import { registerDoctor } from "./doctor.js";
 import { registerEnrich } from "./enrich.js";
@@ -23,7 +22,6 @@ export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
     .exitOverride((err) => exitWith(ctx, err.exitCode));
   registerInit(program, ctx);
   registerDoctor(program, ctx);
-  registerAuth(program, ctx);
   registerMirror(program, ctx);
   registerOverlay(program, ctx);
   registerServe(program, ctx);

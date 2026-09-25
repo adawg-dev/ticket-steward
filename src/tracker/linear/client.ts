@@ -1,8 +1,8 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { LinearClient, LinearError, LinearErrorType, type Comment, type Issue, type Template } from "@linear/sdk";
+import { logger } from "../../log.js";
 import type { TicketBundle, Tracker } from "../types.js";
-import type { LinearAuth } from "./auth.js";
 import { toTemplateSummary } from "./templates.js";
 
 const WRITE_BACKOFF_MS = [500, 1000, 2000];
@@ -20,23 +20,30 @@ const commentAuthor = async (comment: Comment): Promise<string> => {
 
 const isIssueTemplate = (template: Template): boolean => template.type === "issue";
 
+/** A personal API key goes out as a raw `Authorization: <key>` header; `accessToken` would add `Bearer`. */
+export const createLinearClient = (apiKey: string): LinearClient => new LinearClient({ apiKey });
+
+/** Linear answered 401: the personal API key is invalid or was revoked. Retrying cannot help. */
+export class LinearApiKeyRejectedError extends Error {
+  constructor() {
+    super("Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked. Create a new personal API key, update .env and restart the steward.");
+    this.name = "LinearApiKeyRejectedError";
+  }
+}
+
 export class LinearTracker implements Tracker {
   readonly kind = "linear";
-  readonly agentSession: Tracker["agentSession"];
   private readonly fetchImpl: typeof fetch;
-  private readonly clientFactory: (token: string) => LinearClient;
+  private readonly client: LinearClient;
+  private rejected = false;
 
-  constructor(
-    private readonly auth: LinearAuth,
-    opts: { fetchImpl?: typeof fetch; clientFactory?: (token: string) => LinearClient } = {},
-  ) {
+  constructor(apiKey: string, opts: { fetchImpl?: typeof fetch; clientFactory?: (apiKey: string) => LinearClient } = {}) {
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.clientFactory = opts.clientFactory ?? ((token) => new LinearClient({ accessToken: token }));
-    this.agentSession = {
-      thought: (sessionId, body) => this.activity(sessionId, "thought", body),
-      response: (sessionId, body) => this.activity(sessionId, "response", body),
-      error: (sessionId, body) => this.activity(sessionId, "error", body),
-    };
+    this.client = (opts.clientFactory ?? createLinearClient)(apiKey);
+  }
+
+  apiKeyRejected(): boolean {
+    return this.rejected;
   }
 
   async resolveIssueId(idOrKey: string): Promise<{ id: string; identifier: string; teamKey: string }> {
@@ -119,16 +126,16 @@ export class LinearTracker implements Tracker {
     });
   }
 
-  private async activity(sessionId: string, type: "thought" | "response" | "error", body: string): Promise<void> {
-    await this.write((client) => client.createAgentActivity({ agentSessionId: sessionId, content: { type, body } }));
-  }
-
+  /** Maps a 401 to `LinearApiKeyRejectedError` and latches `apiKeyRejected()`, logging loudly the first time. */
   private async withAuth<T>(fn: (client: LinearClient) => Promise<T>): Promise<T> {
     try {
-      return await fn(this.clientFactory(await this.auth.accessToken()));
+      return await fn(this.client);
     } catch (error) {
       if (!isUnauthorized(error)) throw error;
-      return fn(this.clientFactory(await this.auth.handleUnauthorized()));
+      const rejected = new LinearApiKeyRejectedError();
+      if (!this.rejected) logger.error({ err: rejected.message }, "Linear API key rejected; the worker stops claiming jobs until the steward restarts");
+      this.rejected = true;
+      throw rejected;
     }
   }
 
@@ -138,6 +145,7 @@ export class LinearTracker implements Tracker {
       try {
         return await this.withAuth(fn);
       } catch (error) {
+        if (error instanceof LinearApiKeyRejectedError) throw error;
         lastError = error;
         if (index < WRITE_BACKOFF_MS.length - 1) await sleep(backoff);
       }

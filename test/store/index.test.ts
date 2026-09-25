@@ -14,10 +14,10 @@ describe("openStores", () => {
     const b = openStores(dataDir);
 
     const id = a.jobs.enqueue(createdEvent);
-    b.tokens.setAuthBroken(true);
+    expect(b.deliveries.markSeen("delivery-1")).toBe(true);
 
     expect(b.jobs.get(id)?.issueId).toBe("issue-1");
-    expect(a.tokens.isAuthBroken()).toBe(true);
+    expect(a.deliveries.markSeen("delivery-1")).toBe(false);
     a.db.close();
     b.db.close();
   });
@@ -29,6 +29,29 @@ describe("openStores", () => {
 
     expect(statSync(dataDir).mode & 0o777).toBe(0o700);
     expect(statSync(join(dataDir, "steward.db")).mode & 0o777).toBe(0o600);
+    stores.db.close();
+  });
+
+  it("opens a database from the OAuth era and drops its token tables", () => {
+    const dataDir = freshDataDir();
+    const legacy = openStores(dataDir);
+    const id = legacy.jobs.enqueue(createdEvent);
+    legacy.db.exec(`
+      CREATE TABLE tokens (id INTEGER PRIMARY KEY CHECK (id = 1), access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, expires_at TEXT NOT NULL, app_user_id TEXT);
+      INSERT INTO tokens VALUES (1, 'lin_oauth_access', 'lin_oauth_refresh', '2026-01-01T00:00:00.000Z', 'app-user');
+      CREATE TABLE oauth_state (state TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+      CREATE TABLE flags (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO flags VALUES ('auth_broken', '1');
+    `);
+    legacy.db.close();
+
+    const stores = openStores(dataDir);
+
+    expect(stores.jobs.get(id)?.issueId).toBe("issue-1");
+    const tables = stores.db.prepare<[], { name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name);
+    expect(tables).not.toContain("tokens");
+    expect(tables).not.toContain("oauth_state");
+    expect(tables).not.toContain("flags");
     stores.db.close();
   });
 

@@ -45,28 +45,13 @@ CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
   seen_at TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS tokens (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  access_token TEXT NOT NULL,
-  refresh_token TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  app_user_id TEXT
-);
-
-CREATE TABLE IF NOT EXISTS oauth_state (
-  state TEXT PRIMARY KEY,
-  expires_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS flags (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
 `;
 
 /** Columns added after the first release; applied to databases created before them. */
 const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }> = [{ table: "jobs", column: "not_before", definition: "TEXT" }];
+
+/** Tables of the removed Linear OAuth flow; dropped so stored OAuth tokens do not linger on disk. */
+const DROPPED_TABLES = ["tokens", "oauth_state", "flags"];
 
 const TableInfo = z.array(z.object({ name: z.string() }));
 
@@ -75,6 +60,10 @@ const addMissingColumns = (db: Database): void => {
     const present = TableInfo.parse(db.pragma(`table_info(${table})`)).some((row) => row.name === column);
     if (!present) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+};
+
+const dropRemovedTables = (db: Database): void => {
+  for (const table of DROPPED_TABLES) db.exec(`DROP TABLE IF EXISTS ${table}`);
 };
 
 export const DB_FILENAME = "steward.db";
@@ -88,6 +77,7 @@ export const openDatabase = (dataDir: string): Database => {
   db.pragma("busy_timeout = 5000");
   db.exec(MIGRATIONS);
   addMissingColumns(db);
+  dropRemovedTables(db);
   return db;
 };
 

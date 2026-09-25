@@ -5,8 +5,7 @@ const BASE_KEYS = ["CI", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "HOME", "LA
 const claudeCode: BrainConfig = { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 };
 const openaiAgents: BrainConfig = { kind: "openai-agents", model: "gpt-5.5", maxTurns: 80, timeoutMinutes: 30 };
 const allSecrets = {
-  LINEAR_CLIENT_ID: "linear-client-id",
-  LINEAR_CLIENT_SECRET: "linear-client-secret",
+  LINEAR_API_KEY: "lin_api_linear-key",
   LINEAR_WEBHOOK_SECRET: "linear-webhook-secret",
   MIRROR_TOKEN: "mirror-token",
   GITLAB_TOKEN: "glpat-gitlab-token",

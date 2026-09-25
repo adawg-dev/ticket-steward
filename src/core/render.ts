@@ -63,4 +63,4 @@ export const replaceSection = (description: string, section: string): string => 
 };
 
 export const buildComment = (result: BrainResult, jobId: number): string =>
-  `Enrichment added (job ${jobId}, confidence ${result.confidence}). ${truncate(result.summary, SUMMARY_MAX)}\n@mention or assign me to re-run.`;
+  `Enrichment added (job ${jobId}, confidence ${result.confidence}). ${truncate(result.summary, SUMMARY_MAX)}`;

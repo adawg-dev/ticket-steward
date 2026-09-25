@@ -23,9 +23,9 @@ describe("Redactor", () => {
     expect(redactor.redact("using glpat-AbCdEfGhIjKlMnOpQrSt now")).toBe("using *** now");
   });
 
-  it("replaces sk-, ghp_ and lin_oauth_ tokens by pattern", () => {
+  it("replaces sk-, ghp_, lin_api_ and lin_oauth_ tokens by pattern", () => {
     const redactor = new Redactor([]);
-    expect(redactor.redact("sk-abcdefghijklmnop ghp_ABCDEFGHIJKLMNOP lin_oauth_abcdefghijklmnop")).toBe("*** *** ***");
+    expect(redactor.redact("sk-abcdefghijklmnop ghp_ABCDEFGHIJKLMNOP lin_api_abcdefghijklmnop lin_oauth_abcdefghijklmnop")).toBe("*** *** *** ***");
   });
 
   it("replaces credentials in postgres connection strings", () => {
@@ -74,7 +74,7 @@ describe("collectSecretValues", () => {
         "# comment",
       ].join("\n"),
     );
-    const values = collectSecretValues({ LINEAR_CLIENT_SECRET: "linear-secret", MIRROR_TOKEN: undefined }, [envFile]);
+    const values = collectSecretValues({ LINEAR_API_KEY: "linear-secret", MIRROR_TOKEN: undefined }, [envFile]);
     expect(values).toEqual(["linear-secret", "postgres://u:p@host/db", "sk_test_abcdefgh", "mailpass123"]);
   });
 

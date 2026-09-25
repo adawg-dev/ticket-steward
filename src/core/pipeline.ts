@@ -45,11 +45,6 @@ export interface PipelineDeps {
   signal?: AbortSignal;
 }
 
-interface Session {
-  id: string | null;
-  operatorInstructions: string;
-}
-
 interface JobPaths {
   worktreeName: string;
   workRoot: string;
@@ -69,26 +64,6 @@ const MINUTE_MS = 60_000;
 const PlaywrightPackage = z.object({ bin: z.union([z.string(), z.record(z.string(), z.string())]) });
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-
-const firstLine = (text: string): string => text.split("\n")[0] ?? text;
-
-/** Runs a best-effort tracker write whose failure must not change the job's outcome. */
-const attempt = async (what: string, fn: () => Promise<void>): Promise<void> => {
-  try {
-    await fn();
-  } catch (err) {
-    logger.warn({ what, err: errorMessage(err) }, "non-fatal pipeline step failed");
-  }
-};
-
-const resolveSession = (ctx: RunContext, deps: PipelineDeps): Session => {
-  const job = ctx.dryRun ? null : deps.stores.jobs.get(ctx.jobId);
-  const trigger = ctx.trigger.kind === "agent.session" ? ctx.trigger : null;
-  return {
-    id: trigger?.sessionId ?? job?.sessionId ?? null,
-    operatorInstructions: trigger?.promptBody ?? job?.promptBody ?? "",
-  };
-};
 
 const jobPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths => {
   const jobDir = join(deps.config.dataDir, "jobs", String(ctx.jobId));
@@ -131,7 +106,7 @@ const redactResult = (result: BrainResult, redactor: Redactor): BrainResult => (
   attachments: result.attachments.map((item) => ({ ...item, caption: redactor.redact(item.caption) })),
 });
 
-const prepare = async (ctx: RunContext, deps: PipelineDeps, session: Session, paths: JobPaths, env: Record<string, string>, onWorktree: (worktree: Worktree) => void): Promise<Prepared> => {
+const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env: Record<string, string>, onWorktree: (worktree: Worktree) => void): Promise<Prepared> => {
   const { config, tracker, mirror } = deps;
   const bundle = await tracker.fetchTicket(ctx.issueId);
   await mirror.fetch();
@@ -162,7 +137,6 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, session: Session, pa
     teamKey: ctx.teamKey,
     teamName: bundle.team.name,
     stewardPort: config.workspace.port,
-    operatorInstructions: session.operatorInstructions,
   });
   return { bundle, worktree, prompt };
 };
@@ -201,7 +175,7 @@ const uploadAttachments = async (deps: PipelineDeps, artifactsDir: string, resul
   return { uploaded, notes: notes.map((note) => deps.redactor.redact(note)) };
 };
 
-const publish = async (ctx: RunContext, deps: PipelineDeps, session: Session, stored: BrainResult, sha: string, artifactsDir: string): Promise<JobOutcome> => {
+const publish = async (ctx: RunContext, deps: PipelineDeps, stored: BrainResult, sha: string, artifactsDir: string): Promise<JobOutcome> => {
   const { tracker, config, codehost } = deps;
   const result = redactResult(stored, deps.redactor);
   try {
@@ -221,8 +195,7 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, session: Session, st
   }
   const comment = buildComment(result, ctx.jobId);
   try {
-    if (session.id === null) await tracker.postComment(ctx.issueId, comment);
-    else await tracker.agentSession.response(session.id, comment);
+    await tracker.postComment(ctx.issueId, comment);
   } catch (err) {
     return { status: "succeeded", warning: errorMessage(err) };
   }
@@ -240,26 +213,17 @@ const cleanup = async (deps: PipelineDeps, worktree: Worktree | null, outcome: J
   }
 };
 
-const execute = async (ctx: RunContext, deps: PipelineDeps, session: Session, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
-  const { config, secrets, tracker } = deps;
+const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
+  const { config, secrets } = deps;
   const paths = jobPaths(ctx, deps);
   const env = buildBrainEnv(secrets, config.brain, config.workspace.port);
   let prepared: Prepared;
   try {
-    prepared = await prepare(ctx, deps, session, paths, env, onWorktree);
+    prepared = await prepare(ctx, deps, paths, env, onWorktree);
   } catch (err) {
     return { status: "failed", error: deps.signal?.aborted === true ? INTERRUPTED_ERROR : errorMessage(err), retryable: true };
   }
   const { worktree, prompt } = prepared;
-  if (session.id !== null) {
-    const sessionId = session.id;
-    await attempt("thought", () =>
-      tracker.agentSession.thought(
-        sessionId,
-        `Investigating \`${config.workspace.baseBranch}@${worktree.sha.slice(0, 7)}\`: reading the ticket and locating the relevant code.`,
-      ),
-    );
-  }
   let run: BrainRun;
   try {
     run = await (deps.runBrain ?? runBrainDetached)(config.brain, brainInput(deps, paths, worktree, prompt, env), deps.redactor, {
@@ -273,28 +237,20 @@ const execute = async (ctx: RunContext, deps: PipelineDeps, session: Session, on
   const validated = validateResult(run.output);
   if (!validated.ok) return { status: "failed", error: validated.error, retryable: false };
   if (!ctx.dryRun) deps.stores.jobs.saveResult(ctx.jobId, validated.result, worktree.sha);
-  return publish(ctx, deps, session, validated.result, worktree.sha, paths.artifactsDir);
-};
-
-const reportTerminalFailure = async (deps: PipelineDeps, session: Session, outcome: JobOutcome): Promise<void> => {
-  if (session.id === null || outcome.status !== "failed" || outcome.retryable) return;
-  const sessionId = session.id;
-  await attempt("error", () => deps.tracker.agentSession.error(sessionId, `Enrichment failed: ${firstLine(outcome.error)}`));
+  return publish(ctx, deps, validated.result, worktree.sha, paths.artifactsDir);
 };
 
 const crashed = (err: unknown): JobOutcome => ({ status: "failed", error: errorMessage(err), retryable: false });
 
 export const runJob = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
-  const session = resolveSession(ctx, deps);
   const workspace: { worktree: Worktree | null } = { worktree: null };
   const outcome = redactOutcome(
-    await execute(ctx, deps, session, (created) => {
+    await execute(ctx, deps, (created) => {
       workspace.worktree = created;
     }).catch(crashed),
     deps.redactor,
   );
   await cleanup(deps, workspace.worktree, outcome);
-  await reportTerminalFailure(deps, session, outcome);
   return outcome;
 };
 
@@ -303,8 +259,7 @@ export const publishOnly = async (ctx: RunContext, deps: PipelineDeps): Promise<
   if (job === null || job.result === null || job.resultSha === null) {
     return { status: "failed", error: "no stored result to publish", retryable: false };
   }
-  const session = resolveSession(ctx, deps);
   const { artifactsDir } = jobPaths(ctx, deps);
   await mkdir(artifactsDir, { recursive: true, mode: 0o700 });
-  return publish(ctx, deps, session, job.result, job.resultSha, artifactsDir);
+  return publish(ctx, deps, job.result, job.resultSha, artifactsDir);
 };

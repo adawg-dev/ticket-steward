@@ -24,21 +24,14 @@ export interface Runtime {
 export const openMirror = (loaded: LoadedConfig): Mirror =>
   new Mirror(mirrorPath(loaded.config.dataDir), injectToken(loaded.config.workspace.fetchUrl, loaded.secrets.MIRROR_TOKEN));
 
-const tokenValues = (stores: Stores): string[] => {
-  const pair = stores.tokens.get();
-  return pair === null ? [] : [pair.accessToken, pair.refreshToken];
-};
-
-/** Secrets from `.env` and the overlay are collected once; the Linear token pair is read from the store on every call. */
-export const buildRedactor = async (loaded: LoadedConfig, stores: Stores): Promise<Redactor> => {
+/** Secrets from `.env` (including `LINEAR_API_KEY`) and the overlay are collected once. */
+export const buildRedactor = async (loaded: LoadedConfig): Promise<Redactor> => {
   const { overlayDir } = loaded.config.workspace;
   const overlayFiles = existsSync(overlayDir) ? (await listFiles(overlayDir)).map((file) => join(overlayDir, file)) : [];
-  const fixed = collectSecretValues(loaded.secrets, overlayFiles);
-  return new Redactor(() => [...fixed, ...tokenValues(stores)]);
+  return new Redactor(collectSecretValues(loaded.secrets, overlayFiles));
 };
 
-export const openTracker = (loaded: LoadedConfig, stores: Stores, ctx: CliContext): Tracker =>
-  ctx.factories?.tracker ?? createLinearTracker(stores, loaded.secrets);
+export const openTracker = (loaded: LoadedConfig, ctx: CliContext): Tracker => ctx.factories?.tracker ?? createLinearTracker(loaded.secrets);
 
 /** An injected brain runs in-process; the real brains run detached via the pipeline's default. */
 const brainRunner = (brain: Brain): Pick<PipelineDeps, "runBrain"> => ({
@@ -48,7 +41,7 @@ const brainRunner = (brain: Brain): Pick<PipelineDeps, "runBrain"> => ({
 export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promise<Runtime> => {
   const { config, secrets, configPath } = loaded;
   const stores = openStores(config.dataDir);
-  const tracker = openTracker(loaded, stores, ctx);
+  const tracker = openTracker(loaded, ctx);
   const injectedBrain = ctx.factories?.brain;
   const deps: PipelineDeps = {
     config,
@@ -60,7 +53,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promi
     codehost: ctx.factories?.codehost ?? createCodeHost(config.codehost, secrets),
     mirror: openMirror(loaded),
     stores,
-    redactor: await buildRedactor(loaded, stores),
+    redactor: await buildRedactor(loaded),
     now: () => new Date(),
     ...(injectedBrain === undefined ? {} : brainRunner(injectedBrain)),
   };

@@ -15,14 +15,13 @@ export const createdEvent: TriggerEvent = {
   description: "A bug report",
 };
 
-export const sessionEvent: Extract<TriggerEvent, { kind: "agent.session" }> = {
-  kind: "agent.session",
-  action: "created",
+export const secondEvent: TriggerEvent = {
+  kind: "issue.created",
   issueId: "issue-2",
   identifier: "API-2",
   teamKey: "API",
-  sessionId: "session-1",
   deliveryId: "delivery-2",
+  description: "Another bug report",
 };
 
 export const brainResult: BrainResult = {

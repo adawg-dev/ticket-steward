@@ -18,7 +18,7 @@ import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 
-const PROMPT_TEMPLATE = "Ticket:\n{{ticket}}\n\nOperator: {{operatorInstructions}}\nWorkspace: {{workspacePath}} @ {{sha}}\n";
+const PROMPT_TEMPLATE = "Ticket:\n{{ticket}}\n\nWorkspace: {{workspacePath}} @ {{sha}}\n";
 const NOW = new Date("2026-09-11T14:02:30.000Z");
 
 const issue: TicketBundle = {
@@ -48,17 +48,6 @@ const createdTrigger: TriggerEvent = {
   description: issue.description,
 };
 
-const sessionTrigger: TriggerEvent = {
-  kind: "agent.session",
-  action: "prompted",
-  issueId: "issue-1",
-  identifier: "API-1",
-  teamKey: "API",
-  sessionId: "session-1",
-  deliveryId: "delivery-2",
-  promptBody: "Focus on the streaming adapter",
-};
-
 const brainResult: BrainResult = {
   template: { matched: "Bugs", conforms: false, missing: ["Repro Steps"] },
   summary: "The adapter truncates the final chunk.",
@@ -80,7 +69,7 @@ const expectedSection = (sha: string, jobId: number, extra = ""): string =>
   ].join("\n");
 
 const expectedComment = (jobId: number): string =>
-  `Enrichment added (job ${jobId}, confidence high). The adapter truncates the final chunk.\n@mention or assign me to re-run.`;
+  `Enrichment added (job ${jobId}, confidence high). The adapter truncates the final chunk.`;
 
 let repo: TmpRepo;
 let stores: Stores;
@@ -173,20 +162,6 @@ describe("runJob", () => {
     expect(stores.jobs.get(ctx.jobId)?.resultSha).toBe(repo.sha);
   });
 
-  it("emits thought and response activities instead of a comment for agent.session", async () => {
-    const ctx = claimJob(sessionTrigger);
-
-    const outcome = await runJob(ctx, makeDeps(brainWith()));
-
-    expect(outcome).toEqual({ status: "succeeded" });
-    expect(tracker.comments("issue-1")).toEqual([]);
-    expect(tracker.sessionActivities("session-1")).toEqual([
-      { type: "thought", body: `Investigating \`main@${repo.sha.slice(0, 7)}\`: reading the ticket and locating the relevant code.` },
-      { type: "response", body: expectedComment(ctx.jobId) },
-    ]);
-    expect(tracker.getDescription("issue-1")).toBe(`The adapter loses the final chunk.\n\n${expectedSection(repo.sha, ctx.jobId)}`);
-  });
-
   it("keeps a description edit made while the brain was running", async () => {
     const ctx = claimJob(createdTrigger);
     const deps = makeDeps(brainWith(), { afterBrain: () => tracker.setDescription("issue-1", "Edited during the run.") });
@@ -196,15 +171,14 @@ describe("runJob", () => {
     expect(tracker.getDescription("issue-1")).toBe(`Edited during the run.\n\n${expectedSection(repo.sha, ctx.jobId)}`);
   });
 
-  it("fails without retry and emits a session error when the brain output is invalid", async () => {
-    const ctx = claimJob(sessionTrigger);
+  it("fails without retry and writes nothing when the brain output is invalid", async () => {
+    const ctx = claimJob(createdTrigger);
 
     const outcome = await runJob(ctx, makeDeps(brainWith({ result: { summary: "" } })));
 
     expect(outcome).toEqual({ status: "failed", error: expect.any(String), retryable: false });
     expect(tracker.getDescription("issue-1")).toBe("The adapter loses the final chunk.");
-    expect(tracker.sessionActivities("session-1").length).toBe(2);
-    expect(tracker.sessionActivities("session-1")[1]?.type).toBe("error");
+    expect(tracker.comments("issue-1")).toEqual([]);
     expect(stores.jobs.get(ctx.jobId)?.result).toBeNull();
   });
 
@@ -327,15 +301,14 @@ describe("runJob", () => {
     expect(outcome).toEqual({ status: "failed", error: expect.any(String), retryable: true });
   });
 
-  it("renders the prompt with the ticket title and the operator instructions", async () => {
-    const ctx = claimJob(sessionTrigger);
+  it("renders the prompt with the ticket title", async () => {
+    const ctx = claimJob(createdTrigger);
     const brain = brainWith();
 
     await runJob(ctx, makeDeps(brain));
 
     const input = brain.lastInput();
     expect(input.prompt).toContain("Adapter drops the last chunk");
-    expect(input.prompt).toContain("Operator: Focus on the streaming adapter");
     expect(input.workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
     expect(input.artifactsDir).toBe(join(repo.dataDir, "jobs", String(ctx.jobId), "artifacts"));
     expect(input.transcriptPath).toBe(join(repo.dataDir, "jobs", String(ctx.jobId), "attempt-1.jsonl"));
@@ -419,7 +392,7 @@ describe("runJob", () => {
 
     expect(outcome).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
     expect(stores.attempts.forJob(ctx.jobId)[0]?.setupTail).toBe("$ sleep 5\n[interrupted]\n");
-    expect(tracker.sessionActivities("session-1")).toEqual([]);
+    expect(tracker.comments("issue-1")).toEqual([]);
   });
 
   it("uses a per-process worktree name for dry runs", async () => {

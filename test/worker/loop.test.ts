@@ -31,16 +31,6 @@ const createdTrigger: TriggerEvent = {
   description: "The adapter loses the final chunk.",
 };
 
-const sessionTrigger: TriggerEvent = {
-  kind: "agent.session",
-  action: "created",
-  issueId: "issue-1",
-  identifier: "API-1",
-  teamKey: "API",
-  sessionId: "session-1",
-  deliveryId: "delivery-2",
-};
-
 const brainResult: BrainResult = {
   template: { matched: "Bugs", conforms: false, missing: ["Repro Steps"] },
   summary: "The adapter truncates the final chunk.",
@@ -275,9 +265,9 @@ describe("startWorker", () => {
     expect(stores.attempts.forJob(jobId)[0]?.error).toBe(INTERRUPTED_ERROR);
   });
 
-  it("fails after the last retryable attempt and reports the session error", async () => {
+  it("fails after the last retryable attempt", async () => {
     runJobMock.mockResolvedValue(RETRYABLE);
-    const jobId = stores.jobs.enqueue(sessionTrigger);
+    const jobId = stores.jobs.enqueue(createdTrigger);
     start();
 
     await vi.waitFor(() => {
@@ -287,10 +277,6 @@ describe("startWorker", () => {
 
     expect(stores.jobs.get(jobId)?.attempts).toBe(3);
     expect(stores.jobs.get(jobId)?.error).toBe("mirror fetch failed");
-    await vi.waitFor(() => {
-      expect(tracker.sessionActivities("session-1").length).toBe(1);
-    });
-    expect(tracker.sessionActivities("session-1")[0]?.type).toBe("error");
     await sleep(20);
     expect(runJobMock).toHaveBeenCalledTimes(3);
   });
@@ -379,17 +365,35 @@ describe("startWorker", () => {
     expect(runJobMock).toHaveBeenCalledTimes(1);
   });
 
-  it("pauses claiming while auth is broken and resumes once it clears", async () => {
-    stores.tokens.setAuthBroken(true);
+  it("claims nothing while the tracker reports a rejected API key", async () => {
+    tracker.rejectApiKey();
     const jobId = stores.jobs.enqueue(createdTrigger);
     start();
     await sleep(30);
 
     expect(stores.jobs.get(jobId)?.status).toBe("queued");
     expect(runJobMock).not.toHaveBeenCalled();
+  });
 
-    stores.tokens.setAuthBroken(false);
-    await waitForStatus(jobId, "succeeded");
+  it("stops claiming after a job hits a rejected API key and keeps that job queued for a retry", async () => {
+    runJobMock.mockImplementationOnce(async () => {
+      tracker.rejectApiKey();
+      return { status: "failed", error: "Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked.", retryable: true };
+    });
+    const firstId = stores.jobs.enqueue(createdTrigger);
+    const secondId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-2" });
+    start();
+
+    await vi.waitFor(() => {
+      expect(stores.attempts.forJob(firstId)[0]?.finishedAt).not.toBeNull();
+    });
+    await sleep(30);
+
+    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(stores.jobs.get(firstId)?.status).toBe("queued");
+    expect(stores.jobs.get(firstId)?.attempts).toBe(1);
+    expect(stores.jobs.get(secondId)?.status).toBe("queued");
+    expect(stores.jobs.get(secondId)?.attempts).toBe(0);
   });
 
   it("sweeps worktrees beyond the kept count on start", async () => {

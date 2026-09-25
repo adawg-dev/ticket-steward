@@ -36,8 +36,6 @@ const DELIVERY_RETENTION_DAYS = 7;
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-const firstLine = (text: string): string => text.split("\n")[0] ?? text;
-
 const isRetryable = (outcome: JobOutcome): outcome is Exclude<JobOutcome, { status: "succeeded" }> =>
   outcome.status === "publish_failed" || (outcome.status === "failed" && outcome.retryable);
 
@@ -125,9 +123,9 @@ class Worker {
     }
   }
 
+  /** A rejected Linear API key pauses the queue: jobs stay queued until the steward restarts with a working key. */
   private claim(): Job | null {
-    const { jobs, tokens } = this.deps.stores;
-    return tokens.isAuthBroken() ? null : jobs.claimNext();
+    return this.deps.tracker.apiKeyRejected() ? null : this.deps.stores.jobs.claimNext();
   }
 
   private idle(): Promise<void> {
@@ -184,7 +182,6 @@ class Worker {
       return;
     }
     jobs.finish(job.id, outcome);
-    if (isRetryable(outcome)) await this.reportExhausted(job, outcome);
   }
 
   private failBestEffort(job: Job, error: string): void {
@@ -192,19 +189,6 @@ class Worker {
       this.deps.stores.jobs.finish(job.id, { status: "failed", error, retryable: false });
     } catch (err) {
       logger.error({ jobId: job.id, err: errorMessage(err) }, "job could not be marked failed");
-    }
-  }
-
-  private async reportExhausted(job: Job, outcome: JobOutcome): Promise<void> {
-    const sessionId = this.deps.stores.jobs.get(job.id)?.sessionId ?? job.sessionId;
-    if (sessionId === null || outcome.status === "succeeded") return;
-    try {
-      await this.deps.tracker.agentSession.error(
-        sessionId,
-        `Enrichment failed after ${job.attempts} attempts: ${firstLine(outcome.error)}`,
-      );
-    } catch (err) {
-      logger.warn({ jobId: job.id, err: errorMessage(err) }, "session error activity failed");
     }
   }
 

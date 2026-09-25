@@ -1,15 +1,5 @@
 export type TriggerEvent =
   | { kind: "issue.created"; issueId: string; identifier: string; teamKey: string; deliveryId: string; description: string }
-  | {
-      kind: "agent.session";
-      action: "created" | "prompted";
-      issueId: string;
-      identifier: string;
-      teamKey: string;
-      sessionId: string;
-      deliveryId: string;
-      promptBody?: string;
-    }
   | { kind: "cli"; issueId: string; identifier: string; teamKey: string };
 
 export interface TicketBundle {
@@ -30,12 +20,6 @@ export interface TicketBundle {
   templates: Array<{ name: string; description: string; body: string; requiredFields: string[] }>;
 }
 
-export interface AgentSessionPort {
-  thought(sessionId: string, body: string): Promise<void>;
-  response(sessionId: string, body: string): Promise<void>;
-  error(sessionId: string, body: string): Promise<void>;
-}
-
 export interface Tracker {
   kind: "linear";
   resolveIssueId(idOrKey: string): Promise<{ id: string; identifier: string; teamKey: string }>;
@@ -44,5 +28,6 @@ export interface Tracker {
   writeDescription(issueId: string, description: string): Promise<void>;
   postComment(issueId: string, body: string): Promise<void>;
   uploadFile(localPath: string, contentType: string): Promise<{ url: string }>;
-  agentSession: AgentSessionPort;
+  /** True once the tracker rejected its credentials (Linear answered 401); the worker stops claiming jobs until a restart. */
+  apiKeyRejected(): boolean;
 }

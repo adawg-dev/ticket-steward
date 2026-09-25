@@ -9,8 +9,6 @@ import type { Command } from "commander";
 import { z } from "zod";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { LoadedConfig } from "../config/load.js";
-import { openStores, type Stores } from "../store/index.js";
-import { LinearAuth } from "../tracker/linear/index.js";
 import { listFiles } from "../workspace/files.js";
 import { isPortFree } from "../workspace/retention.js";
 import { errorMessage, exitWith, loadFromProgram, println, type CliContext } from "./context.js";
@@ -36,7 +34,8 @@ const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 const playwrightBrowsersPath = (): string => process.env.PLAYWRIGHT_BROWSERS_PATH ?? join(homedir(), ".cache", "ms-playwright");
 const SENSITIVE_HOME_DIRS = [".ssh", ".kube"];
 
-const ViewerResponse = z.object({ data: z.object({ viewer: z.object({ id: z.string() }) }) });
+const ViewerResponse = z.object({ data: z.object({ viewer: z.object({ id: z.string(), name: z.string() }) }) });
+const GraphqlErrors = z.object({ errors: z.array(z.object({ extensions: z.object({ code: z.string().optional() }).optional() })) });
 
 const ok = (message: string): CheckResult => ({ level: "ok", message });
 const flunk = (message: string): CheckResult => ({ level: "fail", message });
@@ -71,11 +70,8 @@ const secretChecks = ({ config, secrets }: LoadedConfig): Check[] => {
   const codehostKey = config.codehost.kind === "gitlab" ? "GITLAB_TOKEN" : "GITHUB_TOKEN";
   return [
     {
-      name: "tracker secrets",
-      run: async () => {
-        const absent = missing(secrets, ["LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET", "LINEAR_WEBHOOK_SECRET"]);
-        return absent.length === 0 ? ok("LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET, LINEAR_WEBHOOK_SECRET present") : flunk(`missing ${absent.join(", ")}`);
-      },
+      name: "webhook secret",
+      run: async () => (missing(secrets, ["LINEAR_WEBHOOK_SECRET"]).length === 0 ? ok("LINEAR_WEBHOOK_SECRET present") : flunk("missing LINEAR_WEBHOOK_SECRET")),
     },
     {
       name: "brain credential",
@@ -127,27 +123,28 @@ const workspaceChecks = (loaded: LoadedConfig): Check[] => {
   ];
 };
 
-const linearChecks = (loaded: LoadedConfig, stores: () => Stores, ctx: CliContext): Check[] => [
+/** Linear answers a bad key with 401 or with a GraphQL AUTHENTICATION_ERROR. */
+const isAuthenticationError = (status: number, body: unknown): boolean =>
+  status === 401 || (GraphqlErrors.safeParse(body).data?.errors.some((error) => error.extensions?.code === "AUTHENTICATION_ERROR") ?? false);
+
+const linearChecks = ({ secrets }: LoadedConfig, ctx: CliContext): Check[] => [
   {
-    name: "linear token",
+    name: "linear api key",
     run: async () => {
-      const { LINEAR_CLIENT_ID: clientId, LINEAR_CLIENT_SECRET: clientSecret } = loaded.secrets;
-      if (stores().tokens.get() === null) return flunk("no token stored; run steward auth linear");
-      if (clientId === undefined || clientSecret === undefined) return warn("cannot validate without LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET");
-      const token = await new LinearAuth(stores().tokens, { clientId, clientSecret }, ctx.fetchImpl).accessToken();
+      const apiKey = secrets.LINEAR_API_KEY;
+      if (apiKey === undefined || apiKey === "") return flunk("missing LINEAR_API_KEY; create a personal API key for the steward's Linear user");
       const response = await ctx.fetchImpl(LINEAR_GRAPHQL_URL, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body: JSON.stringify({ query: "{ viewer { id } }" }),
+        headers: { "content-type": "application/json", authorization: apiKey },
+        body: JSON.stringify({ query: "{ viewer { id name } }" }),
         signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       });
+      const body: unknown = await response.json().catch(() => undefined);
+      if (isAuthenticationError(response.status, body)) return flunk("Linear rejected LINEAR_API_KEY: the key is invalid or revoked");
       if (!response.ok) return flunk(`viewer query answered ${response.status}`);
-      return ok(`viewer ${ViewerResponse.parse(await response.json()).data.viewer.id}`);
+      const { name } = ViewerResponse.parse(body).data.viewer;
+      return ok(`authenticated as ${name}; every steward write appears as this user, so use a dedicated bot user`);
     },
-  },
-  {
-    name: "auth_broken",
-    run: async () => (stores().tokens.isAuthBroken() ? flunk("set; run steward auth linear") : ok("clear")),
   },
 ];
 
@@ -207,11 +204,7 @@ const runChecks = async (checks: Check[], ctx: CliContext): Promise<boolean> => 
   return failed;
 };
 
-const configChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
-  let opened: Stores | null = null;
-  const stores = (): Stores => (opened ??= openStores(loaded.config.dataDir));
-  return [...secretChecks(loaded), userCheck, ...workspaceChecks(loaded), ...linearChecks(loaded, stores, ctx), ...serviceChecks(loaded, ctx)];
-};
+const configChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => [...secretChecks(loaded), userCheck, ...workspaceChecks(loaded), ...linearChecks(loaded, ctx), ...serviceChecks(loaded, ctx)];
 
 export const registerDoctor = (program: Command, ctx: CliContext): void => {
   program

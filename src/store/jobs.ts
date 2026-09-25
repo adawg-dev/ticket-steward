@@ -13,8 +13,6 @@ export interface Job {
   trigger: TriggerEvent;
   status: JobStatus;
   attempts: number;
-  sessionId: string | null;
-  promptBody: string | null;
   result: BrainResult | null;
   resultSha: string | null;
   error: string | null;
@@ -32,8 +30,6 @@ interface JobRow {
   trigger: string;
   status: JobStatus;
   attempts: number;
-  session_id: string | null;
-  prompt_body: string | null;
   result: string | null;
   result_sha: string | null;
   error: string | null;
@@ -51,8 +47,6 @@ const toJob = (row: JobRow): Job => ({
   trigger: JSON.parse(row.trigger) as TriggerEvent,
   status: row.status,
   attempts: row.attempts,
-  sessionId: row.session_id,
-  promptBody: row.prompt_body,
   result: row.result === null ? null : (JSON.parse(row.result) as BrainResult),
   resultSha: row.result_sha,
   error: row.error,
@@ -66,7 +60,6 @@ const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, star
 
 export class JobStore {
   private readonly insert;
-  private readonly attach;
   private readonly selectQueued;
   private readonly existsSucceeded;
   private readonly claimOldest;
@@ -83,12 +76,9 @@ export class JobStore {
   private readonly closeRunningAttempts;
 
   constructor(private readonly db: Database) {
-    this.insert = db.prepare<[string, string, string, string, string | null, string | null, string]>(
-      `INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, session_id, prompt_body, created_at)
-       VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
-    );
-    this.attach = db.prepare<[string, string | null, string]>(
-      "UPDATE jobs SET session_id = ?, prompt_body = COALESCE(?, prompt_body) WHERE issue_id = ? AND status = 'queued'",
+    this.insert = db.prepare<[string, string, string, string, string]>(
+      `INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at)
+       VALUES (?, ?, ?, ?, 'queued', ?)`,
     );
     this.selectQueued = db.prepare<[string], JobRow>(
       "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' ORDER BY id LIMIT 1",
@@ -128,22 +118,8 @@ export class JobStore {
   }
 
   enqueue(event: TriggerEvent): number {
-    const sessionId = event.kind === "agent.session" ? event.sessionId : null;
-    const promptBody = event.kind === "agent.session" ? (event.promptBody ?? null) : null;
-    const { lastInsertRowid } = this.insert.run(
-      event.issueId,
-      event.identifier,
-      event.teamKey,
-      JSON.stringify(event),
-      sessionId,
-      promptBody,
-      nowIso(),
-    );
+    const { lastInsertRowid } = this.insert.run(event.issueId, event.identifier, event.teamKey, JSON.stringify(event), nowIso());
     return Number(lastInsertRowid);
-  }
-
-  attachSession(issueId: string, sessionId: string, promptBody?: string): void {
-    this.attach.run(sessionId, promptBody ?? null, issueId);
   }
 
   findQueued(issueId: string): Job | null {

@@ -21,7 +21,7 @@ Linear webhook ─▶ Fastify /webhooks/linear ─▶ SQLite jobs ─▶ worker 
    fetch ticket ─▶ worktree from bare mirror + env overlay + skills + setup
                 ─▶ brain (Claude Agent SDK or OpenAI Agents SDK, detached process group)
                 ─▶ validate result ─▶ upload attachments ─▶ replace Enrichment section
-                ─▶ comment (new ticket) or agent-session response (@mention)
+                ─▶ comment on the ticket
 ```
 
 Brains: `claude-code`, `openai-agents`. Code hosts: `gitlab`, `github`. Tracker: `linear`.
@@ -37,7 +37,7 @@ npm i -g ticket-steward                 # or: pnpm install && pnpm build, then l
 
 mkdir -p /etc/ticket-steward && cd /etc/ticket-steward
 steward init                            # steward.config.ts, .env.example, prompts/enrich.md, skills/
-cp .env.example .env && chmod 0600 .env # fill in the secrets
+cp .env.example .env && chmod 0600 .env # fill in the secrets, including LINEAR_API_KEY (docs/ops.md §1.7)
 
 # start from the kickoff example instead of the generated config if you enrich that repo
 cp <ticket-steward>/examples/kickoff/steward.config.ts .
@@ -45,7 +45,6 @@ cp -r <ticket-steward>/examples/kickoff/skills/. skills/
 
 steward mirror init                     # bare mirror fetched with the read-only MIRROR_TOKEN
 steward overlay sync --from <checkout>  # gitignored .env* files with SANDBOX credentials
-steward auth linear                     # actor=app OAuth; prints a URL, waits for the callback
 steward doctor                          # every check reported; exits 1 if any fails
 steward serve                           # webhook server + worker (in production: systemd)
 ```
@@ -61,8 +60,7 @@ steward enrich KEY-123 --dry-run
 | Command | What it does |
 | --- | --- |
 | `steward init [dir]` | Writes `steward.config.ts`, `.env.example`, `prompts/enrich.md`, `skills/` into `dir` (default: current directory). Refuses to overwrite. |
-| `steward doctor` | Runs every health check (config, secrets, user, modes, mirror, overlay, skills, Linear token, public URL, codehost MCP, Playwright, port), reports all, exits non-zero if any fails. |
-| `steward auth linear` | `actor=app` OAuth with `state`; starts a temporary listener when `serve` is not running. Clears `auth_broken`. |
+| `steward doctor` | Runs every health check (config, secrets, user, modes, mirror, overlay, skills, Linear API key, public URL, codehost MCP, Playwright, port), reports all, exits non-zero if any fails. |
 | `steward mirror init` \| `fetch` | Create or refresh the bare mirror. |
 | `steward overlay sync --from <path> [--allow-pattern <re>]` | Copy gitignored `.env*` files from a checkout into the overlay; refuses prod-looking values unless allowed. |
 | `steward serve` | Webhook server and worker; takes `run.lock`. |
@@ -79,6 +77,10 @@ steward enrich KEY-123 --dry-run
 
 `steward.config.ts` next to a `.env`; see `examples/kickoff/` for a complete pair. The
 `.env` is parsed into memory and never loaded into `process.env`.
+
+Linear access is a personal API key (`LINEAR_API_KEY`) of a dedicated Linear user, so
+every write appears as that user, plus a hand-made workspace webhook on the **Issues**
+event whose signing secret is `LINEAR_WEBHOOK_SECRET`. Setup is in `docs/ops.md` §1.7.
 
 ```ts
 import { defineConfig } from "ticket-steward";
@@ -119,13 +121,16 @@ export default defineConfig({
 - **Sandbox credentials.** The overlay must hold credentials created for the steward
   (own DB role, test-mode Stripe keys, capped provider keys). `overlay sync` enforces
   0600/0700 modes and refuses prod-looking values by default. `docs/ops.md` §2 says why.
-- **Redaction.** Every `.env` value, every credential-looking overlay value and the Linear
-  token pair are redacted from transcripts, setup output and anything written to the
-  ticket, along with `sk-`, `glpat-`, `ghp_`, `lin_oauth_` and `postgres://user:pass@`
-  patterns.
+- **Redaction.** Every `.env` value (the Linear API key included) and every
+  credential-looking overlay value are redacted from transcripts, setup output and
+  anything written to the ticket, along with `sk-`, `glpat-`, `ghp_`, `lin_api_`,
+  `lin_oauth_` and `postgres://user:pass@` patterns.
 - **Attachments.** Must resolve under the job's artifacts dir; extensions
   `png jpg jpeg gif webp txt log json`; 10 MB cap; violations dropped with a note.
-- **Webhook.** HMAC-SHA256 signature, delivery-id dedupe, OAuth `state` with a 10-minute TTL.
+- **Linear key.** A personal API key restricted to the allowlisted teams, with read,
+  write, comment and upload permissions only. A 401 is not retried: the worker stops
+  claiming jobs and `/health` answers 503 until the steward restarts with a working key.
+- **Webhook.** HMAC-SHA256 signature and delivery-id dedupe.
 
 ## Development
 

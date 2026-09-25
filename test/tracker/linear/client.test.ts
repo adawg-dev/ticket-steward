@@ -2,47 +2,51 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthenticationLinearError, type LinearClient } from "@linear/sdk";
-import { LinearAuth } from "../../../src/tracker/linear/auth.js";
-import { LinearTracker } from "../../../src/tracker/linear/client.js";
+import { createLinearClient, LinearApiKeyRejectedError, LinearTracker } from "../../../src/tracker/linear/client.js";
 
-const accessTokenMock = vi.fn<LinearAuth["accessToken"]>();
-const handleUnauthorizedMock = vi.fn<LinearAuth["handleUnauthorized"]>();
-const auth = { accessToken: accessTokenMock, handleUnauthorized: handleUnauthorizedMock } as unknown as LinearAuth;
+const API_KEY = "lin_api_test_key";
 
 const updateIssueMock = vi.fn<LinearClient["updateIssue"]>();
 const createCommentMock = vi.fn<LinearClient["createComment"]>();
-const createAgentActivityMock = vi.fn<LinearClient["createAgentActivity"]>();
 const fileUploadMock = vi.fn<LinearClient["fileUpload"]>();
 const issueMock = vi.fn<LinearClient["issue"]>();
-const clientFactoryMock = vi.fn<(token: string) => LinearClient>();
+const clientFactoryMock = vi.fn<(apiKey: string) => LinearClient>();
 
 const fakeClient = {
   updateIssue: updateIssueMock,
   createComment: createCommentMock,
-  createAgentActivity: createAgentActivityMock,
   fileUpload: fileUploadMock,
   issue: issueMock,
 } as unknown as LinearClient;
 
 const okPayload = { success: true, lastSyncId: 1 };
 const makeTracker = (fetchImpl: typeof fetch = vi.fn<typeof fetch>()) =>
-  new LinearTracker(auth, { fetchImpl, clientFactory: clientFactoryMock });
+  new LinearTracker(API_KEY, { fetchImpl, clientFactory: clientFactoryMock });
+
+describe("createLinearClient", () => {
+  it("sends the personal API key as a raw Authorization header, without Bearer", () => {
+    expect(createLinearClient(API_KEY).options.headers).toMatchObject({ Authorization: API_KEY });
+  });
+});
 
 describe("LinearTracker", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
-    accessTokenMock.mockResolvedValue("token-1");
-    handleUnauthorizedMock.mockResolvedValue("token-2");
     clientFactoryMock.mockReturnValue(fakeClient);
     updateIssueMock.mockResolvedValue(okPayload as never);
     createCommentMock.mockResolvedValue(okPayload as never);
-    createAgentActivityMock.mockResolvedValue(okPayload as never);
   });
 
-  it("writes a description with updateIssue using the current access token", async () => {
+  it("builds one client from the API key", async () => {
+    const tracker = makeTracker();
+    await tracker.writeDescription("issue-uuid-1", "a");
+    await tracker.postComment("issue-uuid-1", "b");
+    expect(clientFactoryMock.mock.calls).toEqual([[API_KEY]]);
+  });
+
+  it("writes a description with updateIssue", async () => {
     await makeTracker().writeDescription("issue-uuid-1", "new body");
-    expect(clientFactoryMock).toHaveBeenCalledWith("token-1");
     expect(updateIssueMock).toHaveBeenCalledTimes(1);
     expect(updateIssueMock).toHaveBeenCalledWith("issue-uuid-1", { description: "new body" });
   });
@@ -51,18 +55,6 @@ describe("LinearTracker", () => {
     await makeTracker().postComment("issue-uuid-1", "hello");
     expect(createCommentMock).toHaveBeenCalledTimes(1);
     expect(createCommentMock).toHaveBeenCalledWith({ issueId: "issue-uuid-1", body: "hello" });
-  });
-
-  it("emits thought, response and error agent activities", async () => {
-    const tracker = makeTracker();
-    await tracker.agentSession.thought("session-1", "thinking");
-    await tracker.agentSession.response("session-1", "done");
-    await tracker.agentSession.error("session-1", "oops");
-    expect(createAgentActivityMock.mock.calls).toEqual([
-      [{ agentSessionId: "session-1", content: { type: "thought", body: "thinking" } }],
-      [{ agentSessionId: "session-1", content: { type: "response", body: "done" } }],
-      [{ agentSessionId: "session-1", content: { type: "error", body: "oops" } }],
-    ]);
   });
 
   it("uploads a file via fileUpload then PUTs it with the returned headers", async () => {
@@ -125,12 +117,38 @@ describe("LinearTracker", () => {
     expect(issueMock).toHaveBeenCalledWith("API-42");
   });
 
-  it("refreshes once on 401 and retries with the new token", async () => {
-    updateIssueMock.mockRejectedValueOnce(new AuthenticationLinearError({ message: "unauthorized" }));
-    await makeTracker().writeDescription("issue-uuid-1", "body");
-    expect(handleUnauthorizedMock).toHaveBeenCalledTimes(1);
-    expect(clientFactoryMock.mock.calls).toEqual([["token-1"], ["token-2"]]);
-    expect(updateIssueMock).toHaveBeenCalledTimes(2);
+  it("reports an API key Linear accepts as not rejected", async () => {
+    const tracker = makeTracker();
+    await tracker.writeDescription("issue-uuid-1", "body");
+    expect(tracker.apiKeyRejected()).toBe(false);
+  });
+
+  it("fails a write on 401 with an invalid-key error, without retrying, and latches the rejection", async () => {
+    updateIssueMock.mockRejectedValue(new AuthenticationLinearError({ message: "unauthorized" }));
+    const tracker = makeTracker();
+
+    const write = tracker.writeDescription("issue-uuid-1", "body");
+
+    await expect(write).rejects.toBeInstanceOf(LinearApiKeyRejectedError);
+    await expect(write).rejects.toThrow("Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked");
+    expect(updateIssueMock).toHaveBeenCalledTimes(1);
+    expect(tracker.apiKeyRejected()).toBe(true);
+  });
+
+  it("fails a read on 401 with an invalid-key error", async () => {
+    issueMock.mockRejectedValue(new AuthenticationLinearError({ message: "unauthorized" }));
+    const tracker = makeTracker();
+
+    await expect(tracker.readDescription("issue-uuid-1")).rejects.toBeInstanceOf(LinearApiKeyRejectedError);
+    expect(issueMock).toHaveBeenCalledTimes(1);
+    expect(tracker.apiKeyRejected()).toBe(true);
+  });
+
+  it("does not latch the rejection for other errors", async () => {
+    issueMock.mockRejectedValue(new Error("boom"));
+    const tracker = makeTracker();
+    await expect(tracker.readDescription("issue-uuid-1")).rejects.toThrow("boom");
+    expect(tracker.apiKeyRejected()).toBe(false);
   });
 
   it("retries a failing write three times before surfacing the error", async () => {

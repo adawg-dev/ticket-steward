@@ -38,7 +38,18 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const authBrokenFetch: typeof fetch = async () => new Response(JSON.stringify({ ok: false, authBroken: true }), { status: 503 });
+const unhealthyFetch: typeof fetch = async () => new Response(JSON.stringify({ ok: false, apiKeyRejected: true }), { status: 503 });
+
+const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
+const API_KEY = "lin_api_doctor_test";
+
+/** Answers the Linear viewer query with `linear` and the public health URL with 200. */
+const linearFetch = (linear: () => Response, seen: Array<{ url: string; init: RequestInit | undefined }> = []): typeof fetch =>
+  async (input, init) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    seen.push({ url, init });
+    return url === LINEAR_GRAPHQL_URL ? linear() : new Response("{}", { status: 200 });
+  };
 
 describe("steward doctor", () => {
   it("reports a config failure, still runs the user check, and exits 1", async () => {
@@ -52,7 +63,7 @@ describe("steward doctor", () => {
 
   it("reports every check even after failures and exits 1", async () => {
     const port = await freeTcpPort();
-    await writeFile(join(dir, ".env"), "LINEAR_CLIENT_ID=id\nLINEAR_CLIENT_SECRET=secret\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n");
+    await writeFile(join(dir, ".env"), `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
     await writeFile(join(repo.overlayDir, ".env"), "DATABASE_URL=postgres://steward:pw@localhost/dev\n");
     const skillsDir = join(dir, "skills");
     await mkdir(skillsDir);
@@ -67,13 +78,13 @@ describe("steward doctor", () => {
       serverPort: await freeTcpPort(),
       skillsDir,
     });
-    const { ctx, stdout } = makeContext({ fetchImpl: authBrokenFetch, factories: { codehostMcpSpec: fakeCodehostMcpSpec } });
+    const { ctx, stdout } = makeContext({ fetchImpl: unhealthyFetch, factories: { codehostMcpSpec: fakeCodehostMcpSpec } });
 
     await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toEqual(new ExitSignal(1));
 
     const lines = stdout().trimEnd().split("\n");
     expect(lines[0]).toBe(`[ok] config: ${configPath}`);
-    expect(lines[1]).toBe("[ok] tracker secrets: LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET, LINEAR_WEBHOOK_SECRET present");
+    expect(lines[1]).toBe("[ok] webhook secret: LINEAR_WEBHOOK_SECRET present");
     expect(lines[2]).toBe("[ok] brain credential: claude-code credential present");
     expect(lines[3]).toBe("[ok] codehost token: GITLAB_TOKEN present");
     expect(lines[4]).toBe("[warn] mirror token: MIRROR_TOKEN missing; fetchUrl must be reachable anonymously");
@@ -83,14 +94,13 @@ describe("steward doctor", () => {
     expect(lines[8]).toBe(`[ok] mirror: ${join(repo.dataDir, "repo.git")} fetched; main@${repo.sha.slice(0, 7)}`);
     expect(lines[9]).toBe("[ok] overlay: 1 file(s)");
     expect(lines[10]).toBe(`[ok] skills: ${skillsDir}`);
-    expect(lines[11]).toBe("[fail] linear token: no token stored; run steward auth linear");
-    expect(lines[12]).toBe("[ok] auth_broken: clear");
-    expect(lines[13]).toBe("[fail] public url: https://steward.example/health answered 503");
-    expect(lines[14]).toBe("[ok] codehost mcp: tools: recent_changes, permalink");
-    expect(lines[15]?.startsWith("[ok] playwright mcp: ")).toBe(true);
-    expect(lines[16]).toBe(`[ok] chromium: ${join(browsers, "chromium-1000")}`);
-    expect(lines[17]).toBe(`[ok] port: ${port} is free`);
-    expect(lines.length).toBe(18);
+    expect(lines[11]).toBe("[fail] linear api key: viewer query answered 503");
+    expect(lines[12]).toBe("[fail] public url: https://steward.example/health answered 503");
+    expect(lines[13]).toBe("[ok] codehost mcp: tools: recent_changes, permalink");
+    expect(lines[14]?.startsWith("[ok] playwright mcp: ")).toBe(true);
+    expect(lines[15]).toBe(`[ok] chromium: ${join(browsers, "chromium-1000")}`);
+    expect(lines[16]).toBe(`[ok] port: ${port} is free`);
+    expect(lines.length).toBe(17);
   });
 
   it("fails when no chromium is installed under PLAYWRIGHT_BROWSERS_PATH", async () => {
@@ -106,6 +116,51 @@ describe("steward doctor", () => {
 
     await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toEqual(new ExitSignal(1));
 
-    expect(stdout().trimEnd().split("\n")[16]).toBe(`[fail] chromium: no chromium under ${browsers}; run npx playwright install chromium`);
+    expect(stdout().trimEnd().split("\n")[15]).toBe(`[fail] chromium: no chromium under ${browsers}; run npx playwright install chromium`);
+  });
+
+  describe("linear api key check", () => {
+    const doctorLine = async (env: string, fetchImpl: typeof fetch): Promise<string | undefined> => {
+      await writeFile(join(dir, ".env"), env);
+      const configPath = await writeConfig(dir, {
+        dataDir: repo.dataDir,
+        overlayDir: repo.overlayDir,
+        promptPath: repo.promptPath,
+        fetchUrl: repo.repo,
+        port: await freeTcpPort(),
+        serverPort: await freeTcpPort(),
+      });
+      const { ctx, stdout } = makeContext({ fetchImpl, factories: { codehostMcpSpec: fakeCodehostMcpSpec } });
+      await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"]).catch(() => undefined);
+      return stdout().split("\n").find((line) => line.includes("] linear api key: "));
+    };
+
+    it("fails when LINEAR_API_KEY is missing", async () => {
+      const line = await doctorLine("LINEAR_WEBHOOK_SECRET=whsec\n", linearFetch(() => new Response("{}", { status: 200 })));
+      expect(line).toBe("[fail] linear api key: missing LINEAR_API_KEY; create a personal API key for the steward's Linear user");
+    });
+
+    it("sends the key as a raw Authorization header and reports the viewer's name", async () => {
+      const seen: Array<{ url: string; init: RequestInit | undefined }> = [];
+      const viewer = () => new Response(JSON.stringify({ data: { viewer: { id: "user-1", name: "Steward Bot" } } }), { status: 200 });
+
+      const line = await doctorLine(`LINEAR_API_KEY=${API_KEY}\n`, linearFetch(viewer, seen));
+
+      expect(line).toBe("[ok] linear api key: authenticated as Steward Bot; every steward write appears as this user, so use a dedicated bot user");
+      const query = seen.find((call) => call.url === LINEAR_GRAPHQL_URL);
+      expect(new Headers(query?.init?.headers).get("authorization")).toBe(API_KEY);
+      expect(JSON.parse(String(query?.init?.body))).toEqual({ query: "{ viewer { id name } }" });
+    });
+
+    it("reports an invalid or revoked key on 401", async () => {
+      const line = await doctorLine(`LINEAR_API_KEY=${API_KEY}\n`, linearFetch(() => new Response("{}", { status: 401 })));
+      expect(line).toBe("[fail] linear api key: Linear rejected LINEAR_API_KEY: the key is invalid or revoked");
+    });
+
+    it("reports an invalid or revoked key on a GraphQL authentication error", async () => {
+      const body = JSON.stringify({ errors: [{ message: "Authentication required", extensions: { code: "AUTHENTICATION_ERROR" } }] });
+      const line = await doctorLine(`LINEAR_API_KEY=${API_KEY}\n`, linearFetch(() => new Response(body, { status: 400 })));
+      expect(line).toBe("[fail] linear api key: Linear rejected LINEAR_API_KEY: the key is invalid or revoked");
+    });
   });
 });

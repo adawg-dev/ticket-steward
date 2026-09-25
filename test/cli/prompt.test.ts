@@ -6,7 +6,7 @@ import { FakeTracker } from "../fakes/fakeTracker.js";
 import { tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
 
-const PROMPT_TEMPLATE = "Team {{teamName}} ({{teamKey}}) at {{workspacePath}}@{{sha}} port {{stewardPort}} artifacts {{artifactsDir}}\n{{ticket}}\nOperator: [{{operatorInstructions}}]\n";
+const PROMPT_TEMPLATE = "Team {{teamName}} ({{teamKey}}) at {{workspacePath}}@{{sha}} port {{stewardPort}} artifacts {{artifactsDir}}\n{{ticket}}\n";
 
 const issue: TicketBundle = {
   id: "issue-1",
@@ -64,6 +64,5 @@ describe("steward prompt", () => {
     const lines = stdout().split("\n");
     expect(lines[0]).toBe(`Team Platform API (API) at <worktree>@${repo.sha} port 4100 artifacts ${join(repo.dataDir, "jobs", "<jobId>", "artifacts")}`);
     expect(stdout()).toContain("Adapter drops the last chunk");
-    expect(lines.at(-2)).toBe("Operator: []");
   });
 });

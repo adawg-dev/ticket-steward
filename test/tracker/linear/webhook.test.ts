@@ -89,49 +89,8 @@ describe("parseEvent", () => {
     expect(parseEvent({ event: "Issue", delivery: "d-1" }, { ...issueCreateBody, action: "update" })).toBeNull();
   });
 
-  it("maps AgentSessionEvent created to agent.session without a prompt body", () => {
-    expect(parseEvent({ event: "AgentSessionEvent", delivery: "d-2" }, agentSessionBody("created", undefined))).toEqual({
-      kind: "agent.session",
-      action: "created",
-      issueId: "issue-uuid-1",
-      identifier: "API-42",
-      teamKey: "API",
-      sessionId: "session-1",
-      deliveryId: "d-2",
-    });
-  });
-
-  it("maps AgentSessionEvent prompted with agentActivity.body", () => {
-    expect(
-      parseEvent({ event: "AgentSessionEvent", delivery: "d-3" }, agentSessionBody("prompted", { body: "Look at the API" })),
-    ).toEqual({
-      kind: "agent.session",
-      action: "prompted",
-      issueId: "issue-uuid-1",
-      identifier: "API-42",
-      teamKey: "API",
-      sessionId: "session-1",
-      deliveryId: "d-3",
-      promptBody: "Look at the API",
-    });
-  });
-
-  it("maps AgentSessionEvent prompted with agentActivity.content.body", () => {
-    expect(
-      parseEvent(
-        { event: "AgentSessionEvent", delivery: "d-3" },
-        agentSessionBody("prompted", { content: { type: "prompt", body: "Check the worker" } }),
-      ),
-    ).toEqual({
-      kind: "agent.session",
-      action: "prompted",
-      issueId: "issue-uuid-1",
-      identifier: "API-42",
-      teamKey: "API",
-      sessionId: "session-1",
-      deliveryId: "d-3",
-      promptBody: "Check the worker",
-    });
+  it("ignores AgentSessionEvent deliveries", () => {
+    expect(parseEvent({ event: "AgentSessionEvent", delivery: "d-2" }, agentSessionBody("created", undefined))).toBeNull();
   });
 
   it("ignores unknown event types", () => {

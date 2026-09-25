@@ -1,37 +1,29 @@
 import { LinearTracker } from "../../../src/tracker/linear/client.js";
-import { createLinearTracker } from "../../../src/tracker/linear/index.js";
-import type { TokenPair } from "../../../src/store/tokens.js";
-import type { TokenRepository } from "../../../src/tracker/linear/auth.js";
-
-class MemoryTokenStore implements TokenRepository {
-  private pair: TokenPair | null = null;
-  private broken = false;
-  get(): TokenPair | null {
-    return this.pair;
-  }
-  set(pair: TokenPair): void {
-    this.pair = pair;
-  }
-  setAuthBroken(v: boolean): void {
-    this.broken = v;
-  }
-  withImmediateTransaction<T>(fn: () => T): T {
-    return fn();
-  }
-}
+import { createLinearTracker, requireLinearApiKey } from "../../../src/tracker/linear/index.js";
 
 describe("createLinearTracker", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("builds a LinearTracker from the token store and client credentials", () => {
-    const tracker = createLinearTracker({ tokens: new MemoryTokenStore() }, { LINEAR_CLIENT_ID: "id", LINEAR_CLIENT_SECRET: "secret" });
+  it("builds a LinearTracker from LINEAR_API_KEY", () => {
+    const tracker = createLinearTracker({ LINEAR_API_KEY: "lin_api_test" });
     expect(tracker).toBeInstanceOf(LinearTracker);
     expect(tracker.kind).toBe("linear");
+    expect(tracker.apiKeyRejected()).toBe(false);
   });
 
-  it("throws when the client credentials are missing", () => {
-    expect(() => createLinearTracker({ tokens: new MemoryTokenStore() }, { LINEAR_CLIENT_ID: "id" })).toThrow();
+  it("throws when LINEAR_API_KEY is missing", () => {
+    expect(() => createLinearTracker({ LINEAR_WEBHOOK_SECRET: "whsec" })).toThrow("LINEAR_API_KEY must be set in .env");
+  });
+});
+
+describe("requireLinearApiKey", () => {
+  it("returns the key", () => {
+    expect(requireLinearApiKey({ LINEAR_API_KEY: "lin_api_test" })).toBe("lin_api_test");
+  });
+
+  it("rejects an empty key", () => {
+    expect(() => requireLinearApiKey({ LINEAR_API_KEY: "" })).toThrow("LINEAR_API_KEY must be set in .env");
   });
 });

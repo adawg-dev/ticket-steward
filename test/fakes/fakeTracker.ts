@@ -1,25 +1,18 @@
 import { basename } from "node:path";
 import type { TicketBundle, Tracker } from "../../src/tracker/types.js";
 
-export type SessionActivity = { type: "thought" | "response" | "error"; body: string };
 export type RecordedUpload = { path: string; contentType: string };
 
 export class FakeTracker implements Tracker {
   readonly kind = "linear";
-  readonly agentSession: Tracker["agentSession"];
   private readonly issues = new Map<string, TicketBundle>();
   private readonly issueComments = new Map<string, string[]>();
-  private readonly activities = new Map<string, SessionActivity[]>();
   private readonly uploaded: RecordedUpload[] = [];
   private failingWrites = 0;
+  private rejected = false;
 
   constructor(issues: TicketBundle[] = []) {
     for (const issue of issues) this.issues.set(issue.id, issue);
-    this.agentSession = {
-      thought: async (sessionId, body) => this.recordActivity(sessionId, { type: "thought", body }),
-      response: async (sessionId, body) => this.recordActivity(sessionId, { type: "response", body }),
-      error: async (sessionId, body) => this.recordActivity(sessionId, { type: "error", body }),
-    };
   }
 
   addIssue(issue: TicketBundle): void {
@@ -38,16 +31,20 @@ export class FakeTracker implements Tracker {
     return [...(this.issueComments.get(issueId) ?? [])];
   }
 
-  sessionActivities(sessionId: string): SessionActivity[] {
-    return [...(this.activities.get(sessionId) ?? [])];
-  }
-
   uploads(): RecordedUpload[] {
     return [...this.uploaded];
   }
 
   failNextWrite(): void {
     this.failingWrites += 1;
+  }
+
+  rejectApiKey(): void {
+    this.rejected = true;
+  }
+
+  apiKeyRejected(): boolean {
+    return this.rejected;
   }
 
   async resolveIssueId(idOrKey: string): Promise<{ id: string; identifier: string; teamKey: string }> {
@@ -79,11 +76,6 @@ export class FakeTracker implements Tracker {
     this.write();
     this.uploaded.push({ path: localPath, contentType });
     return { url: `https://uploads.fake/${basename(localPath)}` };
-  }
-
-  private recordActivity(sessionId: string, activity: SessionActivity): void {
-    this.write();
-    this.activities.set(sessionId, [...(this.activities.get(sessionId) ?? []), activity]);
   }
 
   private write(): void {

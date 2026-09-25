@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, resolveFromConfigDir } from "../../src/config/load.js";
+import { loadConfig, resolveFromConfigDir, SecretsSchema } from "../../src/config/load.js";
 
 const configSource = (overrides = "") => `
 import { defineConfig } from "ticket-steward";
@@ -93,15 +93,15 @@ describe("loadConfig", () => {
     await writeFile(join(dir, "steward.config.ts"), configSource());
     await writeFile(
       join(dir, ".env"),
-      "LINEAR_CLIENT_ID=lin-client\nLINEAR_WEBHOOK_SECRET=whsec\nANTHROPIC_API_KEY=sk-ant-test\n",
+      "LINEAR_API_KEY=lin_api_test\nLINEAR_WEBHOOK_SECRET=whsec\nANTHROPIC_API_KEY=sk-ant-test\n",
     );
     const { secrets } = await loadConfig({ cwd: dir });
     expect(secrets).toEqual({
-      LINEAR_CLIENT_ID: "lin-client",
+      LINEAR_API_KEY: "lin_api_test",
       LINEAR_WEBHOOK_SECRET: "whsec",
       ANTHROPIC_API_KEY: "sk-ant-test",
     });
-    expect(process.env.LINEAR_CLIENT_ID).toBeUndefined();
+    expect(process.env.LINEAR_API_KEY).toBeUndefined();
     expect(process.env.LINEAR_WEBHOOK_SECRET).toBeUndefined();
     expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
   });
@@ -111,6 +111,30 @@ describe("loadConfig", () => {
     await writeFile(join(dir, ".env"), "OPENAI_API_KEY=sk-openai\nSOMETHING_ELSE=nope\n");
     const { secrets } = await loadConfig({ cwd: dir });
     expect(secrets).toEqual({ OPENAI_API_KEY: "sk-openai" });
+  });
+
+  it("drops the removed Linear OAuth client credentials", async () => {
+    await writeFile(join(dir, "steward.config.ts"), configSource());
+    await writeFile(join(dir, ".env"), "LINEAR_CLIENT_ID=lin-client\nLINEAR_CLIENT_SECRET=lin-secret\nLINEAR_API_KEY=lin_api_test\n");
+    const { secrets } = await loadConfig({ cwd: dir });
+    expect(secrets).toEqual({ LINEAR_API_KEY: "lin_api_test" });
+  });
+});
+
+describe("SecretsSchema", () => {
+  it("accepts LINEAR_API_KEY and LINEAR_WEBHOOK_SECRET", () => {
+    expect(SecretsSchema.parse({ LINEAR_API_KEY: "lin_api_test", LINEAR_WEBHOOK_SECRET: "whsec" })).toEqual({
+      LINEAR_API_KEY: "lin_api_test",
+      LINEAR_WEBHOOK_SECRET: "whsec",
+    });
+  });
+
+  it("strips LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET", () => {
+    expect(SecretsSchema.parse({ LINEAR_CLIENT_ID: "id", LINEAR_CLIENT_SECRET: "secret" })).toEqual({});
+  });
+
+  it("rejects a non-string LINEAR_API_KEY", () => {
+    expect(SecretsSchema.safeParse({ LINEAR_API_KEY: 42 }).success).toBe(false);
   });
 });
 

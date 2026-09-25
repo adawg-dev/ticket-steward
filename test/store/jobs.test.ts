@@ -1,6 +1,6 @@
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import { openStores, type Stores } from "../../src/store/index.js";
-import { brainResult, createdEvent, freshDataDir, sessionEvent } from "./helpers.js";
+import { brainResult, createdEvent, freshDataDir, secondEvent } from "./helpers.js";
 
 let stores: Stores;
 
@@ -26,8 +26,6 @@ describe("JobStore", () => {
     expect(job?.trigger).toEqual(createdEvent);
     expect(job?.status).toBe("queued");
     expect(job?.attempts).toBe(0);
-    expect(job?.sessionId).toBeNull();
-    expect(job?.promptBody).toBeNull();
     expect(job?.result).toBeNull();
     expect(job?.resultSha).toBeNull();
     expect(job?.error).toBeNull();
@@ -38,7 +36,7 @@ describe("JobStore", () => {
 
   it("claimNext returns the oldest queued job and marks it running", () => {
     const first = stores.jobs.enqueue(createdEvent);
-    stores.jobs.enqueue(sessionEvent);
+    stores.jobs.enqueue(secondEvent);
 
     const claimed = stores.jobs.claimNext();
 
@@ -54,14 +52,9 @@ describe("JobStore", () => {
     expect(stores.jobs.claimNext()).toBeNull();
   });
 
-  it("attachSession updates the queued job for the issue", () => {
+  it("findQueued returns the queued job for the issue", () => {
     const id = stores.jobs.enqueue(createdEvent);
 
-    stores.jobs.attachSession("issue-1", "session-9", "please look again");
-
-    const job = stores.jobs.get(id);
-    expect(job?.sessionId).toBe("session-9");
-    expect(job?.promptBody).toBe("please look again");
     expect(stores.jobs.findQueued("issue-1")?.id).toBe(id);
     expect(stores.jobs.findQueued("issue-404")).toBeNull();
   });
@@ -161,7 +154,7 @@ describe("JobStore", () => {
 
   it("requeueInterrupted requeues running jobs under the attempt limit and fails the rest", () => {
     const fresh = stores.jobs.enqueue(createdEvent);
-    const exhausted = stores.jobs.enqueue(sessionEvent);
+    const exhausted = stores.jobs.enqueue(secondEvent);
     stores.jobs.claimNext();
     stores.jobs.claimNext();
     stores.jobs.finish(exhausted, { status: "publish_failed", error: "e" });
@@ -180,7 +173,7 @@ describe("JobStore", () => {
 
   it("list filters by status and returns newest first within the limit", () => {
     const a = stores.jobs.enqueue(createdEvent);
-    const b = stores.jobs.enqueue(sessionEvent);
+    const b = stores.jobs.enqueue(secondEvent);
     const c = stores.jobs.enqueue(createdEvent);
     stores.jobs.claimNext();
 
@@ -194,13 +187,5 @@ describe("JobStore", () => {
     expect(all[0]?.id).toBe(c);
     expect(all[1]?.id).toBe(b);
     expect(stores.jobs.get(a)?.status).toBe("running");
-  });
-
-  it("enqueue of an agent session stores the session id and prompt body", () => {
-    const id = stores.jobs.enqueue({ ...sessionEvent, action: "prompted", promptBody: "check auth" });
-
-    const job = stores.jobs.get(id);
-    expect(job?.sessionId).toBe("session-1");
-    expect(job?.promptBody).toBe("check auth");
   });
 });

@@ -9,6 +9,7 @@ const TOKEN_PATTERNS: RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{8,}/g,
   /\bglpat-[A-Za-z0-9_-]{8,}/g,
   /\bghp_[A-Za-z0-9]{8,}/g,
+  /\blin_api_[A-Za-z0-9]{8,}/g,
   /\blin_oauth_[A-Za-z0-9]{8,}/g,
 ];
 const DB_URL_CREDENTIALS = /(postgres(?:ql)?:\/\/)[^\s:/@]+:[^\s@]+@/g;
@@ -23,7 +24,7 @@ const knownPattern = (knownSecrets: string[]): RegExp | null => {
 export class Redactor {
   private readonly secrets: () => string[];
 
-  /** A provider is consulted on every `redact()` call, so rotated values (e.g. the Linear token pair) are covered. */
+  /** A provider is consulted on every `redact()` call, so rotated values are covered. */
   constructor(knownSecrets: string[] | (() => string[])) {
     this.secrets = typeof knownSecrets === "function" ? knownSecrets : () => knownSecrets;
   }

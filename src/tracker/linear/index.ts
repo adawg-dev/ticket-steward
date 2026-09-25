@@ -1,16 +1,14 @@
 import type { Secrets } from "../../config/load.js";
-import { LinearAuth, type TokenRepository } from "./auth.js";
 import { LinearTracker } from "./client.js";
 
-export { LinearAuth, LINEAR_SCOPES, buildAuthorizeUrl, exchangeCode, type TokenRepository } from "./auth.js";
-export { LinearTracker } from "./client.js";
+export { createLinearClient, LinearApiKeyRejectedError, LinearTracker } from "./client.js";
 export { toTemplateSummary } from "./templates.js";
 export { parseEvent, verifySignature } from "./webhook.js";
 
-export const createLinearTracker = (stores: { tokens: TokenRepository }, secrets: Secrets): LinearTracker => {
-  const { LINEAR_CLIENT_ID: clientId, LINEAR_CLIENT_SECRET: clientSecret } = secrets;
-  if (clientId === undefined || clientSecret === undefined) {
-    throw new Error("LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET must be set in .env");
-  }
-  return new LinearTracker(new LinearAuth(stores.tokens, { clientId, clientSecret }));
+export const requireLinearApiKey = (secrets: Secrets): string => {
+  const apiKey = secrets.LINEAR_API_KEY;
+  if (apiKey === undefined || apiKey === "") throw new Error("LINEAR_API_KEY must be set in .env");
+  return apiKey;
 };
+
+export const createLinearTracker = (secrets: Secrets): LinearTracker => new LinearTracker(requireLinearApiKey(secrets));

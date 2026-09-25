@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import type { Command } from "commander";
 import { renderTemplatesMarkdown, renderTicketMarkdown } from "../core/context.js";
 import { renderPrompt } from "../core/prompt.js";
-import { openStores } from "../store/index.js";
 import { loadFromProgram, type CliContext } from "./context.js";
 import { artifactsDir } from "./paths.js";
 import { openMirror, openTracker } from "./runtime.js";
@@ -28,7 +27,7 @@ export const registerPrompt = (program: Command, ctx: CliContext): void => {
     .action(async (key: string) => {
       const loaded = await loadFromProgram(program, ctx);
       const { config } = loaded;
-      const tracker = openTracker(loaded, openStores(config.dataDir), ctx);
+      const tracker = openTracker(loaded, ctx);
       const { id, teamKey } = await tracker.resolveIssueId(key);
       const [bundle, sha, template] = await Promise.all([
         tracker.fetchTicket(id),
@@ -46,7 +45,6 @@ export const registerPrompt = (program: Command, ctx: CliContext): void => {
           teamKey,
           teamName: bundle.team.name,
           stewardPort: config.workspace.port,
-          operatorInstructions: "",
         }),
       );
     });

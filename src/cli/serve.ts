@@ -17,7 +17,7 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       } catch (err) {
         return fail(ctx, errorMessage(err));
       }
-      const app = buildServer({ config, secrets, stores: runtime.stores, tracker: runtime.tracker, workerState: worker.state, fetchImpl: ctx.fetchImpl });
+      const app = buildServer({ config, secrets, stores: runtime.stores, tracker: runtime.tracker, workerState: worker.state });
       await app.listen({ port: config.server.port });
       println(ctx, `listening on http://localhost:${config.server.port} (public ${config.server.publicUrl})`);
 

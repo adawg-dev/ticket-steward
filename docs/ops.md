@@ -144,8 +144,7 @@ Per job, every overlay file is copied into the worktree at the same relative pat
 
 ### 1.6 Public URL
 
-Linear must reach `server.port` at `server.publicUrl` for webhooks and the OAuth
-callback. Two working options:
+Linear must reach `server.port` at `server.publicUrl` for webhooks. Two working options:
 
 **Caddy reverse proxy** (`/etc/caddy/Caddyfile`), with automatic TLS:
 
@@ -177,31 +176,32 @@ sudo cloudflared service install
 ```
 
 Either way, `server.publicUrl` in the config is `https://steward.example.com` and the
-steward itself listens on plain HTTP on `127.0.0.1:3020`. Only `/health`,
-`/webhooks/linear` and `/oauth/linear/callback` exist; the webhook is HMAC-verified and
-the callback requires a pending `state`, so exposing the port is acceptable.
+steward itself listens on plain HTTP on `127.0.0.1:3020`. Only `/health` and
+`/webhooks/linear` exist, and the webhook is HMAC-verified, so exposing the port is
+acceptable.
 
-### 1.7 Linear OAuth app and webhooks
+### 1.7 Linear API key and webhook
 
-1. Linear → Settings → Administration → API (workspace admin). Create an OAuth
-   application named "Ticket Steward".
-2. Redirect URL: `https://steward.example.com/oauth/linear/callback`.
-3. Copy the client id and secret into `.env` as `LINEAR_CLIENT_ID` /
-   `LINEAR_CLIENT_SECRET`.
-4. In the same application, enable webhooks at
-   `https://steward.example.com/webhooks/linear` with the **Issues** and **Agent session
-   events** categories. Copy the signing secret into `.env` as `LINEAR_WEBHOOK_SECRET`.
+The steward authenticates to Linear with a personal API key. Every description edit,
+comment and upload appears as the user who owns the key, so give it a user of its own.
 
-Then authorize the app as a workspace admin (the token is an `actor=app` token, so the
-steward writes as itself, not as you):
+1. Create a dedicated Linear user for the steward (for example "Ticket Steward",
+   `steward@example.com`) and add it to every allowlisted team (`tracker.teams`).
+2. Signed in as that user, open Settings → Account → Security & access → Personal API
+   keys and create a key named "ticket-steward". Grant **Read**, **Write**, **Create
+   comments** and **File uploads** (nothing else), and restrict it to the allowlisted
+   teams.
+3. Put it in `.env` as `LINEAR_API_KEY`. The steward sends it as a raw
+   `Authorization: <key>` header, not as a Bearer token.
+4. As a workspace admin, open Settings → API → Webhooks and create a webhook with the URL
+   `https://steward.example.com/webhooks/linear` (`<server.publicUrl>/webhooks/linear`).
+   Select only the **Issues** data-change event, and scope it to the allowlisted teams or
+   to all public teams. The steward acts on issue creation only and ignores every other
+   delivery.
+5. Copy the webhook's signing secret into `.env` as `LINEAR_WEBHOOK_SECRET`.
 
-```bash
-sudo -u steward -H bash -lc 'cd /etc/ticket-steward && steward auth linear'
-```
-
-The command prints an authorize URL, starts a temporary listener on `server.port` (unless
-`serve` is already running and answering `/health`), waits for the callback, stores the
-token pair in `dataDir/steward.db`, and clears `auth_broken`.
+There is no authorization step: the key is read from `.env` when the process starts.
+`steward doctor` (next section) confirms it works and names the user it authenticates as.
 
 ### 1.8 Doctor, then start the service
 
@@ -211,10 +211,11 @@ sudo -u steward -H bash -lc 'cd /etc/ticket-steward && steward doctor'
 
 Every line is `[ok]`, `[warn]` or `[fail]`; the exit code is 1 if anything failed. Fix
 every `[fail]` before installing the unit. Checks: config parses; `.env` holds the brain,
-tracker and codehost secrets; the running user does not own `~/.ssh` or `~/.kube`;
+webhook and codehost secrets; the running user does not own `~/.ssh` or `~/.kube`;
 `dataDir` and `overlayDir` are 0700; the mirror exists, has `extensions.worktreeConfig`
-and fetches; the overlay has at least one file; the skills dir exists; the Linear token
-answers a `viewer` query and `auth_broken` is clear; `publicUrl/health` answers; the
+and fetches; the overlay has at least one file; the skills dir exists; `LINEAR_API_KEY` is set
+and answers a `viewer { id name }` query (the line names the user every write will appear
+as); `publicUrl/health` answers; the
 codehost MCP server starts and answers `tools/list`; Playwright's Chromium is installed;
 `workspace.port` is free.
 
@@ -233,8 +234,8 @@ curl -s https://steward.example.com/health
 1. Create a ticket in an allowlisted team from the Bugs template. Within a few minutes
    the description gains an `## Enrichment` section between the steward markers and a
    comment "Enrichment added (job N, confidence …)".
-2. @mention the agent on an existing ticket. The session shows a `thought` within
-   seconds and a `response` when the run finishes.
+2. Run `steward enrich KEY-123` on an existing ticket; with `serve` running it is
+   enqueued and gets the same section and comment.
 3. `steward jobs` lists both jobs as `succeeded`.
 
 For a ticket outside Linear's webhook path:
@@ -271,8 +272,8 @@ blast radius should be "someone can read seeded test data", nothing more.
 The other half of the boundary is what the brain does **not** get: the brain child's
 environment is exactly `PATH`, `HOME`, `LANG`, `TERM`, `NODE_ENV=development`,
 `STEWARD_PORT`, `PORT`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, `CI=1`
-and its one brain credential. The Linear token, webhook secret, mirror token and codehost
-token never enter that environment.
+and its one brain credential. The Linear API key, webhook secret, mirror token and
+codehost token never enter that environment.
 
 ## 3. Rotating credentials
 
@@ -285,9 +286,8 @@ sudo systemctl restart ticket-steward
 
 | Credential | How to rotate |
 | --- | --- |
-| Linear access/refresh token | Rotates itself: the steward refreshes within 5 minutes of expiry (24 h access tokens) and on any 401, storing the new pair in `steward.db`. Nothing to do unless `auth_broken` is set (§5). |
-| `LINEAR_CLIENT_SECRET` | Regenerate in the Linear OAuth app, update `.env`, restart. Existing tokens keep working until their next refresh, which then uses the new secret. If Linear invalidates the tokens on secret rotation, run `steward auth linear` again. |
-| `LINEAR_WEBHOOK_SECRET` | Regenerate in the Linear OAuth app's webhook settings, update `.env`, restart. Deliveries signed with the old secret are rejected with 401 and Linear retries them (1 min, 1 h, 6 h), so do both steps within a minute. |
+| `LINEAR_API_KEY` | Signed in as the steward's Linear user, create a new personal API key with the same permissions and team restriction (§1.7), update `.env`, restart. Confirm with `steward doctor` (the `linear api key` line), then revoke the old key. A revoked or invalid key pauses the worker (§5). |
+| `LINEAR_WEBHOOK_SECRET` | Regenerate in the webhook's settings (Settings → API → Webhooks), update `.env`, restart. Deliveries signed with the old secret are rejected with 401 and Linear retries them (1 min, 1 h, 6 h), so do both steps within a minute. |
 | `MIRROR_TOKEN` | Create the new read-only deploy token, update `.env`, restart. `Mirror.fetch()` re-sets the remote URL from the token on every fetch, so the next job picks it up; no `mirror init` needed. Confirm with `steward mirror fetch`, then revoke the old token. |
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` | Create the new token, update `.env`, restart. Confirm with `steward doctor` (the codehost MCP check). Revoke the old one. |
 | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` / `OPENAI_API_KEY` | Update `.env`, restart. A job that is mid-run keeps the old value in its child environment until it finishes. |
@@ -308,8 +308,7 @@ steward jobs show 42
 
 1. **The job row.** `status` is one of `queued`, `running`, `succeeded`, `failed`,
    `publish_failed`, `skipped`. `attempts` counts claims. `trigger` says whether the job
-   came from `issue.created`, `agent.session` (with `sessionId` and any `promptBody`) or
-   `cli`. `error` is the last failure reason; `interrupted` means the process died mid-run
+   came from `issue.created` or `cli`. `error` is the last failure reason; `interrupted` means the process died mid-run
    and the job was requeued or failed on restart. `resultSha` is the commit the enrichment
    was computed against.
 2. **Attempts.** One row per claim: `startedAt`/`finishedAt` (a missing `finishedAt` on
@@ -318,8 +317,7 @@ steward jobs show 42
    brain ran), `preWriteDescription` (the ticket description as read just before the
    steward wrote the section; compare with the ticket if the merge looks wrong),
    `transcriptPath` and `usage` (tokens and cost). A `succeeded` job whose attempt has an
-   `error` succeeded with a warning: the description was written but the comment or
-   session response failed.
+   `error` succeeded with a warning: the description was written but the comment failed.
 3. **Transcript path.** `dataDir/jobs/<id>/attempt-<n>.jsonl`, one redacted JSON line per
    brain message. `tail -f` it while a job is running.
 4. **Artifacts listing.** Everything the brain wrote under `dataDir/jobs/<id>/artifacts`,
@@ -344,27 +342,30 @@ steward jobs gc           # run retention now: worktrees, artifacts, transcripts
 Failed jobs keep their worktree under `dataDir/work/<id>-<attempt>` when
 `workspace.keepOnFailure` is true; retention keeps the newest `retention.keptWorktrees`.
 
-## 5. `auth_broken`
+## 5. Linear API key rejected
 
-`auth_broken` is a flag in `steward.db` that the Linear auth layer sets when a token
-refresh fails: the refresh token was revoked, the OAuth app was removed, or the client
-secret changed under it. While it is set:
+When Linear answers 401 (or an authentication error) to any call, the `LINEAR_API_KEY`
+is invalid or was revoked. The steward does not retry the call: the error reads "Linear
+rejected LINEAR_API_KEY (401): the key is invalid or revoked", and the first occurrence is
+logged at `error` level ("Linear API key rejected; the worker stops claiming jobs until the
+steward restarts"). From then on, until the process restarts:
 
-- the worker stops claiming jobs (they queue up);
-- `GET /health` returns 503 with `authBroken: true`;
-- `steward doctor` reports `[fail]` on the Linear token check;
-- the systemd unit stays up, since the process is healthy, so the signal is `/health` and
-  `doctor`, not a restart loop.
+- the worker stops claiming jobs; the job that hit the 401 goes back to the queue with its
+  normal retry backoff, and new webhook deliveries keep queueing;
+- `GET /health` returns 503 with `apiKeyRejected: true`;
+- `steward doctor` reports `[fail]` on the `linear api key` line;
+- the systemd unit stays up, since the process is healthy, so the signal is `/health`,
+  the journal and `doctor`, not a restart loop.
 
-Clear it by re-authorizing, which stores a fresh token pair and resets the flag:
+To recover, create a new key (§1.7, §3), put it in `.env` and restart:
 
 ```bash
-sudo -u steward -H bash -lc 'cd /etc/ticket-steward && steward auth linear'
-curl -s https://steward.example.com/health     # authBroken: false
+sudo -u steward -H bash -lc 'cd /etc/ticket-steward && steward doctor'
+sudo systemctl restart ticket-steward
+curl -s https://steward.example.com/health     # apiKeyRejected: false
 ```
 
-`serve` does not need a restart; the worker reads the token and the flag from the store
-before each request and resumes claiming on its next poll.
+The queued jobs are picked up after the restart.
 
 ## 6. Day-to-day
 

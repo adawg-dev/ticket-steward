@@ -12,10 +12,6 @@ The team uses these templates. Decide which one the ticket content actually matc
 
 {{templates}}
 
-## Operator instructions
-
-{{operatorInstructions}}
-
 ## What to do
 
 1. Read the ticket. Decide which template it matches (or none). List every required field that is missing, empty, or still holds placeholder text from the template.

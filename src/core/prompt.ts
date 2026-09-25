@@ -12,7 +12,6 @@ export interface PromptVars {
   teamKey: string;
   teamName: string;
   stewardPort: number;
-  operatorInstructions: string;
 }
 
 const verbatim = (value: string): string => value;

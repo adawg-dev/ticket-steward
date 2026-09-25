@@ -1,22 +1,15 @@
 import type { TicketBundle, Tracker } from "./types.js";
 
 export interface RecordedWrite {
-  method: "writeDescription" | "postComment" | "uploadFile" | "agentSession.thought" | "agentSession.response" | "agentSession.error";
+  method: "writeDescription" | "postComment" | "uploadFile";
   args: string[];
 }
 
 export class ReadOnlyTracker implements Tracker {
   readonly kind = "linear";
   readonly writes: RecordedWrite[] = [];
-  readonly agentSession: Tracker["agentSession"];
 
-  constructor(private readonly inner: Tracker) {
-    this.agentSession = {
-      thought: async (sessionId, body) => this.record("agentSession.thought", [sessionId, body]),
-      response: async (sessionId, body) => this.record("agentSession.response", [sessionId, body]),
-      error: async (sessionId, body) => this.record("agentSession.error", [sessionId, body]),
-    };
-  }
+  constructor(private readonly inner: Tracker) {}
 
   resolveIssueId(idOrKey: string): Promise<{ id: string; identifier: string; teamKey: string }> {
     return this.inner.resolveIssueId(idOrKey);
@@ -41,6 +34,10 @@ export class ReadOnlyTracker implements Tracker {
   async uploadFile(localPath: string, contentType: string): Promise<{ url: string }> {
     this.record("uploadFile", [localPath, contentType]);
     return { url: `file://${localPath}` };
+  }
+
+  apiKeyRejected(): boolean {
+    return this.inner.apiKeyRejected();
   }
 
   private record(method: RecordedWrite["method"], args: string[]): void {

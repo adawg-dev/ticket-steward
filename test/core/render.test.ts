@@ -121,14 +121,14 @@ describe("linkify", () => {
 describe("buildComment", () => {
   it("renders the comment with job id, confidence and summary", () => {
     expect(buildComment(result, 42)).toBe(
-      "Enrichment added (job 42, confidence high). The handler drops the status code.\n@mention or assign me to re-run.",
+      "Enrichment added (job 42, confidence high). The handler drops the status code.",
     );
   });
 
   it("truncates the summary to 600 characters", () => {
     const comment = buildComment({ ...result, summary: "s".repeat(700) }, 42);
     expect(comment).toBe(
-      `Enrichment added (job 42, confidence high). ${"s".repeat(599)}…\n@mention or assign me to re-run.`,
+      `Enrichment added (job 42, confidence high). ${"s".repeat(599)}…`,
     );
   });
 });
