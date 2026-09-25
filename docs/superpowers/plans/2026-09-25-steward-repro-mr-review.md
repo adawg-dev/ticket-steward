@@ -3601,7 +3601,6 @@ it("checks the GitLab review setup when review is configured", async () => {
   // factories.review = new FakeGitLabReview()
   expect(output).toContain("[ok] gitlab webhook secret: GITLAB_WEBHOOK_SECRET present");
   expect(output).toContain("[ok] gitlab reviewer: GITLAB_TOKEN acts as steward-bot with the api scope");
-  expect(output).toContain("[warn] gitlab reviewers per MR: on GitLab Free an MR has one reviewer, so adding the steward replaces the human reviewer");
 });
 
 it("fails when the token lacks the api scope or belongs to someone else", async () => {
@@ -3655,10 +3654,6 @@ const reviewChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
         return ok(`GITLAB_TOKEN acts as ${user.username} with the api scope`);
       },
     },
-    {
-      name: "gitlab reviewers per MR",
-      run: async () => warn("on GitLab Free an MR has one reviewer, so adding the steward replaces the human reviewer"),
-    },
   ];
 };
 ```
@@ -3678,7 +3673,7 @@ GITLAB_WEBHOOK_SECRET=
 - `examples/kickoff/steward.config.ts`: add `bugLabels: ["Bug"]` to `tracker`, and `review: { botUsername: "ticket-steward", prompt: "./prompts/review.md" }`, commented out, with one line explaining it.
 - `docs/ops.md`:
   - A new **§1.10 "GitLab merge-request review (optional)"**, covering:
-    1. The steward's GitLab user, and its limits: a project access token with Reporter + `api` needs Premium or Ultimate on gitlab.com; otherwise use a dedicated user with a personal access token. Also the single-reviewer limit on Free.
+    1. The steward's GitLab user: a project access token (Reporter, `api` scope), which creates a bot user named `project_<id>_bot_<suffix>`. The owner is on GitLab Ultimate, so project access tokens and multiple reviewers per MR are both available. Mention in one line that on Free you'd use a dedicated user's personal access token instead, and an MR could have only one reviewer.
     2. `review.botUsername` must equal that user.
     3. The webhook: Settings → Webhooks, URL `https://<publicUrl>/webhooks/gitlab`, trigger **Merge request events** only, with a signing token or secret token copied into `.env`.
     4. The Cloudflare Access **Bypass** policy must cover `/webhooks/*`, so that both `/webhooks/linear` and `/webhooks/gitlab` reach the tunnel.
@@ -3729,7 +3724,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 3. Edit `/etc/ticket-steward/steward.config.ts`: add `bugLabels`, and `review.botUsername`/`review.prompt`. Copy `prompts/review.md` next to it.
 4. Cloudflare Access: a Bypass application for `adam.concentrate.ai/webhooks/*`, and the tunnel's public hostname pointing at `http://localhost:3020`.
 5. The Linear webhook URL is `https://adam.concentrate.ai/webhooks/linear` (Issues events). The GitLab webhook is `https://adam.concentrate.ai/webhooks/gitlab` (Merge request events).
-6. `sudo -u steward steward doctor` passes, apart from the expected Free-tier warning.
+6. `sudo -u steward steward doctor` passes.
 
 **Checks.** Record the results in `docs/superpowers/plans/2026-09-25-steward-live-results.md`.
 - [ ] **Compat checks** (the former compat Task 7): a Slack-filed gateway ticket is enriched once, its Enrichment section sits above the gateway footer, and the brain mentions the routed class.

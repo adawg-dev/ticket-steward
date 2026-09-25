@@ -216,7 +216,7 @@ return { completed, final }
   - A reviewer being added arrives as `action: "update"` with `changes.reviewers`.
   - A push is `action: "update"` with `object_attributes.oldrev`.
   - Dedupe on `webhook-id`, or `Idempotency-Key` if that is missing, never on `X-Gitlab-Webhook-UUID`.
-- **GitLab Free:** one reviewer per MR, and project access tokens need Premium on gitlab.com.
+- **GitLab tier:** the owner is on Ultimate, so project access tokens are available and an MR can have several reviewers. There is no Free-tier warning.
 - **GitLab tokens:**
   - `GITLAB_TOKEN` needs the `api` scope and at least Reporter to post discussions.
   - `MIRROR_TOKEN` is the deploy token `ticket-steward-mirror` (`read_repository`), and needs `MIRROR_USERNAME=ticket-steward-mirror`.

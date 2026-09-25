@@ -90,9 +90,8 @@ Earlier asks:
 14. **One worker, one port, one run lock.** Reviews share the FIFO queue with enrichments. They are not prioritised; that is deferred.
 15. **Auth and secrets:**
     - **`GITLAB_TOKEN`** needs the `api` scope (`read_api` cannot post notes). Its user needs **Reporter** or higher on the project, which is enough to comment, be a reviewer and resolve its own threads. That user is the steward's reviewer identity, and `review.botUsername` names it.
-      - On gitlab.com, project access tokens need Premium or Ultimate. On Free, use a dedicated user account with a personal access token.
-      - **On GitLab Free an MR can have only one reviewer**, so adding the steward replaces the human reviewer.
-      - `doctor` warns about both.
+      - The owner is on **GitLab Ultimate** (confirmed 2026-09-25), so a project access token works and MRs can have several reviewers. On Free, you would use a dedicated user's personal access token instead, and adding the steward would replace the human reviewer.
+      - `doctor` checks that the token has the `api` scope and that its user matches `review.botUsername`.
     - **Webhook verification.**
       - With a signing token, set `GITLAB_WEBHOOK_SIGNING_TOKEN`. This is the Standard Webhooks `whsec_…` value, and verification uses the `webhook-id`, `webhook-timestamp` and `webhook-signature` headers (GitLab 19.1+).
       - Without one, set `GITLAB_WEBHOOK_SECRET`, which is checked against the `X-Gitlab-Token` header.
@@ -205,4 +204,3 @@ A live check against a real MR is owner-run (plan Task 17).
 - A `steward review <mr>` CLI trigger.
 - Reviewing MRs whose ticket was never enriched by this version (no backfill).
 - GitHub pull requests.
-- Replacing the GitLab Free single-reviewer workaround (for example, triggering on an `@mention` instead).
