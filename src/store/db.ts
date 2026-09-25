@@ -45,6 +45,16 @@ CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
   seen_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS repros (
+  issue_id TEXT PRIMARY KEY,
+  identifier TEXT NOT NULL,
+  job_id INTEGER NOT NULL,
+  sha TEXT NOT NULL,
+  recipe TEXT NOT NULL,
+  files_dir TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 /** Columns added after the first release; applied to databases created before them. */

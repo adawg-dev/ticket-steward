@@ -1,5 +1,6 @@
 import { gatewayFooterStart } from "./gateway.js";
 import { STEWARD_BEGIN, STEWARD_END } from "./intake.js";
+import { renderReproMarkdown } from "./repro.js";
 import type { BrainResult } from "./result.js";
 
 export interface SectionMeta {
@@ -50,6 +51,7 @@ export const buildEnrichmentSection = (
   const blocks = [
     templateLine(result.template),
     linkify(result.enrichment.trim(), meta.permalink),
+    result.repro === null ? "" : renderReproMarkdown(result.repro),
     uploaded.map(({ url, caption }) => `![${caption}](${url})`).join("\n"),
     notes.map((note) => `_Note: ${note}_`).join("\n"),
   ].filter((block) => block !== "");

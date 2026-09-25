@@ -173,6 +173,23 @@ describe("runJob", () => {
     expect(stores.jobs.get(ctx.jobId)?.result?.repro).toEqual(recipe);
   });
 
+  it("saves recipe files and the recipe record for a bug ticket", async () => {
+    const recipe = { status: "reproduced" as const, method: "test" as const, command: "node repro.mjs", steps: [], files: ["repro.mjs"], expected: "ok", observed: "boom" };
+    const ctx = claimJob(createdTrigger);
+    const brain = brainWith({ result: { ...brainResult, repro: recipe } });
+    const deps = makeDeps(brain, {
+      afterBrain: async () => {
+        await writeFile(join(brain.lastInput().workspacePath, "repro.mjs"), "throw new Error('boom');\n");
+      },
+    });
+    expect((await runJob(ctx, deps)).status).toBe("succeeded");
+    const record = stores.repros.get("issue-1");
+    expect(record?.jobId).toBe(ctx.jobId);
+    expect(record?.recipe.files).toEqual(["repro.mjs"]);
+    expect(await readFile(join(record?.filesDir ?? "", "repro.mjs"), "utf8")).toContain("boom");
+    expect(tracker.getDescription("issue-1")).toContain("### Reproduction");
+  });
+
   it("drops the recipe for a ticket without a bug label", async () => {
     tracker.addIssue({ ...issue, labels: ["Feature"] });
     const recipe = { status: "reproduced" as const, method: "http" as const, command: "curl -s localhost:4100/x", steps: [], files: [], expected: "200", observed: "500" };

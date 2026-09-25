@@ -80,6 +80,19 @@ describe("buildEnrichmentSection", () => {
     );
     expect(unmatched).toContain("**Template:** none matched");
   });
+
+  it("adds the reproduction block after the enrichment body", () => {
+    const section = buildEnrichmentSection(
+      { ...result, repro: { status: "reproduced", method: "test", command: "pnpm vitest run a.test.ts", steps: [], files: ["a.test.ts"], expected: "x", observed: "y" } },
+      [{ url: "https://u/1.png", caption: "shot" }],
+      [],
+      meta,
+    );
+    const body = section.indexOf("### Reproduction");
+    expect(body).toBeGreaterThan(section.indexOf("**Template:**"));
+    expect(body).toBeLessThan(section.indexOf("![shot]"));
+    expect(section).toContain("**Recipe files:** `a.test.ts`");
+  });
 });
 
 describe("replaceSection", () => {
