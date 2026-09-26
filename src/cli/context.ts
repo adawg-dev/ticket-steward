@@ -2,6 +2,7 @@ import type { Writable } from "node:stream";
 import type { Command } from "commander";
 import type { Brain } from "../brain/types.js";
 import type { codehostMcpSpec } from "../codehost/server.js";
+import type { GitLabReviewApi } from "../codehost/gitlabReview.js";
 import type { CodeHost } from "../codehost/types.js";
 import { loadConfig, type LoadedConfig } from "../config/load.js";
 import type { TicketBundle } from "../tracker/types.js";
@@ -23,6 +24,7 @@ export interface CliFactories {
   codehost?: CodeHost;
   codehostMcpSpec?: typeof codehostMcpSpec;
   templates?: TemplateLister;
+  review?: GitLabReviewApi;
 }
 
 export interface CliContext {

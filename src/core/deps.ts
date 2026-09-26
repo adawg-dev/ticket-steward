@@ -1,5 +1,6 @@
 import type { runBrainDetached } from "../brain/index.js";
 import type { Brain } from "../brain/types.js";
+import type { GitLabReviewApi } from "../codehost/gitlabReview.js";
 import type { CodeHost } from "../codehost/types.js";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
@@ -20,6 +21,8 @@ export interface PipelineDeps {
   stores: Stores;
   redactor: Redactor;
   now: () => Date;
+  /** GitLab review client; present when `review` is configured and GITLAB_TOKEN is set. */
+  review?: GitLabReviewApi;
   runBrain?: typeof runBrainDetached;
   /** Aborted on shutdown: setup and the brain stop, and the outcome carries `INTERRUPTED_ERROR`. */
   signal?: AbortSignal;

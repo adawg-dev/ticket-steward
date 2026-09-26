@@ -9,8 +9,9 @@ import type { publishOnly, runJob } from "../../src/core/pipeline.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { BrainResult } from "../../src/core/result.js";
 import type { JobOutcome, RunContext } from "../../src/core/types.js";
+import type { StoredReview } from "../../src/review/result.js";
 import { openStores, type Stores } from "../../src/store/index.js";
-import type { TriggerEvent } from "../../src/tracker/types.js";
+import type { ReviewTrigger, TriggerEvent } from "../../src/tracker/types.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { startWorker, type WorkerDeps, type WorkerHandle } from "../../src/worker/loop.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
@@ -29,6 +30,24 @@ const createdTrigger: TriggerEvent = {
   teamKey: "API",
   deliveryId: "delivery-1",
   description: "The adapter loses the final chunk.",
+};
+
+const reviewTrigger: ReviewTrigger = {
+  kind: "mr.review",
+  deliveryId: "delivery-mr-1",
+  projectId: 42,
+  projectPath: "acme/repo",
+  mrIid: 7,
+  mrUrl: "https://gitlab.example/acme/repo/-/merge_requests/7",
+  headSha: "c".repeat(40),
+  linearKey: "API-1",
+  teamKey: "API",
+  reason: "push",
+};
+
+const storedReview: StoredReview = {
+  result: { verdict: "not_applicable", rerun: null, summary: "Looks fine.", comments: [], confidence: "medium" },
+  diffRefs: { baseSha: "a".repeat(40), startSha: "a".repeat(40), headSha: "c".repeat(40) },
 };
 
 const brainResult: BrainResult = {
@@ -414,6 +433,37 @@ describe("startWorker", () => {
     expect(stores.jobs.get(jobId)?.status).toBe("queued");
     expect(stores.jobs.get(jobId)?.attempts).toBe(0);
     expect(runJobMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends review jobs to the review pipeline", async () => {
+    const calls: string[] = [];
+    const stub = (name: string) => async (): Promise<JobOutcome> => {
+      calls.push(name);
+      return SUCCEEDED;
+    };
+    const reviewId = stores.jobs.enqueue(reviewTrigger);
+    const enrichId = stores.jobs.enqueue(createdTrigger);
+    start({ runJob: stub("runJob"), publishOnly: stub("publishOnly"), runReview: stub("runReview"), publishReviewOnly: stub("publishReviewOnly") });
+
+    await waitForStatus(reviewId, "succeeded");
+    await waitForStatus(enrichId, "succeeded");
+
+    expect(calls.sort()).toEqual(["runJob", "runReview"]);
+  });
+
+  it("republishes a stored review instead of rerunning it", async () => {
+    const calls: string[] = [];
+    const stub = (name: string) => async (): Promise<JobOutcome> => {
+      calls.push(name);
+      return SUCCEEDED;
+    };
+    const jobId = stores.jobs.enqueue(reviewTrigger);
+    stores.jobs.saveReviewResult(jobId, storedReview);
+    start({ runJob: stub("runJob"), publishOnly: stub("publishOnly"), runReview: stub("runReview"), publishReviewOnly: stub("publishReviewOnly") });
+
+    await waitForStatus(jobId, "succeeded");
+
+    expect(calls).toEqual(["publishReviewOnly"]);
   });
 
   it("sweeps worktrees beyond the kept count on start", async () => {

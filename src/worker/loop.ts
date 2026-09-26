@@ -4,6 +4,7 @@ import { acquireRunLock } from "../core/lock.js";
 import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { logger } from "../log.js";
+import { publishReviewOnly, runReview } from "../review/pipeline.js";
 import type { Attempt, AttemptPatch, Job } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 
@@ -14,6 +15,8 @@ export interface WorkerOptions {
   sweepMs?: number;
   runJob?: typeof runJob;
   publishOnly?: typeof publishOnly;
+  runReview?: typeof runReview;
+  publishReviewOnly?: typeof publishReviewOnly;
 }
 
 export type WorkerDeps = PipelineDeps & WorkerOptions;
@@ -62,6 +65,8 @@ class Worker {
   private readonly backoffMs: number[];
   private readonly execute: typeof runJob;
   private readonly republish: typeof publishOnly;
+  private readonly review: typeof runReview;
+  private readonly republishReview: typeof publishReviewOnly;
   private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly loopDone: Promise<void>;
@@ -80,6 +85,8 @@ class Worker {
     this.backoffMs = deps.backoffMs ?? DEFAULT_BACKOFF_MS;
     this.execute = deps.runJob ?? runJob;
     this.republish = deps.publishOnly ?? publishOnly;
+    this.review = deps.runReview ?? runReview;
+    this.republishReview = deps.publishReviewOnly ?? publishReviewOnly;
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
     logger.info({ requeued, failed }, "worker started");
     this.sweepTimer = setInterval(() => void this.sweep(), deps.sweepMs ?? DEFAULT_SWEEP_MS).unref();
@@ -161,6 +168,7 @@ class Worker {
   private async run(job: Job, ctx: RunContext): Promise<JobOutcome> {
     const deps: PipelineDeps = { ...this.deps, signal: this.abort.signal };
     try {
+      if (job.kind === "review") return job.reviewResult === null ? await this.review(ctx, deps) : await this.republishReview(ctx, deps);
       return job.result === null ? await this.execute(ctx, deps) : await this.republish(ctx, deps);
     } catch (err) {
       return { status: "failed", error: errorMessage(err), retryable: false };
