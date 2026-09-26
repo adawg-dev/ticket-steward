@@ -249,4 +249,15 @@ describe("review jobs", () => {
     expect(stores.jobs.findQueuedBySubject(reviewSubject(42, 7))).toBeNull();
     expect(stores.jobs.replaceTrigger(id, review("b".repeat(40)))).toBe(false);
   });
+
+  it("stores and reads back a review result", () => {
+    const id = stores.jobs.enqueue(review("a".repeat(40)));
+    const stored = {
+      result: { verdict: "not_fixed" as const, rerun: { observed: "still 500", deviations: null }, summary: "s", comments: [], confidence: "medium" as const },
+      diffRefs: { baseSha: "1".repeat(40), startSha: "1".repeat(40), headSha: "a".repeat(40) },
+    };
+    stores.jobs.saveReviewResult(id, stored);
+    expect(stores.jobs.get(id)?.reviewResult).toEqual(stored);
+    expect(stores.jobs.get(id)?.result).toBeNull();
+  });
 });

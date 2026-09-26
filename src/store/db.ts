@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   finished_at TEXT,
   not_before TEXT,
   kind TEXT NOT NULL DEFAULT 'enrich',
-  subject TEXT
+  subject TEXT,
+  review_result TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_issue_status ON jobs (issue_id, status);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status);
@@ -64,6 +65,7 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }
   { table: "jobs", column: "not_before", definition: "TEXT" },
   { table: "jobs", column: "kind", definition: "TEXT NOT NULL DEFAULT 'enrich'" },
   { table: "jobs", column: "subject", definition: "TEXT" },
+  { table: "jobs", column: "review_result", definition: "TEXT" },
 ];
 
 /** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */

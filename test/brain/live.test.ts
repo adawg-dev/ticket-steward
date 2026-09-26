@@ -41,6 +41,7 @@ const liveInput = (brain: BrainConfig): BrainInput => ({
   model: brain.model,
   mcpServers: {},
   denyPaths: [],
+  output: "enrich",
 });
 
 describe.skipIf(!live)("live brain contract", () => {

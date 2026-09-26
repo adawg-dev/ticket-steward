@@ -1,6 +1,8 @@
 import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createClaudeCodeBrain, type QueryImpl } from "../../src/brain/claudeCode.js";
 import type { BrainInput } from "../../src/brain/types.js";
+import { brainResultJsonSchema } from "../../src/core/result.js";
+import { reviewResultJsonSchema } from "../../src/review/result.js";
 
 const input: BrainInput = {
   workspacePath: "/data/work/42-1",
@@ -13,6 +15,7 @@ const input: BrainInput = {
   model: "claude-test",
   mcpServers: {},
   denyPaths: [],
+  output: "enrich",
 };
 
 const usage = { inputTokens: 10, outputTokens: 20, costUsd: 0.5 };
@@ -86,5 +89,23 @@ describe("claude-code brain", () => {
     expect(run.output).toBeUndefined();
     expect(run.usage).toEqual(usage);
     expect(queryMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks for the enrichment schema when the input is an enrichment", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
+
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, onMessage);
+
+    const captured = queryMock.mock.calls[0]?.[0].options;
+    expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: brainResultJsonSchema });
+  });
+
+  it("asks for the review schema when the input is a review", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
+
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run({ ...input, output: "review" }, onMessage);
+
+    const captured = queryMock.mock.calls[0]?.[0].options;
+    expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: reviewResultJsonSchema });
   });
 });

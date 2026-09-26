@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Agent, MCPServerStdio, run } from "@openai/agents";
 import { BrainResultSchema } from "../core/result.js";
+import { ReviewResultSchema } from "../review/result.js";
 import { createBrainTools } from "./tools/index.js";
 import type { Brain, BrainInput, BrainUsage } from "./types.js";
 
@@ -31,6 +32,16 @@ const sumUsage = (result: { rawResponses: Array<{ usage: { inputTokens: number; 
 const mcpServers = (input: BrainInput): MCPServerStdio[] =>
   Object.entries(input.mcpServers).map(([name, spec]) => new MCPServerStdio({ name, command: spec.command, args: spec.args, env: spec.env, cwd: input.workspacePath }));
 
+const agentFor = <TOutput extends typeof BrainResultSchema | typeof ReviewResultSchema>(input: BrainInput, servers: MCPServerStdio[], outputType: TOutput) =>
+  new Agent({
+    name: "ticket-steward",
+    instructions: INSTRUCTIONS,
+    model: input.model,
+    tools: createBrainTools({ workspacePath: input.workspacePath, artifactsDir: input.artifactsDir, denyPaths: input.denyPaths }),
+    mcpServers: servers,
+    outputType,
+  });
+
 export const createOpenAiAgentsBrain = (): Brain => ({
   kind: "openai-agents",
   run: async (input, onMessage) => {
@@ -39,14 +50,7 @@ export const createOpenAiAgentsBrain = (): Brain => ({
     const servers = mcpServers(input);
     try {
       await Promise.all(servers.map((s) => s.connect()));
-      const agent = new Agent({
-        name: "ticket-steward",
-        instructions: INSTRUCTIONS,
-        model: input.model,
-        tools: createBrainTools({ workspacePath: input.workspacePath, artifactsDir: input.artifactsDir, denyPaths: input.denyPaths }),
-        mcpServers: servers,
-        outputType: BrainResultSchema,
-      });
+      const agent = input.output === "review" ? agentFor(input, servers, ReviewResultSchema) : agentFor(input, servers, BrainResultSchema);
       const prompt = `${input.prompt}${await skillsText(input.workspacePath)}`;
       const result = await run(agent, prompt, { maxTurns: input.maxTurns, signal: abortController.signal });
       for (const item of result.newItems) onMessage(JSON.stringify(item.toJSON()));

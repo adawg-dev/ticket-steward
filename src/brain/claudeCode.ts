@@ -1,10 +1,12 @@
 import { query, type HookCallback, type McpServerConfig, type Options, type SDKMessage, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 import { brainResultJsonSchema } from "../core/result.js";
+import { reviewResultJsonSchema } from "../review/result.js";
 import { evaluateTool } from "./policy.js";
-import type { Brain, BrainInput, BrainUsage, OnMessage } from "./types.js";
+import type { Brain, BrainInput, BrainOutput, BrainUsage, OnMessage } from "./types.js";
 
 const ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*"];
 const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
+const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = { enrich: brainResultJsonSchema, review: reviewResultJsonSchema };
 const FOLLOW_UP_PROMPT = "Stop investigating and emit the final structured result now.";
 
 /** The SDK's `query`, narrowed to what the brain consumes so tests can substitute an async generator. */
@@ -62,7 +64,7 @@ export const createClaudeCodeBrain = (deps: { queryImpl?: QueryImpl } = {}): Bra
         allowedTools: ALLOWED_TOOLS,
         settingSources: ["project"],
         mcpServers: mcpServers(input),
-        outputFormat: { type: "json_schema", schema: brainResultJsonSchema },
+        outputFormat: { type: "json_schema", schema: OUTPUT_SCHEMAS[input.output] },
         hooks: { PreToolUse: [{ matcher: POLICY_HOOK_MATCHER, hooks: [policyHook(input)] }] },
         abortController,
       };

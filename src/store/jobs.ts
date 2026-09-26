@@ -1,5 +1,6 @@
 import type { BrainResult } from "../core/result.js";
 import type { JobOutcome } from "../core/types.js";
+import { StoredReviewSchema, type StoredReview } from "../review/result.js";
 import type { ReviewTrigger, TriggerEvent } from "../tracker/types.js";
 import { nowIso, type Database } from "./db.js";
 
@@ -21,6 +22,7 @@ export interface Job {
   attempts: number;
   result: BrainResult | null;
   resultSha: string | null;
+  reviewResult: StoredReview | null;
   error: string | null;
   createdAt: string;
   startedAt: string | null;
@@ -40,6 +42,7 @@ interface JobRow {
   attempts: number;
   result: string | null;
   result_sha: string | null;
+  review_result: string | null;
   error: string | null;
   created_at: string;
   started_at: string | null;
@@ -59,6 +62,7 @@ const toJob = (row: JobRow): Job => ({
   attempts: row.attempts,
   result: row.result === null ? null : (JSON.parse(row.result) as BrainResult),
   resultSha: row.result_sha,
+  reviewResult: row.review_result === null ? null : StoredReviewSchema.parse(JSON.parse(row.review_result)),
   error: row.error,
   createdAt: row.created_at,
   startedAt: row.started_at,
@@ -91,6 +95,7 @@ export class JobStore {
   private readonly claimOldest;
   private readonly claimOne;
   private readonly storeResult;
+  private readonly storeReview;
   private readonly complete;
   private readonly deferRetry;
   private readonly unclaim;
@@ -124,6 +129,7 @@ export class JobStore {
     );
     this.claimOne = db.prepare<[string, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
     this.storeResult = db.prepare<[string, string, number]>("UPDATE jobs SET result = ?, result_sha = ? WHERE id = ?");
+    this.storeReview = db.prepare<[string, number]>("UPDATE jobs SET review_result = ? WHERE id = ?");
     this.complete = db.prepare<[JobStatus, string | null, string, number]>(
       "UPDATE jobs SET status = ?, error = ?, finished_at = ?, not_before = NULL WHERE id = ?",
     );
@@ -200,6 +206,10 @@ export class JobStore {
 
   saveResult(id: number, result: BrainResult, sha: string): void {
     this.storeResult.run(JSON.stringify(result), sha, id);
+  }
+
+  saveReviewResult(id: number, stored: StoredReview): void {
+    this.storeReview.run(JSON.stringify(stored), id);
   }
 
   finish(id: number, outcome: JobOutcome): void {

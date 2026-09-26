@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import type { BrainInput, McpServerSpec } from "../brain/types.js";
+import type { BrainInput, BrainOutput, McpServerSpec } from "../brain/types.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import { logger } from "../log.js";
 import { DB_FILENAME } from "../store/db.js";
@@ -95,7 +95,7 @@ export const prepareWorkspace = async (
   return worktree;
 };
 
-export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktree, prompt: string, env: Record<string, string>): BrainInput => {
+export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktree, prompt: string, env: Record<string, string>, output: BrainOutput): BrainInput => {
   const { config, mirror } = deps;
   return {
     workspacePath: worktree.path,
@@ -111,6 +111,7 @@ export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktr
       playwright: playwrightMcpSpec(),
     },
     denyPaths: [mirror.path, join(config.dataDir, DB_FILENAME), config.workspace.overlayDir, dirname(deps.configPath)],
+    output,
   };
 };
 

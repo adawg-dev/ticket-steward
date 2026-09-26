@@ -124,7 +124,7 @@ const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktre
   const { worktree, prompt } = prepared;
   let run: BrainRun;
   try {
-    run = await (deps.runBrain ?? runBrainDetached)(config.brain, brainInput(deps, paths, worktree, prompt, env), deps.redactor, {
+    run = await (deps.runBrain ?? runBrainDetached)(config.brain, brainInput(deps, paths, worktree, prompt, env, "enrich"), deps.redactor, {
       ...(deps.signal === undefined ? {} : { signal: deps.signal }),
     });
   } catch (err) {

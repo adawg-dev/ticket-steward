@@ -3,7 +3,7 @@ import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
 import { fail, println, type CliContext } from "./context.js";
-import { defaultPromptPath, envExamplePath } from "./paths.js";
+import { defaultPromptPath, defaultReviewPromptPath, envExamplePath } from "./paths.js";
 
 const CONFIG_TEMPLATE = `import { defineConfig } from "ticket-steward";
 
@@ -27,6 +27,8 @@ export default defineConfig({
   },
   retention: { keptWorktrees: 3, days: 30 },
   prompt: "./prompts/enrich.md",
+  // GitLab merge-request review: the steward's GitLab user (GITLAB_TOKEN, api scope) reviews MRs it is added to.
+  // review: { botUsername: "ticket-steward", prompt: "./prompts/review.md", allowForks: false, maxComments: 15 },
   server: { port: 3020, publicUrl: "https://steward.example.com" },
 });
 `;
@@ -49,13 +51,14 @@ const targets = (dir: string): Target[] => [
   { path: join(dir, "steward.config.ts"), write: (): Promise<void> => writeFile(join(dir, "steward.config.ts"), CONFIG_TEMPLATE) },
   { path: join(dir, ".env.example"), write: (): Promise<void> => copyFile(envExamplePath, join(dir, ".env.example")) },
   { path: join(dir, "prompts", "enrich.md"), write: (): Promise<void> => copyFile(defaultPromptPath, join(dir, "prompts", "enrich.md")) },
+  { path: join(dir, "prompts", "review.md"), write: (): Promise<void> => copyFile(defaultReviewPromptPath, join(dir, "prompts", "review.md")) },
   { path: join(dir, "skills", "README.md"), write: (): Promise<void> => writeFile(join(dir, "skills", "README.md"), SKILLS_README) },
 ];
 
 export const registerInit = (program: Command, ctx: CliContext): void => {
   program
     .command("init")
-    .description("write steward.config.ts, .env.example, prompts/enrich.md and skills/ into a directory")
+    .description("write steward.config.ts, .env.example, prompts/enrich.md, prompts/review.md and skills/ into a directory")
     .argument("[dir]", "target directory", process.cwd())
     .action(async (dir: string) => {
       const files = targets(resolve(dir));

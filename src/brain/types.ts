@@ -6,6 +6,8 @@ export interface McpServerSpec {
   env: Record<string, string>;
 }
 
+export type BrainOutput = "enrich" | "review";
+
 export interface BrainInput {
   workspacePath: string;
   artifactsDir: string;
@@ -17,6 +19,8 @@ export interface BrainInput {
   model: string;
   mcpServers: Record<string, McpServerSpec>;
   denyPaths: string[];
+  /** Which structured-output schema the run must return. */
+  output: BrainOutput;
 }
 
 export interface BrainUsage {
