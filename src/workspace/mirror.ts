@@ -52,6 +52,11 @@ export class Mirror {
     await gitOrThrow(["fetch", "--quiet", "--prune", "origin"], this.path, this.remote.env);
   }
 
+  /** Fetches one ref under its own name, e.g. refs/merge-requests/7/head; a fork's MR head exists only there. */
+  async fetchRef(ref: string): Promise<void> {
+    await gitOrThrow(["fetch", "--quiet", "origin", `+${ref}:${ref}`], this.path, this.remote.env);
+  }
+
   /** A mirror stores remote branches under refs/heads, so `origin/<branch>` resolves to the mirrored branch. */
   async resolveSha(ref: string): Promise<string> {
     const local = ref.replace(/^origin\//, "");

@@ -75,6 +75,18 @@ describe("Mirror", () => {
     expect(new Set(server.authorizations)).toEqual(new Set([basicAuth]));
     await server.close();
   });
+
+  it("fetches a merge-request head ref that no branch points at", async () => {
+    const { repo } = await makeSourceRepo(root);
+    await git(repo, ["checkout", "-q", "-b", "fix"]);
+    const head = await commitFile(repo, "src/fix.ts", "export const fix = 1;\n");
+    await git(repo, ["update-ref", "refs/merge-requests/7/head", head]);
+    await git(repo, ["checkout", "-q", "main"]);
+    await git(repo, ["branch", "-D", "fix"]);
+    const mirror = await Mirror.init(join(root, "mirror.git"), repo);
+    await mirror.fetchRef("refs/merge-requests/7/head");
+    expect(await mirror.resolveSha(head)).toBe(head);
+  });
 });
 
 describe("injectToken", () => {
