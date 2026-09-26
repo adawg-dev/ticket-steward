@@ -30,6 +30,12 @@ const parseId = (value: string): number => {
 export const jobLine = (job: Job): string =>
   [job.id, job.status, job.identifier, job.trigger.kind, `attempts=${job.attempts}`, job.createdAt].join("\t");
 
+/** What a retry will do, matching the worker's dispatch. */
+const retryMode = (job: Job): string => {
+  if (job.kind === "review") return job.reviewResult === null ? `job ${job.id}: full run` : `job ${job.id}: publish-only (review stored)`;
+  return job.result === null ? `job ${job.id}: full run` : `job ${job.id}: publish-only (result stored at ${job.resultSha})`;
+};
+
 const pretty = (value: unknown): string => JSON.stringify(value, null, 2);
 
 const listArtifacts = async (dir: string): Promise<string[]> => (existsSync(dir) ? (await readdir(dir)).sort() : []);
@@ -66,14 +72,14 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
 
   jobs
     .command("retry")
-    .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when a result is stored")
+    .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when a result or review is stored")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
       const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);
       const { jobs } = runtime.stores;
       const job = jobs.get(id);
       if (job === null) return fail(ctx, `job ${id} not found`);
-      println(ctx, job.result === null ? `job ${id}: full run` : `job ${id}: publish-only (result stored at ${job.resultSha})`);
+      println(ctx, retryMode(job));
       if (await answers(ctx.fetchImpl, localHealthUrl(runtime.loaded.config.server.port), HEALTH_TIMEOUT_MS)) {
         if (!jobs.requeue(id)) return fail(ctx, `job ${id} is already running`);
         println(ctx, `steward serve is running; requeued job ${id}`);

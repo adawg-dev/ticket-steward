@@ -3,10 +3,13 @@ import { join } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
 import { localHealthUrl } from "../../src/cli/probe.js";
 import { openStores, type Stores } from "../../src/store/index.js";
+import type { CliFactories } from "../../src/cli/context.js";
 import type { BrainResult } from "../../src/core/result.js";
+import type { StoredReview } from "../../src/review/result.js";
 import type { TriggerEvent } from "../../src/tracker/types.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
+import { BOT, FakeGitLabReview, fakeMergeRequest } from "../fakes/fakeGitLabReview.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { ExitSignal, makeContext, tmpConfigDir, waitFor, writeConfig } from "./helpers.js";
 
@@ -17,6 +20,24 @@ const createdEvent: TriggerEvent = {
   teamKey: "API",
   deliveryId: "delivery-1",
   description: "A bug report",
+};
+
+const reviewEvent: TriggerEvent = {
+  kind: "mr.review",
+  deliveryId: "delivery-mr",
+  projectId: 42,
+  projectPath: "acme/repo",
+  mrIid: 7,
+  mrUrl: "https://gitlab.example/acme/repo/-/merge_requests/7",
+  headSha: "c".repeat(40),
+  linearKey: "API-1",
+  teamKey: "API",
+  reason: "opened",
+};
+
+const storedReview: StoredReview = {
+  result: { verdict: "not_fixed", rerun: { observed: "the final chunk is still dropped", deviations: null }, summary: "The fix misses the last chunk.", comments: [], confidence: "high" },
+  diffRefs: { baseSha: "a".repeat(40), startSha: "a".repeat(40), headSha: "c".repeat(40) },
 };
 
 const cliEvent: TriggerEvent = { kind: "cli", issueId: "issue-2", identifier: "API-2", teamKey: "API" };
@@ -46,6 +67,7 @@ beforeEach(async () => {
     fetchUrl: "https://gitlab.example/acme/repo.git",
     port: 4100,
     serverPort: 3020,
+    review: { botUsername: BOT, prompt: join(dir, "review.md") },
   });
   stores = openStores(dataDir);
 });
@@ -55,8 +77,8 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const run = (args: string[], fetchImpl?: typeof fetch) => {
-  const factories = { tracker: new FakeTracker(), brain: new FakeBrain(), codehost: new FakeCodeHost() };
+const run = (args: string[], fetchImpl?: typeof fetch, overrides: CliFactories = {}) => {
+  const factories: CliFactories = { tracker: new FakeTracker(), brain: new FakeBrain(), codehost: new FakeCodeHost(), ...overrides };
   const context = makeContext({ factories, ...(fetchImpl === undefined ? {} : { fetchImpl }) });
   return { ...context, done: buildProgram(context.ctx).parseAsync(["node", "steward", "--config", configPath, ...args]) };
 };
@@ -157,6 +179,44 @@ describe("steward jobs", () => {
 
     await expect(done).rejects.toEqual(new ExitSignal(1));
     expect(stderr()).toMatch(new RegExp(String(id)));
+  });
+
+  it("retry runs a review job inline through the review pipeline, not enrichment", async () => {
+    const id = stores.jobs.enqueue(reviewEvent);
+    const tracker = new FakeTracker();
+    const review = new FakeGitLabReview(fakeMergeRequest({ state: "merged" }));
+
+    const { stdout, done } = run(["jobs", "retry", String(id)], undefined, { tracker, review });
+    await done;
+
+    expect(stdout()).toBe(`job ${id}: full run\njob ${id} running (attempt 1)\njob ${id} succeeded with warning: skipped: !7 is merged\n`);
+    expect(tracker.comments("API-1")).toEqual([]);
+    expect(stores.jobs.get(id)?.status).toBe("succeeded");
+  });
+
+  it("retry republishes a stored review inline without re-running or enriching", async () => {
+    const id = stores.jobs.enqueue(reviewEvent);
+    stores.jobs.claimById(id);
+    stores.jobs.saveReviewResult(id, storedReview);
+    stores.jobs.finish(id, { status: "publish_failed", error: "gitlab 502" });
+    const tracker = new FakeTracker([
+      {
+        id: "issue-1", identifier: "API-1", url: "u", title: "t", description: "", team: { id: "t", key: "API", name: "API" },
+        state: { name: "s", type: "started" }, labels: ["Bug"], priority: 0, creator: null, createdAt: "", comments: [], attachments: [], appliedTemplate: null, templates: [],
+      },
+    ]);
+    const review = new FakeGitLabReview();
+    const brain = new FakeBrain();
+
+    const { stdout, done } = run(["jobs", "retry", String(id)], undefined, { tracker, review, brain });
+    await done;
+
+    expect(stdout()).toBe(`job ${id}: publish-only (review stored)\njob ${id} running (attempt 1)\njob ${id} succeeded\n`);
+    expect(review.notes).toHaveLength(1);
+    expect(review.notes[0]).toContain("The fix misses the last chunk.");
+    expect(brain.runs).toBe(0);
+    expect(tracker.comments("issue-1")).toEqual([]);
+    expect(stores.jobs.get(id)?.status).toBe("succeeded");
   });
 
   it("gc reports what retention removed", async () => {
