@@ -32,10 +32,14 @@ export const validateReviewResult = (output: unknown): { ok: true; result: Revie
   return { ok: true, result: parsed.data };
 };
 
-/** Spec §3: without a recipe there is nothing to verify; with one, "not applicable" means the replay did not happen. */
+/**
+ * Spec §3: without a recipe there is nothing to verify; with one, "not applicable" means the replay did not happen,
+ * and a verdict with no replay (`rerun: null`) behind it cannot be trusted either.
+ */
 export const normalizeReviewResult = (result: ReviewResult, hasRecipe: boolean): ReviewResult => {
   if (!hasRecipe) return { ...result, verdict: "not_applicable", rerun: null };
-  return result.verdict === "not_applicable" ? { ...result, verdict: "could_not_run" } : result;
+  if (result.verdict === "not_applicable" || result.rerun === null) return { ...result, verdict: "could_not_run" };
+  return result;
 };
 
 export const StoredReviewSchema = z.object({

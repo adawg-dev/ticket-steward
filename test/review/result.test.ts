@@ -33,4 +33,9 @@ describe("normalizeReviewResult", () => {
     expect(normalizeReviewResult({ ...result, verdict: "not_applicable" }, true).verdict).toBe("could_not_run");
     expect(normalizeReviewResult(result, true)).toEqual(result);
   });
+
+  it("downgrades a verdict with no replay to could_not_run when there was a recipe", () => {
+    expect(normalizeReviewResult({ ...result, rerun: null }, true).verdict).toBe("could_not_run");
+    expect(normalizeReviewResult({ ...result, verdict: "not_fixed", rerun: null }, true).verdict).toBe("could_not_run");
+  });
 });
