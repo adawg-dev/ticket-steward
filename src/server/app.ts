@@ -1,11 +1,13 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
+import { parseMergeRequestEvent, verifyGitlabWebhook } from "../codehost/gitlabWebhook.js";
 import { shouldEnqueue, type IntakeDecision } from "../core/intake.js";
 import { logger } from "../log.js";
 import { transaction, type Job, type Stores } from "../store/index.js";
+import { reviewSubject } from "../store/jobs.js";
 import { parseEvent, verifySignature } from "../tracker/linear/webhook.js";
-import type { Tracker, TriggerEvent } from "../tracker/types.js";
+import type { ReviewTrigger, Tracker, TriggerEvent } from "../tracker/types.js";
 
 export interface ServerDeps {
   config: StewardConfig;
@@ -93,6 +95,57 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
   });
 };
 
+type ReviewIntake = "enqueue" | "superseded" | "duplicate";
+
+const reviewIntake = (deps: ServerDeps, trigger: ReviewTrigger): ReviewIntake =>
+  transaction(deps.stores.db, () => {
+    const { jobs, deliveries } = deps.stores;
+    if (!deliveries.markSeen(trigger.deliveryId)) return "duplicate";
+    const queued = jobs.findQueuedBySubject(reviewSubject(trigger.projectId, trigger.mrIid));
+    if (queued !== null && jobs.replaceTrigger(queued.id, trigger)) return "superseded";
+    jobs.enqueue(trigger);
+    return "enqueue";
+  });
+
+const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
+  app.post<{ Body: string }>("/webhooks/gitlab", async (request, reply) => {
+    const review = deps.config.review;
+    if (review === undefined) return reply.code(404).send({ ok: false });
+    const verified = verifyGitlabWebhook(
+      request.body,
+      {
+        token: header(request.headers["x-gitlab-token"]),
+        id: header(request.headers["webhook-id"]),
+        timestamp: header(request.headers["webhook-timestamp"]),
+        signature: header(request.headers["webhook-signature"]),
+      },
+      { secret: deps.secrets.GITLAB_WEBHOOK_SECRET, signingToken: deps.secrets.GITLAB_WEBHOOK_SIGNING_TOKEN },
+      Math.floor(Date.now() / 1000),
+    );
+    if (!verified) {
+      logger.warn({ event: header(request.headers["x-gitlab-event"]) }, "gitlab webhook rejected");
+      return reply.code(401).send({ ok: false });
+    }
+    if (header(request.headers["x-gitlab-event"]) !== "Merge Request Hook") return { ok: true, action: "ignored" };
+    const body = parseJson(request.body);
+    if (body === undefined) return reply.code(400).send({ ok: false });
+    const delivery = header(request.headers["webhook-id"]) ?? header(request.headers["idempotency-key"]);
+    const parsed = parseMergeRequestEvent(body, {
+      deliveryId: delivery === undefined ? undefined : `gitlab:${delivery}`,
+      botUsername: review.botUsername,
+      teams: deps.config.tracker.teams,
+      allowForks: review.allowForks,
+    });
+    if (!parsed.ok) {
+      logger.info({ reason: parsed.reason }, "gitlab webhook ignored");
+      return { ok: true, action: "ignored", reason: parsed.reason };
+    }
+    const action = reviewIntake(deps, parsed.trigger);
+    logger.info({ delivery: parsed.trigger.deliveryId, mr: parsed.trigger.mrIid, key: parsed.trigger.linearKey, reason: parsed.trigger.reason, action }, "gitlab webhook received");
+    return { ok: true, action };
+  });
+};
+
 const registerHealth = (app: FastifyInstance, deps: ServerDeps): void => {
   app.get("/health", async (_request, reply) => {
     const report = healthReport(deps);
@@ -104,6 +157,7 @@ export const buildServer = (deps: ServerDeps): FastifyInstance => {
   const app = Fastify();
   app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, body, done) => done(null, body));
   registerWebhook(app, deps);
+  registerGitlabWebhook(app, deps);
   registerHealth(app, deps);
   return app;
 };

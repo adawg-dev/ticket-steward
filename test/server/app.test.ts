@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { buildServer } from "../../src/server/app.js";
 import { openStores, type Stores } from "../../src/store/index.js";
+import { mrPayload } from "../fakes/gitlabPayload.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 
 const WEBHOOK_SECRET = "webhook-secret-value";
@@ -33,6 +34,7 @@ const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich"): StewardConfig 
   retention: { keptWorktrees: 3, days: 30 },
   prompt: join(dataDir, "prompt.md"),
   server: { port: 3020, publicUrl: "https://steward.example" },
+  review: { botUsername: "steward-bot", prompt: join(dataDir, "review.md"), allowForks: false, maxComments: 15 },
 });
 
 const issueCreatePayload = (teamKey = "API", description = "The adapter loses the final chunk.") =>
@@ -57,6 +59,14 @@ const post = (event: string, delivery: string, body: string, signature = sign(bo
     payload: body,
   });
 
+const postGitlab = (body: string, headers: Record<string, string> = {}) =>
+  app.inject({
+    method: "POST",
+    url: "/webhooks/gitlab",
+    headers: { "content-type": "application/json", "x-gitlab-event": "Merge Request Hook", "x-gitlab-token": "gitlab-secret-value", ...headers },
+    payload: body,
+  });
+
 describe("buildServer", () => {
   beforeEach(async () => {
     vi.restoreAllMocks();
@@ -65,7 +75,7 @@ describe("buildServer", () => {
     tracker = new FakeTracker();
     app = buildServer({
       config: makeConfig(),
-      secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
+      secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test", GITLAB_WEBHOOK_SECRET: "gitlab-secret-value" },
       stores,
       tracker,
       workerState: () => WORKER_IDLE,
@@ -162,6 +172,52 @@ describe("buildServer", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ ok: true, action: "ignored" });
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+    });
+  });
+
+  describe("POST /webhooks/gitlab", () => {
+    const push = (oldrev: string, head: string) => {
+      const payload = mrPayload({ oldrev });
+      return JSON.stringify({ ...payload, object_attributes: { ...payload.object_attributes, last_commit: { id: head } } });
+    };
+
+    it("rejects a wrong token", async () => {
+      expect((await postGitlab(push("a".repeat(40), "b".repeat(40)), { "x-gitlab-token": "nope" })).statusCode).toBe(401);
+    });
+
+    it("ignores other GitLab events", async () => {
+      const response = await postGitlab("{}", { "x-gitlab-event": "Push Hook" });
+      expect(response.json()).toEqual({ ok: true, action: "ignored" });
+    });
+
+    it("enqueues a review and dedupes a redelivery", async () => {
+      const first = await postGitlab(push("a".repeat(40), "b".repeat(40)), { "webhook-id": "msg-1" });
+      expect(first.json()).toEqual({ ok: true, action: "enqueue" });
+      expect((await postGitlab(push("a".repeat(40), "b".repeat(40)), { "webhook-id": "msg-1" })).json()).toEqual({ ok: true, action: "duplicate" });
+      expect(stores.jobs.list({ status: "queued", limit: 10 })).toHaveLength(1);
+    });
+
+    it("supersedes a queued review of the same MR", async () => {
+      const first = await postGitlab(push("a".repeat(40), "b".repeat(40)), { "webhook-id": "msg-1" });
+      expect(first.json()).toEqual({ ok: true, action: "enqueue" });
+      expect((await postGitlab(push("a".repeat(40), "b".repeat(40)), { "webhook-id": "msg-1" })).json()).toEqual({ ok: true, action: "duplicate" });
+      expect((await postGitlab(push("b".repeat(40), "c".repeat(40)), { "webhook-id": "msg-2" })).json()).toEqual({ ok: true, action: "superseded" });
+      const queued = stores.jobs.list({ status: "queued", limit: 10 });
+      expect(queued).toHaveLength(1);
+      expect(queued[0]?.trigger.kind === "mr.review" ? queued[0].trigger.headSha : null).toBe("c".repeat(40));
+    });
+
+    it("reports why an MR was ignored", async () => {
+      const response = await postGitlab(JSON.stringify(mrPayload({ reviewers: ["ana"], oldrev: "a".repeat(40) })));
+      expect(response.json()).toEqual({ ok: true, action: "ignored", reason: "the steward is not a reviewer" });
+    });
+
+    it("is not found when review is not configured", async () => {
+      await app.close();
+      const config = makeConfig();
+      delete config.review;
+      app = buildServer({ config, secrets: {}, stores, tracker, workerState: () => WORKER_IDLE });
+      expect((await postGitlab("{}")).statusCode).toBe(404);
     });
   });
 
