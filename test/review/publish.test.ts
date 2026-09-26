@@ -98,6 +98,15 @@ describe("publishReview", () => {
     expect(api.resolved).not.toContain(done);
   });
 
+  it("reposts and supersedes when a job is replaced by a newer push", async () => {
+    const OLD = "b".repeat(40);
+    const earlier = api.addDiscussion(BOT, `old\n\n${reviewMarker(9, OLD, "c0")}`);
+    await publishReview(input(stored()), deps());
+    expect(api.positions).toHaveLength(1);
+    expect(api.notes).toHaveLength(1);
+    expect(api.resolved).toEqual([earlier]);
+  });
+
   it("comments on Linear only when the fix is verified", async () => {
     await publishReview(input(stored()), deps());
     expect(tracker.comments("issue-1")).toHaveLength(1);

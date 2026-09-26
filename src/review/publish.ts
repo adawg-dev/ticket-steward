@@ -40,7 +40,13 @@ const VERDICT_LINE: Record<ReviewResult["verdict"], string> = {
 
 export const reviewMarker = (jobId: number, sha: string, key: string): string => `<!-- ticket-steward:review job=${jobId} sha=${sha} key=${key} -->`;
 
-export const parseMarker = (body: string): { jobId: number; sha: string; key: string } | null => {
+interface Marker {
+  jobId: number;
+  sha: string;
+  key: string;
+}
+
+export const parseMarker = (body: string): Marker | null => {
   const match = MARKER.exec(body);
   if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined) return null;
   return { jobId: Number(match[1]), sha: match[2], key: match[3] };
@@ -51,22 +57,25 @@ const short = (sha: string): string => sha.slice(0, 7);
 const ownDiscussions = (discussions: ReviewDiscussion[], bot: string): ReviewDiscussion[] =>
   discussions.filter((discussion) => discussion.notes[0]?.author === bot && parseMarker(discussion.notes[0].body) !== null);
 
-const postedKeys = (discussions: ReviewDiscussion[], jobId: number): Set<string> =>
+// A queued job keeps its id when a newer push replaces its trigger, so a marker belongs to this review only when the sha matches too.
+const isCurrent = (marker: Marker, input: ReviewPublishInput): boolean => marker.jobId === input.jobId && marker.sha === input.stored.diffRefs.headSha;
+
+const postedKeys = (discussions: ReviewDiscussion[], input: ReviewPublishInput): Set<string> =>
   new Set(
     discussions
       .flatMap((discussion) => discussion.notes)
       .map((note) => parseMarker(note.body))
-      .filter((marker): marker is { jobId: number; sha: string; key: string } => marker !== null && marker.jobId === jobId)
+      .filter((marker): marker is Marker => marker !== null && isCurrent(marker, input))
       .map((marker) => marker.key),
   );
 
-/** Resolves the steward's own open threads from earlier jobs; human threads are never touched. */
+/** Resolves the steward's own open threads from earlier jobs or head SHAs; human threads are never touched. */
 const supersede = async (api: GitLabReviewApi, input: ReviewPublishInput, own: ReviewDiscussion[]): Promise<void> => {
   const head = input.stored.diffRefs.headSha;
   for (const discussion of own) {
     const first = discussion.notes[0];
     const marker = first === undefined ? null : parseMarker(first.body);
-    if (first === undefined || marker === null || marker.jobId === input.jobId || !first.resolvable || first.resolved) continue;
+    if (first === undefined || marker === null || isCurrent(marker, input) || !first.resolvable || first.resolved) continue;
     await api.replyToDiscussion(input.trigger.projectId, input.trigger.mrIid, discussion.id, `Superseded by the steward's review of \`${short(head)}\` (job ${input.jobId}).`);
     await api.resolveDiscussion(input.trigger.projectId, input.trigger.mrIid, discussion.id);
   }
@@ -100,7 +109,7 @@ export const publishReview = async (input: ReviewPublishInput, deps: ReviewPubli
   try {
     const discussions = await api.listDiscussions(projectId, mrIid);
     const own = ownDiscussions(discussions, input.botUsername);
-    const posted = postedKeys(own, input.jobId);
+    const posted = postedKeys(own, input);
     await supersede(api, input, own);
 
     const files = parseDiffAnchors(input.diff);
