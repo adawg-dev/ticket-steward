@@ -466,6 +466,29 @@ describe("startWorker", () => {
     expect(calls).toEqual(["publishReviewOnly"]);
   });
 
+  it("runs a full review for a newer push that supersedes a review waiting to republish", async () => {
+    const calls: string[] = [];
+    const reviewedHeads: (string | null)[] = [];
+    const stub = (name: string) => async (ctx: RunContext): Promise<JobOutcome> => {
+      calls.push(name);
+      reviewedHeads.push(ctx.trigger.kind === "mr.review" ? ctx.trigger.headSha : null);
+      return SUCCEEDED;
+    };
+    const jobId = stores.jobs.enqueue(reviewTrigger);
+    stores.jobs.claimById(jobId);
+    stores.jobs.saveReviewResult(jobId, storedReview);
+    stores.jobs.scheduleRetry(jobId, new Date(Date.now() + 60_000), "GitLab 502");
+    const newHead = "d".repeat(40);
+    expect(stores.jobs.replaceTrigger(jobId, { ...reviewTrigger, deliveryId: "delivery-mr-2", headSha: newHead })).toBe(true);
+    start({ runJob: stub("runJob"), publishOnly: stub("publishOnly"), runReview: stub("runReview"), publishReviewOnly: stub("publishReviewOnly") });
+
+    await waitForStatus(jobId, "succeeded");
+
+    expect(calls).toEqual(["runReview"]);
+    expect(reviewedHeads).toEqual([newHead]);
+    expect(stores.jobs.get(jobId)?.attempts).toBe(1);
+  });
+
   it("sweeps worktrees beyond the kept count on start", async () => {
     const workRoot = join(dataDir, "work");
     await mkdir(join(workRoot, "1-1"), { recursive: true });

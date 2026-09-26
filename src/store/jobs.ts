@@ -122,7 +122,9 @@ export class JobStore {
       "SELECT * FROM jobs WHERE subject = ? AND status = 'queued' ORDER BY id LIMIT 1",
     );
     this.swapTrigger = db.prepare<[string, string, string, string, number]>(
-      "UPDATE jobs SET trigger = ?, issue_id = ?, identifier = ?, team_key = ? WHERE id = ? AND status = 'queued'",
+      `UPDATE jobs SET trigger = ?, issue_id = ?, identifier = ?, team_key = ?,
+         review_result = NULL, attempts = 0, not_before = NULL, error = NULL
+       WHERE id = ? AND status = 'queued'`,
     );
     this.claimOldest = db.prepare<[string, string], JobRow>(
       `${CLAIM} WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND (not_before IS NULL OR not_before <= ?) ORDER BY id LIMIT 1) RETURNING *`,
@@ -178,7 +180,11 @@ export class JobStore {
     return row === undefined ? null : toJob(row);
   }
 
-  /** Points a still-queued review at a newer push; false once the job has been claimed. */
+  /**
+   * Points a still-queued review at a newer push; false once the job has been claimed.
+   * The job starts over for the new head: a review saved for the old head is dropped,
+   * and the attempt count and any retry backoff are reset.
+   */
   replaceTrigger(id: number, trigger: ReviewTrigger): boolean {
     const columns = jobColumns(trigger);
     return this.swapTrigger.run(JSON.stringify(trigger), columns.issueId, columns.identifier, columns.teamKey, id).changes === 1;

@@ -243,6 +243,25 @@ describe("review jobs", () => {
     expect(job?.trigger.kind === "mr.review" ? job.trigger.headSha : null).toBe("b".repeat(40));
   });
 
+  it("resets a retrying review when a newer push replaces its trigger", () => {
+    const id = stores.jobs.enqueue(review("a".repeat(40)));
+    stores.jobs.claimById(id);
+    stores.jobs.claimById(id);
+    stores.jobs.saveReviewResult(id, {
+      result: { verdict: "not_fixed", rerun: { observed: "still 500", deviations: null }, summary: "s", comments: [], confidence: "medium" },
+      diffRefs: { baseSha: "1".repeat(40), startSha: "1".repeat(40), headSha: "a".repeat(40) },
+    });
+    stores.jobs.scheduleRetry(id, new Date(Date.now() + 60_000), "GitLab 502");
+    expect(stores.jobs.findQueuedBySubject(reviewSubject(42, 7))?.id).toBe(id);
+
+    expect(stores.jobs.replaceTrigger(id, review("b".repeat(40)))).toBe(true);
+
+    const job = stores.jobs.get(id);
+    expect(job?.trigger.kind === "mr.review" ? job.trigger.headSha : null).toBe("b".repeat(40));
+    expect(job).toMatchObject({ status: "queued", reviewResult: null, attempts: 0, notBefore: null, error: null });
+    expect(stores.jobs.claimNext()?.id).toBe(id);
+  });
+
   it("does not replace the trigger of a running review", () => {
     const id = stores.jobs.enqueue(review("a".repeat(40)));
     stores.jobs.claimById(id);
