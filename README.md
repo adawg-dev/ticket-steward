@@ -6,6 +6,11 @@ the ticket follows and what is missing, where in the code to look, the probable 
 approach, and recent merge requests that touched those paths. UI tickets can get a
 screenshot.
 
+Bug tickets also get a reproduction recipe: the exact steps the agent used to reproduce the
+bug against the app started from its checkout. Adding the steward's GitLab user as a
+reviewer on a merge request replays that recipe on the MR head and leaves inline comments
+on the diff.
+
 It does not triage, relabel, write code or open branches. The brain never holds tracker
 credentials; the steward validates a structured result and does every write itself.
 
@@ -60,7 +65,7 @@ steward enrich KEY-123 --dry-run
 | Command | What it does |
 | --- | --- |
 | `steward init [dir]` | Writes `steward.config.ts`, `.env.example`, `prompts/enrich.md`, `skills/` into `dir` (default: current directory). Refuses to overwrite. |
-| `steward doctor` | Runs every health check (config, secrets, user, modes, mirror, overlay, skills, Linear API key, public URL, codehost MCP, Playwright, port), reports all, exits non-zero if any fails. |
+| `steward doctor` | Runs every health check (config, secrets, user, modes, mirror, overlay, skills, Linear API key, GitLab review setup when `review` is configured, public URL, codehost MCP, Playwright, port), reports all, exits non-zero if any fails. |
 | `steward mirror init` \| `fetch` | Create or refresh the bare mirror. |
 | `steward overlay sync --from <path> [--allow-pattern <re>]` | Copy gitignored `.env*` files from a checkout into the overlay; refuses prod-looking values unless allowed. |
 | `steward serve` | Webhook server and worker; takes `run.lock`. |

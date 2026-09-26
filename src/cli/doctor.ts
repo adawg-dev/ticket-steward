@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { Command } from "commander";
 import { z } from "zod";
+import { createGitLabReview } from "../codehost/gitlabReview.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { LoadedConfig } from "../config/load.js";
 import { listFiles } from "../workspace/files.js";
@@ -148,6 +149,32 @@ const linearChecks = ({ secrets }: LoadedConfig, ctx: CliContext): Check[] => [
   },
 ];
 
+const reviewChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
+  const { config, secrets } = loaded;
+  const settings = config.review;
+  if (settings === undefined) return [];
+  const api = ctx.factories?.review ?? createGitLabReview(config, secrets);
+  return [
+    {
+      name: "gitlab webhook secret",
+      run: async () => {
+        const present = ["GITLAB_WEBHOOK_SIGNING_TOKEN", "GITLAB_WEBHOOK_SECRET"].filter((key) => missing(secrets, [key]).length === 0);
+        return present.length > 0 ? ok(`${present.join(", ")} present`) : flunk("set GITLAB_WEBHOOK_SIGNING_TOKEN or GITLAB_WEBHOOK_SECRET");
+      },
+    },
+    {
+      name: "gitlab reviewer",
+      run: async () => {
+        if (api === undefined) return flunk("GITLAB_TOKEN is missing");
+        const [user, scopes] = await Promise.all([api.currentUser(), api.tokenScopes()]);
+        if (!scopes.includes("api")) return flunk("GITLAB_TOKEN lacks the api scope; the steward cannot post review comments");
+        if (user.username !== settings.botUsername) return flunk(`GITLAB_TOKEN acts as ${user.username}, but review.botUsername is ${settings.botUsername}`);
+        return ok(`GITLAB_TOKEN acts as ${user.username} with the api scope`);
+      },
+    },
+  ];
+};
+
 const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   const { config, configPath } = loaded;
   const healthUrl = `${config.server.publicUrl}/health`;
@@ -204,7 +231,14 @@ const runChecks = async (checks: Check[], ctx: CliContext): Promise<boolean> => 
   return failed;
 };
 
-const configChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => [...secretChecks(loaded), userCheck, ...workspaceChecks(loaded), ...linearChecks(loaded, ctx), ...serviceChecks(loaded, ctx)];
+const configChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => [
+  ...secretChecks(loaded),
+  userCheck,
+  ...workspaceChecks(loaded),
+  ...linearChecks(loaded, ctx),
+  ...reviewChecks(loaded, ctx),
+  ...serviceChecks(loaded, ctx),
+];
 
 export const registerDoctor = (program: Command, ctx: CliContext): void => {
   program

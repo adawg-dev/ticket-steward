@@ -21,4 +21,6 @@ export default defineConfig({
   retention: { keptWorktrees: 3, days: 30 },
   prompt: "./prompts/enrich.md",
   server: { port: 3020, publicUrl: "https://steward.example.com" },
+  // Review merge requests that add the steward's GitLab user as a reviewer (docs/ops.md §1.10).
+  // review: { botUsername: "ticket-steward", prompt: "./prompts/review.md" },
 });
