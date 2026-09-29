@@ -11,6 +11,12 @@ describe("evaluateTool", () => {
     vi.restoreAllMocks();
   });
 
+  it("applies the shell rules to start_process", () => {
+    expect(evaluate("start_process", { name: "x", command: "git", args: ["push"] }).allow).toBe(false);
+    expect(evaluate("start_process", { name: "x", command: "cat", args: ["/data/overlay/.env"] }).allow).toBe(false);
+    expect(evaluate("start_process", { name: "dev", command: "pnpm", args: ["--filter", "user-app", "exec", "next", "dev"] }).allow).toBe(true);
+  });
+
   it("denies git push", () => {
     expect(evaluate("Bash", { command: "git push origin HEAD" }).allow).toBe(false);
   });

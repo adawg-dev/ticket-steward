@@ -5,7 +5,7 @@ export type PolicyDecision = { allow: true } | { allow: false; reason: string };
 
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "write_file"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "read_file", "list_dir"]);
-const SHELL_TOOLS = new Set(["Bash", "run_shell"]);
+const SHELL_TOOLS = new Set(["Bash", "run_shell", "start_process"]);
 const ALLOWED_MCP_PREFIXES = ["mcp__codehost__", "mcp__playwright__"];
 const DENIED_COMMANDS: RegExp[] = [
   /git\s+push/,

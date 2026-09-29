@@ -4,10 +4,14 @@ import { Agent, MCPServerStdio, run } from "@openai/agents";
 import { BrainResultSchema } from "../core/result.js";
 import { ReviewResultSchema } from "../review/result.js";
 import { createBrainTools } from "./tools/index.js";
+import { BackgroundProcesses } from "./tools/processes.js";
 import type { Brain, BrainInput, BrainUsage, ReasoningEffort } from "./types.js";
 
 const INSTRUCTIONS =
-  "You are Ticket Steward's analysis agent. You work inside a read-only checkout of a monorepo and never commit, push, or touch files outside the worktree and artifacts directory. Finish by returning the structured result.";
+  "You are Ticket Steward's analysis agent. You work in a disposable checkout of a monorepo: you may edit files and start the app there, but never commit, push, or touch files outside the worktree and artifacts directory. " +
+  "run_shell has no shell, so pass a program and its arguments; `$STEWARD_PORT` and `$ARTIFACTS_DIR` are expanded for you. " +
+  "Where a skill backgrounds a command (`cmd > log 2>&1 &`), use start_process, follow it with process_status, and stop it with stop_process when you are done. " +
+  "Finish by returning the structured result.";
 
 const skillsText = async (workspacePath: string): Promise<string> => {
   const skillsDir = join(workspacePath, ".claude", "skills");
@@ -35,13 +39,24 @@ const mcpServers = (input: BrainInput): MCPServerStdio[] =>
 export const modelSettingsFor = (input: Pick<BrainInput, "reasoningEffort">): { reasoning?: { effort: ReasoningEffort } } =>
   input.reasoningEffort === undefined ? {} : { reasoning: { effort: input.reasoningEffort } };
 
-const agentFor = <TOutput extends typeof BrainResultSchema | typeof ReviewResultSchema>(input: BrainInput, servers: MCPServerStdio[], outputType: TOutput) =>
+const agentFor = <TOutput extends typeof BrainResultSchema | typeof ReviewResultSchema>(
+  input: BrainInput,
+  servers: MCPServerStdio[],
+  processes: BackgroundProcesses,
+  outputType: TOutput,
+) =>
   new Agent({
     name: "ticket-steward",
     instructions: INSTRUCTIONS,
     model: input.model,
     modelSettings: modelSettingsFor(input),
-    tools: createBrainTools({ workspacePath: input.workspacePath, artifactsDir: input.artifactsDir, denyPaths: input.denyPaths }),
+    tools: createBrainTools({
+      workspacePath: input.workspacePath,
+      artifactsDir: input.artifactsDir,
+      denyPaths: input.denyPaths,
+      processes,
+      vars: { ARTIFACTS_DIR: input.artifactsDir, ...(input.env.STEWARD_PORT === undefined ? {} : { STEWARD_PORT: input.env.STEWARD_PORT }) },
+    }),
     mcpServers: servers,
     outputType,
   });
@@ -52,9 +67,10 @@ export const createOpenAiAgentsBrain = (): Brain => ({
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), input.timeoutMs);
     const servers = mcpServers(input);
+    const processes = new BackgroundProcesses(input.workspacePath, input.artifactsDir);
     try {
       await Promise.all(servers.map((s) => s.connect()));
-      const agent = input.output === "review" ? agentFor(input, servers, ReviewResultSchema) : agentFor(input, servers, BrainResultSchema);
+      const agent = input.output === "review" ? agentFor(input, servers, processes, ReviewResultSchema) : agentFor(input, servers, processes, BrainResultSchema);
       const prompt = `${input.prompt}${await skillsText(input.workspacePath)}`;
       const result = await run(agent, prompt, { maxTurns: input.maxTurns, signal: abortController.signal });
       for (const item of result.newItems) onMessage(JSON.stringify(item.toJSON()));
@@ -65,6 +81,7 @@ export const createOpenAiAgentsBrain = (): Brain => ({
       return { ok: false, output: undefined, error: err instanceof Error ? err.message : String(err) };
     } finally {
       clearTimeout(timer);
+      await processes.stopAll().catch(() => undefined);
       await Promise.all(servers.map((s) => s.close().catch(() => undefined)));
     }
   },

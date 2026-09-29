@@ -4,17 +4,26 @@ import { tool, type Tool } from "@openai/agents";
 import { execa } from "execa";
 import { z } from "zod";
 import { evaluateTool } from "../policy.js";
+import { type BackgroundProcesses, expandVars } from "./processes.js";
 
 export interface ToolContext {
   workspacePath: string;
   artifactsDir: string;
   denyPaths: string[];
+  processes: BackgroundProcesses;
+  /** Expanded as `$NAME` / `${NAME}` in command arguments, since there is no shell to do it (STEWARD_PORT, ARTIFACTS_DIR). */
+  vars: Record<string, string>;
 }
 
 const MAX_OUTPUT_CHARS = 100_000;
 const SHELL_TIMEOUT_MS = 120_000;
 
 const capped = (text: string): string => (text.length > MAX_OUTPUT_CHARS ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n[truncated]` : text);
+
+const expandCommand = (ctx: ToolContext, input: { command: string; args: string[] }): { command: string; args: string[] } => ({
+  command: expandVars(input.command, ctx.vars),
+  args: input.args.map((arg) => expandVars(arg, ctx.vars)),
+});
 
 const guard = (ctx: ToolContext, name: string, input: unknown): string | null => {
   const decision = evaluateTool({ name, input, workspacePath: ctx.workspacePath, artifactsDir: ctx.artifactsDir, denyPaths: ctx.denyPaths });
@@ -57,14 +66,45 @@ export const createBrainTools = (ctx: ToolContext): Tool[] => [
   }),
   tool({
     name: "run_shell",
-    description: "Run a program with arguments inside the worktree (no shell). Returns exit code, stdout and stderr.",
+    description:
+      "Run a program with arguments inside the worktree (no shell, so no pipes, redirection or `&`) and wait up to 2 minutes for it to exit. Returns exit code, stdout and stderr. For a dev server or anything long-lived, use start_process.",
     parameters: z.object({ command: z.string(), args: z.array(z.string()) }),
-    execute: async (input) => {
+    execute: async (raw) => {
+      const input = expandCommand(ctx, raw);
       const denied = guard(ctx, "run_shell", input);
       if (denied !== null) return denied;
       const result = await execa(input.command, input.args, { cwd: ctx.workspacePath, shell: false, reject: false, timeout: SHELL_TIMEOUT_MS });
       return capped(`exit ${result.exitCode ?? "signal"}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`);
     },
+  }),
+  tool({
+    name: "start_process",
+    description:
+      "Start a long-lived program (e.g. a dev server) in the background from the worktree root, without a shell. Output goes to <artifacts>/<name>.log. It keeps running until stop_process or the end of the run. Use this for a skill's `cmd > log 2>&1 &`.",
+    parameters: z.object({ name: z.string(), command: z.string(), args: z.array(z.string()) }),
+    execute: async (raw) => {
+      const input = { name: raw.name, ...expandCommand(ctx, raw) };
+      const denied = guard(ctx, "start_process", input);
+      if (denied !== null) return denied;
+      try {
+        const { pid, logPath } = await ctx.processes.start(input.name, input.command, input.args);
+        return `started ${input.name} (pid ${pid}); log: ${logPath}`;
+      } catch (err) {
+        return `Failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    },
+  }),
+  tool({
+    name: "process_status",
+    description: "Whether a process from start_process is still running, and the last 80 lines of its log.",
+    parameters: z.object({ name: z.string() }),
+    execute: async (input) => capped(await ctx.processes.status(input.name)),
+  }),
+  tool({
+    name: "stop_process",
+    description: "Stop a process from start_process and everything it started. Always stop the servers you started once you are done with them.",
+    parameters: z.object({ name: z.string() }),
+    execute: async (input) => ctx.processes.stop(input.name),
   }),
   tool({
     name: "write_file",
