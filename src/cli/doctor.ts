@@ -158,6 +158,10 @@ const reviewChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
     {
       name: "gitlab webhook secret",
       run: async () => {
+        // A whsec_ value makes GitLab sign deliveries, and signatures are only checked against GITLAB_WEBHOOK_SIGNING_TOKEN.
+        if (secrets.GITLAB_WEBHOOK_SECRET?.startsWith("whsec_") === true && missing(secrets, ["GITLAB_WEBHOOK_SIGNING_TOKEN"]).length > 0) {
+          return flunk("GITLAB_WEBHOOK_SECRET holds a whsec_ signing token; rename it to GITLAB_WEBHOOK_SIGNING_TOKEN");
+        }
         const present = ["GITLAB_WEBHOOK_SIGNING_TOKEN", "GITLAB_WEBHOOK_SECRET"].filter((key) => missing(secrets, [key]).length === 0);
         return present.length > 0 ? ok(`${present.join(", ")} present`) : flunk("set GITLAB_WEBHOOK_SIGNING_TOKEN or GITLAB_WEBHOOK_SECRET");
       },

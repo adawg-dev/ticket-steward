@@ -111,19 +111,22 @@ const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => 
   app.post<{ Body: string }>("/webhooks/gitlab", async (request, reply) => {
     const review = deps.config.review;
     if (review === undefined) return reply.code(404).send({ ok: false });
-    const verified = verifyGitlabWebhook(
-      request.body,
-      {
-        token: header(request.headers["x-gitlab-token"]),
-        id: header(request.headers["webhook-id"]),
-        timestamp: header(request.headers["webhook-timestamp"]),
-        signature: header(request.headers["webhook-signature"]),
-      },
-      { secret: deps.secrets.GITLAB_WEBHOOK_SECRET, signingToken: deps.secrets.GITLAB_WEBHOOK_SIGNING_TOKEN },
-      Math.floor(Date.now() / 1000),
-    );
-    if (!verified) {
-      logger.warn({ event: header(request.headers["x-gitlab-event"]) }, "gitlab webhook rejected");
+    const headers = {
+      token: header(request.headers["x-gitlab-token"]),
+      id: header(request.headers["webhook-id"]),
+      timestamp: header(request.headers["webhook-timestamp"]),
+      signature: header(request.headers["webhook-signature"]),
+    };
+    const secrets = { secret: deps.secrets.GITLAB_WEBHOOK_SECRET, signingToken: deps.secrets.GITLAB_WEBHOOK_SIGNING_TOKEN };
+    if (!verifyGitlabWebhook(request.body, headers, secrets, Math.floor(Date.now() / 1000))) {
+      // Which auth style arrived versus which is configured; never the values themselves.
+      const auth = {
+        sentToken: headers.token !== undefined,
+        sentSignature: headers.signature !== undefined,
+        hasSecret: (secrets.secret ?? "") !== "",
+        hasSigningToken: (secrets.signingToken ?? "") !== "",
+      };
+      logger.warn({ event: header(request.headers["x-gitlab-event"]), ...auth }, "gitlab webhook rejected");
       return reply.code(401).send({ ok: false });
     }
     if (header(request.headers["x-gitlab-event"]) !== "Merge Request Hook") return { ok: true, action: "ignored" };

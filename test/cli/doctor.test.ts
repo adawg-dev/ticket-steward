@@ -213,6 +213,16 @@ describe("steward doctor", () => {
       expect(output).toContain("[fail] gitlab webhook secret: set GITLAB_WEBHOOK_SIGNING_TOKEN or GITLAB_WEBHOOK_SECRET");
     });
 
+    it("fails when a signing token was put in GITLAB_WEBHOOK_SECRET", async () => {
+      const output = await reviewDoctor({
+        env: `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nGITLAB_WEBHOOK_SECRET=whsec_c2lnbmluZw==\n`,
+        review: reviewSettings("steward-bot"),
+        api: new FakeGitLabReview(),
+      });
+
+      expect(output).toContain("[fail] gitlab webhook secret: GITLAB_WEBHOOK_SECRET holds a whsec_ signing token; rename it to GITLAB_WEBHOOK_SIGNING_TOKEN");
+    });
+
     it("skips the review checks when review is not configured", async () => {
       const output = await reviewDoctor({ env: reviewEnv, api: new FakeGitLabReview() });
 
