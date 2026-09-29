@@ -125,4 +125,13 @@ describe("syncOverlayFromCheckout", () => {
 
     expect(result).toEqual({ copied: [], refused: [] });
   });
+
+  it("fails when the source is not a git checkout instead of copying nothing", async () => {
+    const plain = join(root, "plain");
+    await writeNested(plain, ".env", "A=1\n");
+
+    await expect(syncOverlayFromCheckout(plain, overlayDir, { denyPatterns: [], allowPatterns: [] })).rejects.toThrow(
+      `${plain} is not a git checkout`,
+    );
+  });
 });

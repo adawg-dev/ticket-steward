@@ -51,6 +51,8 @@ const envValues = (content: string): Array<{ key: string; value: string }> =>
 const ignoredFiles = async (checkoutPath: string, files: string[]): Promise<string[]> => {
   if (files.length === 0) return [];
   const result = await git(["check-ignore", "--", ...files], checkoutPath);
+  // check-ignore exits 1 when nothing is ignored; anything above that (128 outside a repo) would otherwise read as "no files".
+  if (result.exitCode > 1) throw new Error(`${checkoutPath} is not a git checkout: ${result.stderr}`);
   return result.stdout === "" ? [] : result.stdout.split("\n");
 };
 
