@@ -106,6 +106,7 @@ export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktr
     timeoutMs: config.brain.timeoutMinutes * MINUTE_MS,
     maxTurns: config.brain.maxTurns,
     model: config.brain.model,
+    ...(config.brain.kind === "openai-agents" && config.brain.reasoningEffort !== undefined ? { reasoningEffort: config.brain.reasoningEffort } : {}),
     mcpServers: {
       codehost: codehostMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path, sha: worktree.sha }),
       playwright: playwrightMcpSpec(),

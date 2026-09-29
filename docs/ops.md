@@ -75,6 +75,10 @@ Concentrate AI deployment: set `ANTHROPIC_BASE_URL=https://api.concentrate.ai` a
 `ANTHROPIC_AUTH_TOKEN=<sk-cn key>`. For the openai-agents brain the equivalent is
 `OPENAI_BASE_URL=https://api.concentrate.ai/v1` and `OPENAI_API_KEY=<sk-cn key>`.
 
+Set `brain.reasoningEffort` (`none` … `max`) for openai-agents. Without it the Agents SDK
+picks a per-model default, which is `none` for `gpt-5.5` and unset for newer models such as
+`gpt-6-luna`, so the brain runs with no reasoning and tends to skip the reproduction.
+
 Precedence for claude-code: `ANTHROPIC_API_KEY`, then `ANTHROPIC_AUTH_TOKEN`, then
 `CLAUDE_CODE_OAUTH_TOKEN`. The steward never relies on an interactive login in `~/.claude`.
 

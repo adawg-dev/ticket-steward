@@ -4,7 +4,7 @@ import { Agent, MCPServerStdio, run } from "@openai/agents";
 import { BrainResultSchema } from "../core/result.js";
 import { ReviewResultSchema } from "../review/result.js";
 import { createBrainTools } from "./tools/index.js";
-import type { Brain, BrainInput, BrainUsage } from "./types.js";
+import type { Brain, BrainInput, BrainUsage, ReasoningEffort } from "./types.js";
 
 const INSTRUCTIONS =
   "You are Ticket Steward's analysis agent. You work inside a read-only checkout of a monorepo and never commit, push, or touch files outside the worktree and artifacts directory. Finish by returning the structured result.";
@@ -32,11 +32,15 @@ const sumUsage = (result: { rawResponses: Array<{ usage: { inputTokens: number; 
 const mcpServers = (input: BrainInput): MCPServerStdio[] =>
   Object.entries(input.mcpServers).map(([name, spec]) => new MCPServerStdio({ name, command: spec.command, args: spec.args, env: spec.env, cwd: input.workspacePath }));
 
+export const modelSettingsFor = (input: Pick<BrainInput, "reasoningEffort">): { reasoning?: { effort: ReasoningEffort } } =>
+  input.reasoningEffort === undefined ? {} : { reasoning: { effort: input.reasoningEffort } };
+
 const agentFor = <TOutput extends typeof BrainResultSchema | typeof ReviewResultSchema>(input: BrainInput, servers: MCPServerStdio[], outputType: TOutput) =>
   new Agent({
     name: "ticket-steward",
     instructions: INSTRUCTIONS,
     model: input.model,
+    modelSettings: modelSettingsFor(input),
     tools: createBrainTools({ workspacePath: input.workspacePath, artifactsDir: input.artifactsDir, denyPaths: input.denyPaths }),
     mcpServers: servers,
     outputType,

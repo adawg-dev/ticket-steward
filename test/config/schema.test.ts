@@ -84,3 +84,19 @@ describe("review config", () => {
     expect(StewardConfigSchema.parse(minimalInput).tracker.bugLabels).toEqual(["Bug"]);
   });
 });
+
+describe("brain.reasoningEffort", () => {
+  const openai = { kind: "openai-agents", model: "gpt-6-luna", maxTurns: 80, timeoutMinutes: 30 } as const;
+
+  it("accepts a reasoning effort for openai-agents and leaves it unset by default", () => {
+    const set = StewardConfigSchema.parse({ ...minimalInput, brain: { ...openai, reasoningEffort: "high" } });
+    const unset = StewardConfigSchema.parse({ ...minimalInput, brain: openai });
+
+    expect(set.brain).toMatchObject({ reasoningEffort: "high" });
+    expect(unset.brain).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("rejects an unknown reasoning effort", () => {
+    expect(StewardConfigSchema.safeParse({ ...minimalInput, brain: { ...openai, reasoningEffort: "extreme" } }).success).toBe(false);
+  });
+});

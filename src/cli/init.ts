@@ -10,7 +10,7 @@ const CONFIG_TEMPLATE = `import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: "/var/lib/ticket-steward",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  // brain: { kind: "openai-agents", model: "gpt-5.5", maxTurns: 80, timeoutMinutes: 30 },
+  // brain: { kind: "openai-agents", model: "gpt-6-luna", reasoningEffort: "high", maxTurns: 80, timeoutMinutes: 30 },
   tracker: { kind: "linear", teams: ["ENG"], gatewayIssues: "enrich", bugLabels: ["Bug"] }, // "skip" only if ticket-gateway enriches through the steward itself
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "org/repo" },
   // codehost: { kind: "github", owner: "org", repo: "repo" },

@@ -3,7 +3,7 @@ import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: "/var/lib/ticket-steward",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  // brain: { kind: "openai-agents", model: "gpt-5.5", maxTurns: 80, timeoutMinutes: 30 },
+  // brain: { kind: "openai-agents", model: "gpt-6-luna", reasoningEffort: "high", maxTurns: 80, timeoutMinutes: 30 },
   tracker: { kind: "linear", teams: ["API", "RSPNS", "MSGS", "CC", "USRAPP", "STFAPP", "APP", "OPS", "PLAT"], gatewayIssues: "enrich", bugLabels: ["Bug"] }, // "skip" only if ticket-gateway enriches through the steward itself
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "concentrateai/kickoff" },
   // codehost: { kind: "github", owner: "concentrateai", repo: "kickoff" },

@@ -8,6 +8,8 @@ export interface McpServerSpec {
 
 export type BrainOutput = "enrich" | "review";
 
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface BrainInput {
   workspacePath: string;
   artifactsDir: string;
@@ -17,6 +19,8 @@ export interface BrainInput {
   timeoutMs: number;
   maxTurns: number;
   model: string;
+  /** openai-agents only. */
+  reasoningEffort?: ReasoningEffort;
   mcpServers: Record<string, McpServerSpec>;
   denyPaths: string[];
   /** Which structured-output schema the run must return. */

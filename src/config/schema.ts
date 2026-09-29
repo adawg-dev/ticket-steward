@@ -10,7 +10,11 @@ export const StewardConfigSchema = z.object({
   dataDir: z.string(),
   brain: z.discriminatedUnion("kind", [
     BrainBaseSchema.extend({ kind: z.literal("claude-code") }),
-    BrainBaseSchema.extend({ kind: z.literal("openai-agents") }),
+    BrainBaseSchema.extend({
+      kind: z.literal("openai-agents"),
+      /** Unset leaves the Agents SDK's per-model default, which is "none" for gpt-5.5 and unset for newer models. */
+      reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
+    }),
   ]),
   tracker: z.object({
     kind: z.literal("linear"),
