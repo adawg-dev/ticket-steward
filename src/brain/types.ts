@@ -22,6 +22,8 @@ export interface BrainInput {
   /** openai-agents only. */
   reasoningEffort?: ReasoningEffort;
   mcpServers: Record<string, McpServerSpec>;
+  /** Skills the openai-agents brain inlines into the prompt; unset inlines every skill in the worktree. */
+  inlineSkills?: string[];
   denyPaths: string[];
   /** Which structured-output schema the run must return. */
   output: BrainOutput;

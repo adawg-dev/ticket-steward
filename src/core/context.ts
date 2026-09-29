@@ -42,6 +42,8 @@ export const renderTemplatesMarkdown = (bundle: TicketBundle): string =>
   bundle.templates.length === 0
     ? "_No templates configured._"
     : bundle.templates
+        // Linear returns team templates both from the workspace and from the team.
+        .filter((t, i, all) => all.findIndex((o) => o.name === t.name && o.body === t.body) === i)
         .map(({ name, description, requiredFields, body }) =>
           [
             `## ${name}`,

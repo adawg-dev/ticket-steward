@@ -15,10 +15,19 @@ export interface ToolContext {
   vars: Record<string, string>;
 }
 
-const MAX_OUTPUT_CHARS = 100_000;
+// Every tool result is resent on each later turn, so a large one is paid for many times over.
+const MAX_OUTPUT_CHARS = 20_000;
+const MAX_STREAM_CHARS = 8_000;
 const SHELL_TIMEOUT_MS = 120_000;
 
-const capped = (text: string): string => (text.length > MAX_OUTPUT_CHARS ? `${text.slice(0, MAX_OUTPUT_CHARS)}\n[truncated]` : text);
+export const capHead = (text: string, max: number): string =>
+  text.length > max ? `${text.slice(0, max)}\n[truncated: showing ${max} of ${text.length} chars; use offset/limit to read more]` : text;
+
+/** Keeps the end, where build and test output puts its errors. */
+export const capTail = (text: string, max: number): string =>
+  text.length > max ? `[truncated: showing the last ${max} of ${text.length} chars]\n${text.slice(-max)}` : text;
+
+const capped = (text: string): string => capHead(text, MAX_OUTPUT_CHARS);
 
 const expandCommand = (ctx: ToolContext, input: { command: string; args: string[] }): { command: string; args: string[] } => ({
   command: expandVars(input.command, ctx.vars),
@@ -33,12 +42,16 @@ const guard = (ctx: ToolContext, name: string, input: unknown): string | null =>
 export const createBrainTools = (ctx: ToolContext): Tool[] => [
   tool({
     name: "read_file",
-    description: "Read a UTF-8 text file. Paths are relative to the worktree root.",
-    parameters: z.object({ path: z.string() }),
+    description:
+      "Read a UTF-8 text file, relative to the worktree root. Long files are truncated; pass offset (0-based line) and limit (lines) to read a slice. Prefer grep_repo to find the lines you need first.",
+    parameters: z.object({ path: z.string(), offset: z.number().int().min(0).nullable(), limit: z.number().int().positive().nullable() }),
     execute: async (input) => {
       const denied = guard(ctx, "read_file", input);
       if (denied !== null) return denied;
-      return capped(await readFile(resolve(ctx.workspacePath, input.path), "utf8"));
+      const text = await readFile(resolve(ctx.workspacePath, input.path), "utf8");
+      if (input.offset === null && input.limit === null) return capped(text);
+      const start = input.offset ?? 0;
+      return capped(text.split("\n").slice(start, input.limit === null ? undefined : start + input.limit).join("\n"));
     },
   }),
   tool({
@@ -74,7 +87,7 @@ export const createBrainTools = (ctx: ToolContext): Tool[] => [
       const denied = guard(ctx, "run_shell", input);
       if (denied !== null) return denied;
       const result = await execa(input.command, input.args, { cwd: ctx.workspacePath, shell: false, reject: false, timeout: SHELL_TIMEOUT_MS });
-      return capped(`exit ${result.exitCode ?? "signal"}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`);
+      return `exit ${result.exitCode ?? "signal"}\n--- stdout ---\n${capTail(result.stdout, MAX_STREAM_CHARS)}\n--- stderr ---\n${capTail(result.stderr, MAX_STREAM_CHARS)}`;
     },
   }),
   tool({

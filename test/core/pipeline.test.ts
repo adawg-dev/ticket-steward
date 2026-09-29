@@ -350,6 +350,8 @@ describe("runJob", () => {
     expect(input.transcriptPath).toBe(join(repo.dataDir, "jobs", String(ctx.jobId), "attempt-1.jsonl"));
     expect(input.denyPaths).toEqual([repo.mirror.path, join(repo.dataDir, "steward.db"), repo.overlayDir, repo.root]);
     expect(Object.keys(input.mcpServers).sort()).toEqual(["codehost", "playwright"]);
+    expect(input.mcpServers.playwright?.args.slice(-2)).toEqual(["--console-level", "warning"]);
+    expect(input.inlineSkills).toEqual([]);
     expect(input.env.ANTHROPIC_API_KEY).toBe("sk-ant-test-key-value");
     expect(input.env.STEWARD_PORT).toBe(String(port));
   });

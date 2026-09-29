@@ -13,12 +13,32 @@ const INSTRUCTIONS =
   "Where a skill backgrounds a command (`cmd > log 2>&1 &`), use start_process, follow it with process_status, and stop it with stop_process when you are done. " +
   "Finish by returning the structured result.";
 
-const skillsText = async (workspacePath: string): Promise<string> => {
+/** The browser tools a reproduction needs; each tool schema is resent on every turn, so the rest are left out. */
+export const PLAYWRIGHT_TOOLS = [
+  "browser_navigate",
+  "browser_click",
+  "browser_type",
+  "browser_fill_form",
+  "browser_press_key",
+  "browser_select_option",
+  "browser_hover",
+  "browser_find",
+  "browser_snapshot",
+  "browser_take_screenshot",
+  "browser_evaluate",
+  "browser_wait_for",
+  "browser_console_messages",
+  "browser_network_requests",
+  "browser_resize",
+  "browser_close",
+];
+
+export const skillsText = async (workspacePath: string, names: string[] | undefined): Promise<string> => {
   const skillsDir = join(workspacePath, ".claude", "skills");
   const entries = await readdir(skillsDir, { withFileTypes: true }).catch(() => []);
   const sections = await Promise.all(
     entries
-      .filter((e) => e.isDirectory())
+      .filter((e) => e.isDirectory() && (names === undefined || names.includes(e.name)))
       .map(async (e) => {
         const body = await readFile(join(skillsDir, e.name, "SKILL.md"), "utf8").catch(() => null);
         return body === null ? "" : `\n\n## Skill: ${e.name}\n\n${body}`;
@@ -34,7 +54,17 @@ const sumUsage = (result: { rawResponses: Array<{ usage: { inputTokens: number; 
   );
 
 const mcpServers = (input: BrainInput): MCPServerStdio[] =>
-  Object.entries(input.mcpServers).map(([name, spec]) => new MCPServerStdio({ name, command: spec.command, args: spec.args, env: spec.env, cwd: input.workspacePath }));
+  Object.entries(input.mcpServers).map(
+    ([name, spec]) =>
+      new MCPServerStdio({
+        name,
+        command: spec.command,
+        args: spec.args,
+        env: spec.env,
+        cwd: input.workspacePath,
+        ...(name === "playwright" ? { toolFilter: { allowedToolNames: PLAYWRIGHT_TOOLS } } : {}),
+      }),
+  );
 
 export const modelSettingsFor = (input: Pick<BrainInput, "reasoningEffort">): { reasoning?: { effort: ReasoningEffort } } =>
   input.reasoningEffort === undefined ? {} : { reasoning: { effort: input.reasoningEffort } };
@@ -71,7 +101,7 @@ export const createOpenAiAgentsBrain = (): Brain => ({
     try {
       await Promise.all(servers.map((s) => s.connect()));
       const agent = input.output === "review" ? agentFor(input, servers, processes, ReviewResultSchema) : agentFor(input, servers, processes, BrainResultSchema);
-      const prompt = `${input.prompt}${await skillsText(input.workspacePath)}`;
+      const prompt = `${input.prompt}${await skillsText(input.workspacePath, input.inlineSkills)}`;
       const result = await run(agent, prompt, { maxTurns: input.maxTurns, signal: abortController.signal });
       for (const item of result.newItems) onMessage(JSON.stringify(item.toJSON()));
       const usage = sumUsage(result);

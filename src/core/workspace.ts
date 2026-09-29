@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -55,7 +55,8 @@ const playwrightMcpSpec = (): McpServerSpec => {
   if (relative === undefined) throw new Error("@playwright/mcp declares no bin");
   return {
     command: process.execPath,
-    args: [join(dirname(packagePath), relative)],
+    // Console output at info level ran to 100k+ characters per call; warnings and errors are what bugs show up as.
+    args: [join(dirname(packagePath), relative), "--console-level", "warning"],
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir() },
   };
 };
@@ -95,6 +96,15 @@ export const prepareWorkspace = async (
   return worktree;
 };
 
+/** The steward's own skills: only these are inlined for openai-agents, not the repo's whole .claude/skills. */
+const stewardSkillNames = (skillsDir: string | undefined): string[] =>
+  skillsDir === undefined || !existsSync(skillsDir)
+    ? []
+    : readdirSync(skillsDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort();
+
 export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktree, prompt: string, env: Record<string, string>, output: BrainOutput): BrainInput => {
   const { config, mirror } = deps;
   return {
@@ -111,6 +121,7 @@ export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktr
       codehost: codehostMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path, sha: worktree.sha }),
       playwright: playwrightMcpSpec(),
     },
+    inlineSkills: stewardSkillNames(config.workspace.skillsDir),
     denyPaths: [mirror.path, join(config.dataDir, DB_FILENAME), config.workspace.overlayDir, dirname(deps.configPath)],
     output,
   };
