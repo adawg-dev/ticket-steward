@@ -48,6 +48,7 @@ export class Mirror {
   }
 
   async fetch(): Promise<void> {
+    if (!this.exists()) throw new Error(`mirror ${this.path} does not exist; run steward mirror init`);
     await gitOrThrow(["remote", "set-url", "origin", this.remote.url], this.path);
     await gitOrThrow(["fetch", "--quiet", "--prune", "origin"], this.path, this.remote.env);
   }

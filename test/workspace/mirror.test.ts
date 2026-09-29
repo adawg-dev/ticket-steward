@@ -37,6 +37,12 @@ describe("Mirror", () => {
     expect(mirror.exists()).toBe(false);
   });
 
+  it("fetch names the fix when the mirror was never initialised", async () => {
+    const mirror = new Mirror(join(root, "missing.git"), "/nowhere");
+
+    await expect(mirror.fetch()).rejects.toThrow(`mirror ${join(root, "missing.git")} does not exist; run steward mirror init`);
+  });
+
   it("fetch picks up a new commit from the source", async () => {
     const { repo } = await makeSourceRepo(root);
     const mirror = await Mirror.init(join(root, "repo.git"), repo);

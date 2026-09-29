@@ -35,6 +35,10 @@ describe("gitOrThrow", () => {
     expect(await gitOrThrow(["symbolic-ref", "--short", "HEAD"], root)).toBe("main");
   });
 
+  it("reports why git could not start when the working directory is missing", async () => {
+    await expect(gitOrThrow(["status"], join(root, "missing"))).rejects.toThrow(/^git status exited 1: .*ENOENT/s);
+  });
+
   it("never puts the tokenized URL argument into the thrown message", async () => {
     const tokenized = `https://oauth2:${TOKEN}@127.0.0.1:1/group/repo.git`;
 

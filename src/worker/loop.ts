@@ -156,7 +156,10 @@ class Worker {
       this.inFlight = { job, attempt };
       const outcome = redactOutcome(await this.run(job, runContext(job, attempt)), redactor);
       await this.record(job, attempt, outcome);
-      logger.info({ jobId: job.id, attempt: attempt.number, status: outcome.status }, "job finished");
+      const detail = outcome.status === "succeeded" ? (outcome.warning === undefined ? {} : { warning: outcome.warning }) : { error: outcome.error };
+      const fields = { jobId: job.id, kind: job.kind, identifier: job.identifier, attempt: attempt.number, status: outcome.status, ...detail };
+      if (outcome.status === "succeeded") logger.info(fields, "job finished");
+      else logger.warn(fields, "job finished");
     } catch (err) {
       logger.error({ jobId: job.id, err: errorMessage(err) }, "job bookkeeping failed");
       this.failBestEffort(job, errorMessage(err));
@@ -191,7 +194,7 @@ class Worker {
     if (isRetryable(outcome) && job.attempts < this.maxAttempts) {
       const delay = this.backoffMs[job.attempts - 1] ?? this.backoffMs.at(-1) ?? 0;
       jobs.scheduleRetry(job.id, new Date(Date.now() + delay), outcome.error);
-      logger.info({ jobId: job.id, attempt: job.attempts, delayMs: delay }, "job retry scheduled");
+      logger.info({ jobId: job.id, identifier: job.identifier, attempt: job.attempts, delayMs: delay, error: outcome.error }, "job retry scheduled");
       return;
     }
     jobs.finish(job.id, outcome);

@@ -34,7 +34,9 @@ export const git = async (args: string[], cwd?: string, extraEnv: Record<string,
     extendEnv: false,
     reject: false,
   });
-  return { exitCode: result.exitCode ?? 1, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+  // No exit code means git never started (a missing cwd, no git on PATH); stderr is empty then, so report the spawn error.
+  const stderr = result.exitCode === undefined ? (result.originalMessage ?? "git did not start") : result.stderr.trim();
+  return { exitCode: result.exitCode ?? 1, stdout: result.stdout.trim(), stderr };
 };
 
 /** Runs git and throws when it exits non-zero. The message names the subcommand and scrubbed stderr only, never the arguments. */
