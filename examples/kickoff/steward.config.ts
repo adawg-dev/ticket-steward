@@ -12,7 +12,8 @@ export default defineConfig({
     baseBranch: "dev",
     overlayDir: "/var/lib/ticket-steward/overlay",
     skillsDir: "./skills",
-    setup: ["pnpm install --frozen-lockfile --ignore-scripts", "pnpm turbo build --filter='./packages/*'"],
+    // reset-dbs.sh (next to this file) rebuilds the local Postgres + TimescaleDB from the checkout's schema every job; install it as /etc/ticket-steward/reset-dbs.sh
+    setup: ["bash /etc/ticket-steward/reset-dbs.sh", "pnpm install --frozen-lockfile --ignore-scripts", "pnpm turbo build --filter='./packages/*'"],
     setupTimeoutMinutes: 15,
     portRewrite: { from: 3000 },
     port: 4100,
