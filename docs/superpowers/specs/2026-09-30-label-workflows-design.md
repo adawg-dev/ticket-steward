@@ -103,7 +103,11 @@ The agent's `outcome` is a claim; the steward verifies before anything leaves th
 3. **Checks.** The steward runs `implement.checks` itself in the worktree with the job env. The default for kickoff is `pnpm turbo check-types lint --filter='...[<base-sha>]'` (packages changed since the base commit and their dependents), with a timeout (`implement.checksTimeoutMinutes`, default 20). Any non-zero exit is the `failed` hand-back, with the output tail in the comment (redacted).
 4. **Commit with hooks.** The steward commits as a configured identity (`implement.commitAuthor`, e.g. `Ticket Steward <steward@concentrate.ai>`) with kickoff's Husky hooks enabled for that one command. The shared mirror's git config is never changed. kickoff's pre-commit runs `pnpm audit --audit-level=high`, `lint-staged` and `verify-license.sh` on feature branches (its `pnpm run types` runs only on main/dev/staging, which is why step 3 exists). A hook failure is the `failed` hand-back with the hook output. A known risk: `pnpm audit` can fail on an unrelated advisory; that surfaces as a hand-back naming the advisory rather than a silent skip.
 5. **Keep the commit.** The steward records the commit as a local ref in the mirror (`refs/steward/implement/<jobId>`) and on the job (`branch`, `commit_sha`), so a failed push can be retried after the worktree is gone.
-6. **Push.** `git push <url-with-token> <sha>:refs/heads/<branch>`, no force. The URL carries a new secret, `GITLAB_PUSH_TOKEN`: a GitLab project access token with the Developer role and `write_repository` scope. It is built per push, never written to git config, never in the brain's environment, and redacted from all output. The existing `MIRROR_TOKEN` stays read-only; `GITLAB_TOKEN` (Reporter) is untouched.
+6. **Push.** `git push <url-with-token> <sha>:refs/heads/<branch>`, no force. Before pushing, the steward refuses unless all hold: the target starts with `refs/heads/<branchPrefix>`; the branch does not exist on the remote; the commit has exactly one parent and it is the `dev` commit the job started from. The URL carries `GITLAB_PUSH_TOKEN`, built per push, never written to git config, never in the brain's environment, and redacted from all output. `MIRROR_TOKEN` stays read-only.
+
+   **Token.** Either a new project access token with the Developer role and only `write_repository` (recommended: it can do nothing but git push), or the existing reviewer token (`GITLAB_TOKEN`) raised from Reporter to Developer and set as `GITLAB_PUSH_TOKEN` too. Reuse works because `api` scope covers git over HTTPS, but `api` + Developer can also merge into unprotected branches, approve and create merge requests, delete branches and run pipelines through the API, so a leak costs more.
+
+   **Branch protection (server-side).** `main`, `staging` and `dev` are protected in GitLab with named-user push and merge allowlists; the token's bot user is on none of them, so GitLab rejects any push or merge to those branches whatever the steward does. The bot must never be added to those allowlists. GitLab cannot enforce "only branches cut from dev" (it sees ref names, not ancestry); the steward's pre-push checks above cover that.
 
 **Publish** (after a push, or directly for `failed` / `needs_info`), comment first, labels last:
 
@@ -150,7 +154,7 @@ implement?: {                  // absent disables the implement job; ready-for-a
 
 **Worker.** Still one job at a time. An implement job can hold the worker for up to about 90 minutes (setup + 60 brain + checks); triage jobs queue behind it. Acceptable for v1; parallel workers are out of scope.
 
-**Doctor.** Checks all five labels exist in Linear, and that `GITLAB_PUSH_TOKEN` authenticates with Developer access (or higher) to the project.
+**Doctor.** Checks all five labels exist in Linear; that `GITLAB_PUSH_TOKEN` authenticates with Developer access to the project; and that `main`, `staging` and `dev` are protected with the token's user absent from their push and merge allowlists (fails if protection was removed or the bot was added).
 
 **CLI.** `steward implement KEY [--dry-run]`, mirroring `steward enrich`. A dry run runs everything up to and including the checks, then prints the diff stat and the would-be commit message; it never commits, pushes or writes to Linear.
 
