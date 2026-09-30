@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, resolveFromConfigDir, SecretsSchema } from "../../src/config/load.js";
@@ -172,5 +173,36 @@ describe("resolveFromConfigDir", () => {
     vi.stubEnv("HOME", "/home/steward");
     expect(resolveFromConfigDir("/etc/steward", "~/overlay")).toBe("/home/steward/overlay");
     expect(resolveFromConfigDir("/etc/steward", "~")).toBe("/home/steward");
+  });
+});
+
+describe("implement secrets", () => {
+  const writeFiles = (dir: string, env: string) => {
+    const config = {
+      dataDir: "./data",
+      brain: { kind: "claude-code", model: "m", maxTurns: 1, timeoutMinutes: 1 },
+      tracker: { kind: "linear", labels: {} },
+      codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
+      workspace: { fetchUrl: "https://gitlab.example/acme/repo.git", baseBranch: "dev", overlayDir: "./overlay", setup: [], port: 4100 },
+      prompt: "./prompts/enrich.md",
+      server: { port: 3020, publicUrl: "https://steward.example" },
+      implement: { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } },
+    };
+    writeFileSync(join(dir, "steward.config.ts"), `export default ${JSON.stringify(config)};\n`);
+    writeFileSync(join(dir, ".env"), env);
+  };
+
+  it("fails when implement is configured without GITLAB_PUSH_TOKEN", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-load-"));
+    writeFiles(dir, "LINEAR_API_KEY=x\n");
+    await expect(loadConfig({ configPath: join(dir, "steward.config.ts") })).rejects.toThrow("implement requires GITLAB_PUSH_TOKEN in .env");
+  });
+
+  it("resolves implement.prompt against the config dir and reads the push token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-load-"));
+    writeFiles(dir, "GITLAB_PUSH_TOKEN=glpat-push-token-value\n");
+    const loaded = await loadConfig({ configPath: join(dir, "steward.config.ts") });
+    expect(loaded.config.implement?.prompt).toBe(join(dir, "prompts/implement.md"));
+    expect(loaded.secrets.GITLAB_PUSH_TOKEN).toBe("glpat-push-token-value");
   });
 });

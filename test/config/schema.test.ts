@@ -109,3 +109,48 @@ describe("brain.reasoningEffort", () => {
     expect(StewardConfigSchema.safeParse({ ...minimalInput, brain: { ...openai, reasoningEffort: "extreme" } }).success).toBe(false);
   });
 });
+
+describe("tracker.labels and implement", () => {
+  const labels = {};
+  const implement = { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } };
+
+  it("fills every label name with its default", () => {
+    const parsed = StewardConfigSchema.parse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels } });
+    expect(parsed.tracker.labels).toEqual({
+      triage: "needs-triage",
+      implement: "ready-for-agent",
+      needsInfo: "needs-info",
+      readyForHuman: "ready-for-human",
+      implemented: "agent-implemented",
+    });
+  });
+
+  it("leaves labels and implement unset by default", () => {
+    const parsed = StewardConfigSchema.parse(minimalInput);
+    expect(parsed.tracker.labels).toBeUndefined();
+    expect(parsed.implement).toBeUndefined();
+  });
+
+  it("fills implement defaults", () => {
+    const parsed = StewardConfigSchema.parse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement });
+    expect(parsed.implement).toEqual({
+      ...implement,
+      branchTypes: ["feature", "fix", "chore", "refactor"],
+      checks: [],
+      checksTimeoutMinutes: 20,
+      timeoutMinutes: 60,
+      maxTurns: 150,
+      protectedBranches: ["main", "staging", "dev"],
+    });
+  });
+
+  it("rejects implement without tracker.labels", () => {
+    const result = StewardConfigSchema.safeParse({ ...minimalInput, implement });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a branch type that is not lowercase kebab", () => {
+    const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement: { ...implement, branchTypes: ["Fix"] } });
+    expect(result.success).toBe(false);
+  });
+});

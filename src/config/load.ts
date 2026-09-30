@@ -16,6 +16,7 @@ export const SecretsSchema = z.object({
   GITLAB_TOKEN: z.string().optional(),
   GITLAB_WEBHOOK_SECRET: z.string().optional(),
   GITLAB_WEBHOOK_SIGNING_TOKEN: z.string().optional(),
+  GITLAB_PUSH_TOKEN: z.string().optional(),
   GITHUB_TOKEN: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_AUTH_TOKEN: z.string().optional(),
@@ -67,6 +68,9 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string }): P
         : { skillsDir: resolveFromConfigDir(configDir, parsed.workspace.skillsDir) }),
     },
     ...(parsed.review === undefined ? {} : { review: { ...parsed.review, prompt: resolveFromConfigDir(configDir, parsed.review.prompt) } }),
+    ...(parsed.implement === undefined ? {} : { implement: { ...parsed.implement, prompt: resolveFromConfigDir(configDir, parsed.implement.prompt) } }),
   };
-  return { config, secrets: await readSecrets(configDir), configPath, configDir };
+  const secrets = await readSecrets(configDir);
+  if (config.implement !== undefined && (secrets.GITLAB_PUSH_TOKEN ?? "") === "") throw new Error("implement requires GITLAB_PUSH_TOKEN in .env");
+  return { config, secrets, configPath, configDir };
 };
