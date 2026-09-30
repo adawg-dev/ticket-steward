@@ -87,7 +87,7 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
     if (body === undefined) return reply.code(400).send({ ok: false });
 
     const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body, {
-      triggerLabel: deps.config.tracker.triggerLabel,
+      labels: deps.config.tracker.labels,
     });
     if (event === null || event.kind === "cli" || event.kind === "mr.review") return { ok: true, action: "ignored" };
 

@@ -17,10 +17,12 @@ let stores: Stores;
 let tracker: FakeTracker;
 let app: FastifyInstance;
 
-const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich", triggerLabel?: string): StewardConfig => ({
+const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented" };
+
+const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich", labels?: typeof LABELS): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues, bugLabels: ["Bug"], ...(triggerLabel === undefined ? {} : { triggerLabel }) },
+  tracker: { kind: "linear", teams: ["API"], gatewayIssues, bugLabels: ["Bug"], ...(labels === undefined ? {} : { labels }) },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",
@@ -162,7 +164,7 @@ describe("buildServer", () => {
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
-    describe("with a trigger label", () => {
+    describe("with labels", () => {
       const labelUpdate = (stateType: string, previousLabelIds: string[]) =>
         JSON.stringify({
           action: "update",
@@ -173,7 +175,7 @@ describe("buildServer", () => {
             description: "The adapter loses the final chunk.",
             team: { key: "API" },
             state: { name: "Todo", type: stateType },
-            labels: [{ id: "label-steward", name: "steward" }],
+            labels: [{ id: "label-triage", name: "needs-triage" }],
           },
           updatedFrom: { labelIds: previousLabelIds },
         });
@@ -181,7 +183,7 @@ describe("buildServer", () => {
       beforeEach(async () => {
         await app.close();
         app = buildServer({
-          config: makeConfig("enrich", "steward"),
+          config: makeConfig("enrich", LABELS),
           secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
           stores,
           tracker,
@@ -201,6 +203,7 @@ describe("buildServer", () => {
 
         expect(response.json()).toEqual({ ok: true, action: "enqueue" });
         expect(stores.jobs.list({ limit: 10 })[0]?.trigger.kind).toBe("issue.labeled");
+        expect(stores.jobs.list({ limit: 10 })[0]?.trigger).toMatchObject({ kind: "issue.labeled", action: "triage" });
       });
 
       it("skips a Done ticket when the label is added", async () => {
@@ -211,7 +214,7 @@ describe("buildServer", () => {
       });
 
       it("ignores an update to a ticket that already had the label", async () => {
-        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", ["label-steward"]));
+        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", ["label-triage"]));
 
         expect(response.json()).toEqual({ ok: true, action: "ignored" });
         expect(stores.jobs.list({ limit: 10 })).toEqual([]);

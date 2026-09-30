@@ -1,6 +1,18 @@
+export type LabelAction = "triage" | "implement";
+
 export type TriggerEvent =
-  | { kind: "issue.created" | "issue.labeled"; issueId: string; identifier: string; teamKey: string; deliveryId: string; description: string; stateType: string | null }
-  | { kind: "cli"; issueId: string; identifier: string; teamKey: string }
+  | {
+      kind: "issue.created" | "issue.labeled";
+      issueId: string;
+      identifier: string;
+      teamKey: string;
+      deliveryId: string;
+      description: string;
+      stateType: string | null;
+      /** Which configured label started this; absent when labels are not configured (every new ticket is triaged). */
+      action?: LabelAction;
+    }
+  | { kind: "cli"; issueId: string; identifier: string; teamKey: string; action?: LabelAction }
   | {
       kind: "mr.review";
       deliveryId: string;

@@ -18,10 +18,6 @@ const issueCreateBody = {
   },
 };
 
-const STEWARD_LABEL = { id: "label-steward", name: "steward" };
-
-const labeledCreateBody = { ...issueCreateBody, data: { ...issueCreateBody.data, labels: [{ id: "label-bug", name: "Bug" }, STEWARD_LABEL] } };
-
 const issueUpdateBody = (labels: Array<{ id: string; name: string }>, updatedFrom: Record<string, unknown>) => ({
   ...issueCreateBody,
   action: "update",
@@ -104,11 +100,15 @@ describe("parseEvent", () => {
     expect(parseEvent({ event: "Issue", delivery: "d-1" }, { ...issueCreateBody, action: "update" })).toBeNull();
   });
 
-  describe("with a trigger label", () => {
-    const opts = { triggerLabel: "steward" };
+  describe("with labels", () => {
+    const opts = { labels: { triage: "needs-triage", implement: "ready-for-agent" } };
+    const TRIAGE = { id: "label-triage", name: "needs-triage" };
+    const AGENT = { id: "label-agent", name: "ready-for-agent" };
+    const actionOf = (event: ReturnType<typeof parseEvent>) => (event !== null && event.kind !== "mr.review" ? event.action : undefined);
+    const withLabels = (labels: Array<{ id: string; name: string }>) => ({ ...issueCreateBody, data: { ...issueCreateBody.data, labels } });
 
-    it("maps an Issue create that carries the label to issue.created", () => {
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, labeledCreateBody, opts)).toEqual({
+    it("maps a create carrying needs-triage to issue.created with action triage", () => {
+      expect(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([TRIAGE]), opts)).toEqual({
         kind: "issue.created",
         issueId: "issue-uuid-1",
         identifier: "API-42",
@@ -116,48 +116,39 @@ describe("parseEvent", () => {
         deliveryId: "d-1",
         description: "Something is broken",
         stateType: "triage",
+        action: "triage",
       });
     });
 
-    it("matches the label name case-insensitively", () => {
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, labeledCreateBody, { triggerLabel: "Steward" })?.kind).toBe("issue.created");
+    it("maps a create carrying ready-for-agent to action implement", () => {
+      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([AGENT]), opts))).toBe("implement");
     });
 
-    it("ignores an Issue create without the label", () => {
+    it("prefers implement when both labels arrive together", () => {
+      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([TRIAGE, AGENT]), opts))).toBe("implement");
+    });
+
+    it("matches label names case-insensitively", () => {
+      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([{ id: "x", name: "Needs-Triage" }]), opts))).toBe("triage");
+    });
+
+    it("ignores a create without either label", () => {
       expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueCreateBody, opts)).toBeNull();
     });
 
-    it("maps an Issue update that just added the label to issue.labeled", () => {
-      const body = issueUpdateBody([{ id: "label-bug", name: "Bug" }, STEWARD_LABEL], { labelIds: ["label-bug"] });
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, body, opts)).toEqual({
-        kind: "issue.labeled",
-        issueId: "issue-uuid-1",
-        identifier: "API-42",
-        teamKey: "API",
-        deliveryId: "d-1",
-        description: "Something is broken",
-        stateType: "triage",
-      });
+    it("maps an update that just added ready-for-agent to issue.labeled", () => {
+      const body = issueUpdateBody([TRIAGE, AGENT], { labelIds: ["label-triage"] });
+      const event = parseEvent({ event: "Issue", delivery: "d-1" }, body, opts);
+      expect(event?.kind).toBe("issue.labeled");
+      expect(actionOf(event)).toBe("implement");
     });
 
-    it("ignores an Issue update that did not change the labels", () => {
-      const body = issueUpdateBody([STEWARD_LABEL], { title: "Old title" });
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, body, opts)).toBeNull();
+    it("ignores an update where the labels did not change", () => {
+      expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueUpdateBody([TRIAGE], { title: "Old" }), opts)).toBeNull();
     });
 
-    it("ignores an Issue update where the label was already there", () => {
-      const body = issueUpdateBody([{ id: "label-bug", name: "Bug" }, STEWARD_LABEL], { labelIds: ["label-steward"] });
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, body, opts)).toBeNull();
-    });
-
-    it("ignores an Issue update that added some other label", () => {
-      const body = issueUpdateBody([{ id: "label-bug", name: "Bug" }], { labelIds: [] });
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, body, opts)).toBeNull();
-    });
-
-    it("ignores an Issue update that removed the label", () => {
-      const body = issueUpdateBody([], { labelIds: ["label-steward"] });
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, body, opts)).toBeNull();
+    it("ignores an update where the label was already there", () => {
+      expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueUpdateBody([TRIAGE], { labelIds: ["label-triage"] }), opts)).toBeNull();
     });
   });
 

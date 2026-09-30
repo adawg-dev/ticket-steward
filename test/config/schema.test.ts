@@ -83,15 +83,6 @@ describe("review config", () => {
   it("defaults bugLabels to Bug", () => {
     expect(StewardConfigSchema.parse(minimalInput).tracker.bugLabels).toEqual(["Bug"]);
   });
-
-  it("leaves triggerLabel unset by default", () => {
-    expect(StewardConfigSchema.parse(minimalInput).tracker.triggerLabel).toBeUndefined();
-  });
-
-  it("rejects an empty triggerLabel", () => {
-    const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { ...minimalInput.tracker, triggerLabel: "" } });
-    expect(result.success).toBe(false);
-  });
 });
 
 describe("brain.reasoningEffort", () => {
