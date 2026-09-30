@@ -17,10 +17,10 @@ let stores: Stores;
 let tracker: FakeTracker;
 let app: FastifyInstance;
 
-const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich"): StewardConfig => ({
+const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich", triggerLabel?: string): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues, bugLabels: ["Bug"] },
+  tracker: { kind: "linear", teams: ["API"], gatewayIssues, bugLabels: ["Bug"], ...(triggerLabel === undefined ? {} : { triggerLabel }) },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",
@@ -118,6 +118,7 @@ describe("buildServer", () => {
         teamKey: "API",
         deliveryId: "delivery-1",
         description: "The adapter loses the final chunk.",
+        stateType: null,
       });
     });
 
@@ -159,6 +160,62 @@ describe("buildServer", () => {
 
       expect(response.statusCode).toBe(200);
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+    });
+
+    describe("with a trigger label", () => {
+      const labelUpdate = (stateType: string, previousLabelIds: string[]) =>
+        JSON.stringify({
+          action: "update",
+          type: "Issue",
+          data: {
+            id: "issue-1",
+            identifier: "API-1",
+            description: "The adapter loses the final chunk.",
+            team: { key: "API" },
+            state: { name: "Todo", type: stateType },
+            labels: [{ id: "label-steward", name: "steward" }],
+          },
+          updatedFrom: { labelIds: previousLabelIds },
+        });
+
+      beforeEach(async () => {
+        await app.close();
+        app = buildServer({
+          config: makeConfig("enrich", "steward"),
+          secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
+          stores,
+          tracker,
+          workerState: () => WORKER_IDLE,
+        });
+      });
+
+      it("ignores an Issue create without the label", async () => {
+        const response = await post("Issue", "delivery-1", issueCreatePayload());
+
+        expect(response.json()).toEqual({ ok: true, action: "ignored" });
+        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+      });
+
+      it("queues a job when the label is added", async () => {
+        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", []));
+
+        expect(response.json()).toEqual({ ok: true, action: "enqueue" });
+        expect(stores.jobs.list({ limit: 10 })[0]?.trigger.kind).toBe("issue.labeled");
+      });
+
+      it("skips a Done ticket when the label is added", async () => {
+        const response = await post("Issue", "delivery-1", labelUpdate("completed", []));
+
+        expect(response.json()).toEqual({ ok: true, action: "skip" });
+        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+      });
+
+      it("ignores an update to a ticket that already had the label", async () => {
+        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", ["label-steward"]));
+
+        expect(response.json()).toEqual({ ok: true, action: "ignored" });
+        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+      });
     });
 
     it("ignores an AgentSessionEvent delivery", async () => {

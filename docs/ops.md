@@ -202,8 +202,8 @@ comment and upload appears as the user who owns the key, so give it a user of it
 4. As a workspace admin, open Settings → API → Webhooks and create a webhook with the URL
    `https://steward.example.com/webhooks/linear` (`<server.publicUrl>/webhooks/linear`).
    Select only the **Issues** data-change event, and scope it to the allowlisted teams or
-   to all public teams. The steward acts on issue creation only and ignores every other
-   delivery.
+   to all public teams. The steward acts on issue creation (or, with `tracker.triggerLabel`,
+   on the label being added) and ignores every other delivery.
 5. Copy the webhook's signing secret into `.env` as `LINEAR_WEBHOOK_SECRET`.
 
 There is no authorization step: the key is read from `.env` when the process starts.
@@ -217,6 +217,16 @@ Config reference: `tracker.gatewayIssues` is `"enrich"` (default) or `"skip"`. K
 future sidecar mode, where the gateway enriches through the steward itself (`auto`/`on`).
 Any other combination either enriches gateway tickets twice or never enriches them.
 `steward enrich <KEY>` always runs, whatever `gatewayIssues` says.
+
+Config reference: `tracker.triggerLabel` (unset by default) makes enrichment opt-in. When it
+is set, e.g. `triggerLabel: "steward"`, the steward enriches only a ticket created with that
+label or the first time the label is added; every other ticket is ignored. The label name is
+matched case-insensitively and must exist in Linear. Removing and re-adding the label does not
+re-enrich a ticket that already has an Enrichment section; use `steward enrich <KEY>` for that.
+
+Whatever the trigger, the steward never enriches a Done or Canceled ticket. A job checks the
+state when it starts and again just before it writes, and fails without retry if the ticket
+is closed. This applies to `steward enrich` too.
 
 ### 1.8 Doctor, then start the service
 

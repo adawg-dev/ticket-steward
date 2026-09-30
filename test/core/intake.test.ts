@@ -8,7 +8,10 @@ const created: TriggerEvent = {
   teamKey: "API",
   deliveryId: "delivery-1",
   description: "Something is broken",
+  stateType: "triage",
 };
+
+const labeled: TriggerEvent = { ...created, kind: "issue.labeled" };
 
 const cli: TriggerEvent = { kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API" };
 
@@ -77,6 +80,29 @@ describe("shouldEnqueue", () => {
 
   it("still enqueues a non-gateway issue when gatewayIssues is skip", () => {
     expect(shouldEnqueue({ ...base, gatewayIssues: "skip", event: created })).toEqual({ action: "enqueue" });
+  });
+
+  it.each(["completed", "canceled"])("skips issue.created for a %s ticket", (stateType) => {
+    const decision = shouldEnqueue({ ...base, event: { ...created, stateType } });
+    expect(decision).toEqual({ action: "skip", reason: "API-1 is closed (completed or canceled)" });
+  });
+
+  it.each(["completed", "canceled"])("skips issue.labeled for a %s ticket", (stateType) => {
+    const decision = shouldEnqueue({ ...base, event: { ...labeled, stateType } });
+    expect(decision.action).toBe("skip");
+  });
+
+  it("enqueues issue.labeled otherwise", () => {
+    expect(shouldEnqueue({ ...base, event: labeled })).toEqual({ action: "enqueue" });
+  });
+
+  it("skips issue.labeled when a prior run succeeded", () => {
+    expect(shouldEnqueue({ ...base, event: labeled, priorSuccess: true }).action).toBe("skip");
+  });
+
+  it("skips issue.labeled when the description already holds the steward marker", () => {
+    const description = `Body\n\n${STEWARD_BEGIN}\n## Enrichment\n${STEWARD_END}`;
+    expect(shouldEnqueue({ ...base, event: { ...labeled, description } }).action).toBe("skip");
   });
 
   it("never skips a cli run", () => {

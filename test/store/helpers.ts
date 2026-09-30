@@ -13,6 +13,7 @@ export const createdEvent: TriggerEvent = {
   teamKey: "API",
   deliveryId: "delivery-1",
   description: "A bug report",
+  stateType: null,
 };
 
 export const secondEvent: TriggerEvent = {
@@ -22,6 +23,7 @@ export const secondEvent: TriggerEvent = {
   teamKey: "API",
   deliveryId: "delivery-2",
   description: "Another bug report",
+  stateType: null,
 };
 
 export const brainResult: BrainResult = {

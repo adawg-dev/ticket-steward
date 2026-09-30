@@ -26,7 +26,7 @@ export interface HealthReport {
 }
 
 type Intake = IntakeDecision | { action: "duplicate" };
-type WebhookEvent = Extract<TriggerEvent, { kind: "issue.created" }>;
+type WebhookEvent = Extract<TriggerEvent, { kind: "issue.created" | "issue.labeled" }>;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const COUNT_LIMIT = 100_000;
@@ -86,8 +86,10 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
     const body = parseJson(request.body);
     if (body === undefined) return reply.code(400).send({ ok: false });
 
-    const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body);
-    if (event === null || event.kind !== "issue.created") return { ok: true, action: "ignored" };
+    const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body, {
+      triggerLabel: deps.config.tracker.triggerLabel,
+    });
+    if (event === null || event.kind === "cli" || event.kind === "mr.review") return { ok: true, action: "ignored" };
 
     const decision = intake(deps, event);
     logger.info({ delivery: event.deliveryId, kind: event.kind, identifier: event.identifier, action: decision.action }, "webhook received");

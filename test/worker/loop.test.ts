@@ -30,6 +30,7 @@ const createdTrigger: TriggerEvent = {
   teamKey: "API",
   deliveryId: "delivery-1",
   description: "The adapter loses the final chunk.",
+  stateType: null,
 };
 
 const reviewTrigger: ReviewTrigger = {

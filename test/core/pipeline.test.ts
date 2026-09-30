@@ -48,6 +48,7 @@ const createdTrigger: IssueTrigger = {
   teamKey: "API",
   deliveryId: "delivery-1",
   description: issue.description,
+  stateType: "triage",
 };
 
 const brainResult: BrainResult = {
@@ -163,6 +164,32 @@ describe("runJob", () => {
     expect(tracker.comments("issue-1")).toEqual([expectedComment(ctx.jobId)]);
     expect(stores.jobs.get(ctx.jobId)?.result).toEqual(brainResult);
     expect(stores.jobs.get(ctx.jobId)?.resultSha).toBe(repo.sha);
+  });
+
+  it.each([
+    ["completed", "Done"],
+    ["canceled", "Canceled"],
+  ])("fails without retry and never runs the brain for a %s ticket", async (type, name) => {
+    tracker.addIssue({ ...issue, state: { name, type } });
+    const brain = brainWith();
+    const ctx = claimJob(createdTrigger);
+
+    const outcome = await runJob(ctx, makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "failed", error: `API-1 is ${name}; Ticket Steward does not enrich Done or Canceled tickets`, retryable: false });
+    expect(brain.runs).toBe(0);
+    expect(tracker.getDescription("issue-1")).toBe(issue.description);
+    expect(tracker.comments("issue-1")).toEqual([]);
+  });
+
+  it("writes nothing when the ticket is closed while the brain runs", async () => {
+    const ctx = claimJob(createdTrigger);
+
+    const outcome = await runJob(ctx, makeDeps(brainWith(), { afterBrain: () => tracker.addIssue({ ...issue, state: { name: "Done", type: "completed" } }) }));
+
+    expect(outcome).toEqual({ status: "failed", error: "API-1 is Done; Ticket Steward does not enrich Done or Canceled tickets", retryable: false });
+    expect(tracker.getDescription("issue-1")).toBe(issue.description);
+    expect(tracker.comments("issue-1")).toEqual([]);
   });
 
   it("stores the recipe for a bug ticket", async () => {

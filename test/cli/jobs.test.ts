@@ -20,6 +20,7 @@ const createdEvent: TriggerEvent = {
   teamKey: "API",
   deliveryId: "delivery-1",
   description: "A bug report",
+  stateType: null,
 };
 
 const reviewEvent: TriggerEvent = {

@@ -1,5 +1,5 @@
 export type TriggerEvent =
-  | { kind: "issue.created"; issueId: string; identifier: string; teamKey: string; deliveryId: string; description: string }
+  | { kind: "issue.created" | "issue.labeled"; issueId: string; identifier: string; teamKey: string; deliveryId: string; description: string; stateType: string | null }
   | { kind: "cli"; issueId: string; identifier: string; teamKey: string }
   | {
       kind: "mr.review";

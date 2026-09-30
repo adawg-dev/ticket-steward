@@ -9,6 +9,7 @@ import { resolveAttachments } from "./attachments.js";
 import { renderTemplatesMarkdown, renderTicketMarkdown } from "./context.js";
 import type { PipelineDeps } from "./deps.js";
 import { gatewayRoute, isGatewayIssue } from "./gateway.js";
+import { CLOSED_STATE_TYPES } from "./intake.js";
 import { renderPrompt } from "./prompt.js";
 import type { Redactor } from "./redact.js";
 import { buildComment, buildEnrichmentSection, replaceSection } from "./render.js";
@@ -26,6 +27,12 @@ interface Prepared {
   prompt: string;
   isBug: boolean;
 }
+
+/** Thrown before any work when the ticket is Done or Canceled; retrying cannot help. */
+class ClosedTicketError extends Error {}
+
+const closedError = (identifier: string, state: TicketBundle["state"]): ClosedTicketError | null =>
+  CLOSED_STATE_TYPES.includes(state.type) ? new ClosedTicketError(`${identifier} is ${state.name}; Ticket Steward does not enrich Done or Canceled tickets`) : null;
 
 const redactRepro = (repro: Repro | null, redactor: Redactor): Repro | null =>
   repro === null
@@ -49,6 +56,8 @@ const redactResult = (result: BrainResult, redactor: Redactor): BrainResult => (
 const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env: Record<string, string>, onWorktree: (worktree: Worktree) => void): Promise<Prepared> => {
   const { config, tracker, mirror } = deps;
   const bundle = await tracker.fetchTicket(ctx.issueId);
+  const closed = closedError(ctx.identifier, bundle.state);
+  if (closed !== null) throw closed;
   await mirror.fetch();
   const sha = await mirror.resolveSha(config.workspace.baseBranch);
   const worktree = await prepareWorkspace(ctx, deps, paths, env, sha, onWorktree);
@@ -88,6 +97,9 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: BrainResult,
   const { tracker, config, codehost } = deps;
   const result = redactResult(stored, deps.redactor);
   try {
+    // The brain runs for minutes; a ticket closed meanwhile must not be written to.
+    const closed = closedError(ctx.identifier, (await tracker.fetchTicket(ctx.issueId)).state);
+    if (closed !== null) return { status: "failed", error: closed.message, retryable: false };
     const { uploaded, notes } = await uploadAttachments(deps, artifactsDir, result);
     const section = buildEnrichmentSection(result, uploaded, [...notes, ...extraNotes.map((note) => deps.redactor.redact(note))], {
       now: deps.now(),
@@ -119,6 +131,7 @@ const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktre
   try {
     prepared = await prepare(ctx, deps, paths, env, onWorktree);
   } catch (err) {
+    if (err instanceof ClosedTicketError) return { status: "failed", error: err.message, retryable: false };
     return { status: "failed", error: deps.signal?.aborted === true ? INTERRUPTED_ERROR : errorMessage(err), retryable: true };
   }
   const { worktree, prompt } = prepared;
