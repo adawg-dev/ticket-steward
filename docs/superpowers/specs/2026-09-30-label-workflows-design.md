@@ -68,9 +68,9 @@ A new job kind `implement`, in its own module `src/implement/` (prompt, result, 
 
 **Intake.** Triggered by `ready-for-agent` being first added. Skipped if the ticket already has a succeeded implement job (`steward implement KEY` re-runs one by hand, analogous to `steward enrich`).
 
-**Workspace.** Same as every job: fresh worktree at the latest `dev`, overlay, skills, then `workspace.setup` (`reset-dbs.sh`, install, package build). The steward then creates the branch in the worktree.
+**Workspace.** Same as every job: fresh worktree at the latest `dev` (detached), overlay, skills, then `workspace.setup` (`reset-dbs.sh`, install, package build). No branch is created in the worktree; the branch exists only as the push target (Section 3).
 
-**Branch.** `agent/<identifier>-<slug>`, e.g. `agent/usrapp-45-routing-settings-ui`. The slug is the ticket title lowercased, reduced to `[a-z0-9-]`, collapsed hyphens, cut to 40 characters. The prefix is configurable (`implement.branchPrefix`, default `agent/`). If the branch already exists on the remote (checked with `git ls-remote` before the brain runs and again before pushing), the job ends in the `ready-for-human` hand-back with a comment naming the branch; the steward never touches an existing branch.
+**Branch.** `<type>/<IDENTIFIER>-<slug>`, e.g. `fix/USRAPP-101-routing-drops-last-chunk` or `chore/API-101-bump-pg`. The type is one of `implement.branchTypes` (default `feature`, `fix`, `chore`, `refactor`) and is chosen by the agent in its result (`branchType`), since it is the one that knows what kind of change it made; the steward rejects any other value (`failed` hand-back). The identifier keeps Linear's casing. The slug is the ticket title lowercased, reduced to `[a-z0-9-]`, hyphens collapsed, cut to 40 characters. The steward builds the name at push time. If any remote branch already carries the ticket (`git ls-remote` for `refs/heads/*/<IDENTIFIER>-*`, any type, checked before the brain runs and again before pushing), the job ends in the `ready-for-human` hand-back with a comment naming that branch; the steward never touches an existing branch.
 
 **Brief or not.** If the description holds the agent-brief markers, `prompts/implement.md` renders the brief-first variant ("this is your spec; check it against the current code"). Otherwise it renders the investigate-first variant ("find the code, decide an approach; if the ticket is too vague to implement responsibly, stop and return your questions"). Both get the full ticket (description, comments, attachments) and these rules:
 
@@ -83,6 +83,7 @@ A new job kind `implement`, in its own module `src/implement/` (prompt, result, 
 
 ```
 outcome: "implemented" | "failed" | "needs_info"
+branchType: "feature" | "fix" | "chore" | "refactor"  // implemented only; must be in implement.branchTypes
 commitMessage: string         // subject + body; the steward prefixes the subject with "<IDENTIFIER>: "
 summary: string               // what changed and why
 reviewNotes: string[]         // what a reviewer should check or know
@@ -103,7 +104,7 @@ The agent's `outcome` is a claim; the steward verifies before anything leaves th
 3. **Checks.** The steward runs `implement.checks` itself in the worktree with the job env. The default for kickoff is `pnpm turbo check-types lint --filter='...[<base-sha>]'` (packages changed since the base commit and their dependents), with a timeout (`implement.checksTimeoutMinutes`, default 20). Any non-zero exit is the `failed` hand-back, with the output tail in the comment (redacted).
 4. **Commit with hooks.** The steward commits as a configured identity (`implement.commitAuthor`, e.g. `Ticket Steward <steward@concentrate.ai>`) with kickoff's Husky hooks enabled for that one command. The shared mirror's git config is never changed. kickoff's pre-commit runs `pnpm audit --audit-level=high`, `lint-staged` and `verify-license.sh` on feature branches (its `pnpm run types` runs only on main/dev/staging, which is why step 3 exists). A hook failure is the `failed` hand-back with the hook output. A known risk: `pnpm audit` can fail on an unrelated advisory; that surfaces as a hand-back naming the advisory rather than a silent skip.
 5. **Keep the commit.** The steward records the commit as a local ref in the mirror (`refs/steward/implement/<jobId>`) and on the job (`branch`, `commit_sha`), so a failed push can be retried after the worktree is gone.
-6. **Push.** `git push <url-with-token> <sha>:refs/heads/<branch>`, no force. Before pushing, the steward refuses unless all hold: the target starts with `refs/heads/<branchPrefix>`; the branch does not exist on the remote; the commit has exactly one parent and it is the `dev` commit the job started from. The URL carries `GITLAB_PUSH_TOKEN`, built per push, never written to git config, never in the brain's environment, and redacted from all output. `MIRROR_TOKEN` stays read-only.
+6. **Push.** `git push <url-with-token> <sha>:refs/heads/<branch>`, no force. Before pushing, the steward refuses unless all hold: the target matches `refs/heads/(<branchTypes>)/<IDENTIFIER>-[a-z0-9-]+` exactly; no remote branch carries the ticket; the commit has exactly one parent and it is the `dev` commit the job started from. The URL carries `GITLAB_PUSH_TOKEN`, built per push, never written to git config, never in the brain's environment, and redacted from all output. `MIRROR_TOKEN` stays read-only.
 
    **Token.** Either a new project access token with the Developer role and only `write_repository` (recommended: it can do nothing but git push), or the existing reviewer token (`GITLAB_TOKEN`) raised from Reporter to Developer and set as `GITLAB_PUSH_TOKEN` too. Reuse works because `api` scope covers git over HTTPS, but `api` + Developer can also merge into unprotected branches, approve and create merge requests, delete branches and run pipelines through the API, so a leak costs more.
 
@@ -135,7 +136,7 @@ tracker: {
   },
 },
 implement?: {                  // absent disables the implement job; ready-for-agent is then ignored
-  branchPrefix: string;        // default "agent/"
+  branchTypes: string[];       // default ["feature", "fix", "chore", "refactor"]
   checks: string[];            // run by the steward after the brain
   checksTimeoutMinutes: number;// default 20
   commitAuthor: { name: string; email: string };
