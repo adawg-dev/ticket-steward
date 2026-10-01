@@ -310,6 +310,12 @@ a create-only push (`--force-with-lease=<ref>:`), so it can never update or forc
 branch. Each token-carrying `ls-remote` runs from a steward-made directory or scratch repo
 (the pre-push one in that scratch bare repo), never the mirror or worktree.
 
+**The secret scan is best-effort.** It catches accidental leaks: a plain-text overlay or
+steward secret in an added line or the commit message. A diff it cannot read or that is too
+large (64 MB per file) is handed back rather than passed. It does not stop an agent that sets
+out to leak: an encoded value (UTF-16, base64, split strings) gets past it. The real controls
+are the overlay-file guard, a `write_repository`-only push token and human review of the MR.
+
 **Hand-backs are successes.** An empty diff, a guard hit, failing checks or hooks, an
 existing branch, or the agent reporting `failed` or `needs_info` end the job `succeeded` with
 the warning `handed back: <reason>` (see it in `steward jobs show`). The ticket gets a comment
