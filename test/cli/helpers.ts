@@ -57,18 +57,25 @@ export interface ConfigPaths {
   skillsDir?: string;
   teams?: string[];
   review?: { botUsername: string; prompt: string };
+  labels?: boolean;
+  implement?: { prompt: string; checks?: string[] };
 }
 
 /** Writes a steward.config.ts into `dir` pointing at the given paths and returns its path. */
 export const writeConfig = async (dir: string, p: ConfigPaths): Promise<string> => {
   const skills = p.skillsDir === undefined ? "" : `skillsDir: ${JSON.stringify(p.skillsDir)},`;
   const review = p.review === undefined ? "" : `review: ${JSON.stringify(p.review)},`;
+  const labels = p.labels === true || p.implement !== undefined ? "labels: {}," : "";
+  const implement =
+    p.implement === undefined
+      ? ""
+      : `implement: ${JSON.stringify({ prompt: p.implement.prompt, checks: p.implement.checks ?? [], commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } })},`;
   const source = `
 import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: ${JSON.stringify(p.dataDir)},
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ${JSON.stringify(p.teams ?? ["API"])}, gatewayIssues: "enrich", bugLabels: ["Bug"] },
+  tracker: { kind: "linear", teams: ${JSON.stringify(p.teams ?? ["API"])}, gatewayIssues: "enrich", bugLabels: ["Bug"], ${labels} },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: ${JSON.stringify(p.fetchUrl)},
@@ -84,10 +91,12 @@ export default defineConfig({
   prompt: ${JSON.stringify(p.promptPath)},
   server: { port: ${p.serverPort}, publicUrl: "https://steward.example" },
   ${review}
+  ${implement}
 });
 `;
   const configPath = join(dir, "steward.config.ts");
   await writeFile(configPath, source);
+  if (p.implement !== undefined) await writeFile(join(dir, ".env"), "GITLAB_PUSH_TOKEN=glpat-push-token-value\n");
   return configPath;
 };
 

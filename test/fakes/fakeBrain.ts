@@ -5,6 +5,7 @@ import type { Brain, BrainInput, BrainRun, BrainUsage } from "../../src/brain/ty
 export interface FakeBrainOptions {
   result?: unknown;
   writeFiles?: Record<string, string>;
+  editWorkspace?: Record<string, string>;
   fail?: boolean;
   usage?: BrainUsage;
 }
@@ -30,6 +31,11 @@ export class FakeBrain implements Brain {
     onMessage(JSON.stringify({ type: "fake", prompt: input.prompt }));
     for (const [file, content] of Object.entries(this.options.writeFiles ?? {})) {
       const target = join(input.artifactsDir, file);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, content);
+    }
+    for (const [file, content] of Object.entries(this.options.editWorkspace ?? {})) {
+      const target = join(input.workspacePath, file);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, content);
     }
