@@ -126,10 +126,13 @@ export class LinearTracker implements Tracker {
       const issue = await client.issue(issueId);
       const [labels, team] = await Promise.all([issue.labels(), issue.team]);
       const target = await labelIdFor(client, to, team?.id ?? null);
-      if (!labels.nodes.some((label) => label.id === target)) await client.issueAddLabel(issueId, target);
       const wanted = from.toLowerCase();
       const current = labels.nodes.find((label) => label.name.toLowerCase() === wanted);
-      if (current !== undefined) await client.issueRemoveLabel(issueId, current.id);
+      const added = labels.nodes.some((label) => label.id === target) ? [] : [target];
+      const removed = current === undefined || current.id === target ? [] : [current.id];
+      if (added.length === 0 && removed.length === 0) return;
+      // One update, never two: labels in an exclusive Linear group cannot both sit on an issue, even briefly.
+      await client.updateIssue(issueId, { addedLabelIds: added, removedLabelIds: removed });
     });
   }
 

@@ -200,6 +200,25 @@ describe("runJob", () => {
     expect(tracker.labelsOf("issue-1")).toEqual(["needs-triage"]);
   });
 
+  it("does not post the triage comment twice when a label-swap failure is retried", async () => {
+    tracker.addIssue({ ...issue, labels: ["needs-triage"] });
+    const ctx = claimJob({ ...createdTrigger, action: "triage" });
+    const brain = brainWith();
+    tracker.failNextSwap();
+    const first = await runJob(ctx, makeDeps(brain, { config: withLabels(makeConfig()) }));
+    expect(first).toEqual({ status: "publish_failed", error: "labels: Linear down" });
+    expect(tracker.comments("issue-1")).toHaveLength(1);
+
+    stores.jobs.finish(ctx.jobId, first);
+    stores.jobs.claimById(ctx.jobId);
+    stores.attempts.start(ctx.jobId);
+    const second = await publishOnly({ ...ctx, attempt: 2 }, makeDeps(brain, { config: withLabels(makeConfig()) }));
+
+    expect(second).toEqual({ status: "succeeded" });
+    expect(tracker.comments("issue-1")).toHaveLength(1);
+    expect(tracker.labelsOf("issue-1")).not.toContain("needs-triage");
+  });
+
   it("writes the section between markers and posts a comment for issue.created", async () => {
     const ctx = claimJob(createdTrigger);
 

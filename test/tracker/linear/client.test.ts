@@ -174,8 +174,7 @@ describe("LinearTracker.swapLabel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     clientFactoryMock.mockReturnValue(fakeClient);
-    issueAddLabelMock.mockResolvedValue(okPayload as never);
-    issueRemoveLabelMock.mockResolvedValue(okPayload as never);
+    updateIssueMock.mockResolvedValue(okPayload as never);
     issueMock.mockResolvedValue({
       labels: async () => ({ nodes: [{ id: "l-triage", name: "needs-triage" }] }),
       team: Promise.resolve({ id: "team-1" }),
@@ -188,18 +187,19 @@ describe("LinearTracker.swapLabel", () => {
     } as never);
   });
 
-  it("adds the team label first, then removes the old one", async () => {
+  it("adds the team label and removes the old one in a single update", async () => {
     await makeTracker().swapLabel("issue-1", "Needs-Triage", "needs-info");
     expect(issueLabelsMock).toHaveBeenCalledWith({ filter: { name: { eqIgnoreCase: "needs-info" } } });
-    expect(issueAddLabelMock).toHaveBeenCalledWith("issue-1", "l-info-team");
-    expect(issueRemoveLabelMock).toHaveBeenCalledWith("issue-1", "l-triage");
-    expect(issueAddLabelMock.mock.invocationCallOrder[0]).toBeLessThan(issueRemoveLabelMock.mock.invocationCallOrder[0] ?? 0);
+    expect(updateIssueMock).toHaveBeenCalledTimes(1);
+    expect(updateIssueMock).toHaveBeenCalledWith("issue-1", { addedLabelIds: ["l-info-team"], removedLabelIds: ["l-triage"] });
+    expect(issueAddLabelMock).not.toHaveBeenCalled();
+    expect(issueRemoveLabelMock).not.toHaveBeenCalled();
   });
 
   it("falls back to the workspace label", async () => {
     issueLabelsMock.mockResolvedValue({ nodes: [{ id: "l-info-workspace", team: undefined }] } as never);
     await makeTracker().swapLabel("issue-1", "needs-triage", "needs-info");
-    expect(issueAddLabelMock).toHaveBeenCalledWith("issue-1", "l-info-workspace");
+    expect(updateIssueMock).toHaveBeenCalledWith("issue-1", { addedLabelIds: ["l-info-workspace"], removedLabelIds: ["l-triage"] });
   });
 
   it("fails when the target label does not exist", async () => {
@@ -207,11 +207,29 @@ describe("LinearTracker.swapLabel", () => {
     await expect(makeTracker().swapLabel("issue-1", "needs-triage", "needs-info")).rejects.toThrow(
       'Linear label "needs-info" does not exist for this team or the workspace',
     );
-    expect(issueRemoveLabelMock).not.toHaveBeenCalled();
+    expect(updateIssueMock).not.toHaveBeenCalled();
   });
 
   it("skips the removal when the old label is absent", async () => {
     await makeTracker().swapLabel("issue-1", "ready-for-agent", "needs-info");
-    expect(issueRemoveLabelMock).not.toHaveBeenCalled();
+    expect(updateIssueMock).toHaveBeenCalledWith("issue-1", { addedLabelIds: ["l-info-team"], removedLabelIds: [] });
+  });
+
+  it("only removes the old label when the target is already on the issue", async () => {
+    issueMock.mockResolvedValue({
+      labels: async () => ({ nodes: [{ id: "l-triage", name: "needs-triage" }, { id: "l-info-team", name: "needs-info" }] }),
+      team: Promise.resolve({ id: "team-1" }),
+    } as never);
+    await makeTracker().swapLabel("issue-1", "needs-triage", "needs-info");
+    expect(updateIssueMock).toHaveBeenCalledWith("issue-1", { addedLabelIds: [], removedLabelIds: ["l-triage"] });
+  });
+
+  it("writes nothing when the swap is already done", async () => {
+    issueMock.mockResolvedValue({
+      labels: async () => ({ nodes: [{ id: "l-info-team", name: "needs-info" }] }),
+      team: Promise.resolve({ id: "team-1" }),
+    } as never);
+    await makeTracker().swapLabel("issue-1", "needs-triage", "needs-info");
+    expect(updateIssueMock).not.toHaveBeenCalled();
   });
 });

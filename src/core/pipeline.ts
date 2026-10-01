@@ -12,7 +12,7 @@ import { gatewayRoute, isGatewayIssue } from "./gateway.js";
 import { CLOSED_STATE_TYPES } from "./intake.js";
 import { renderPrompt } from "./prompt.js";
 import type { Redactor } from "./redact.js";
-import { buildTriageComment, buildEnrichmentSection, replaceSection } from "./render.js";
+import { alreadyCommented, buildTriageComment, buildEnrichmentSection, replaceSection } from "./render.js";
 import { captureReproFiles, isBugTicket, normalizeRepro, reproFilesDir } from "./repro.js";
 import { validateResult, type Repro, type StoredBrainResult } from "./result.js";
 import type { JobOutcome, RunContext } from "./types.js";
@@ -104,10 +104,13 @@ const uploadAttachments = async (deps: PipelineDeps, artifactsDir: string, resul
 const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainResult, sha: string, artifactsDir: string, extraNotes: string[] = []): Promise<JobOutcome> => {
   const { tracker, config, codehost } = deps;
   const result = redactResult(stored, deps.redactor);
+  let comments: ReadonlyArray<{ body: string }> = [];
   try {
     // The brain runs for minutes; a ticket closed meanwhile must not be written to.
-    const closed = closedError(ctx.identifier, (await tracker.fetchTicket(ctx.issueId)).state);
+    const latest = await tracker.fetchTicket(ctx.issueId);
+    const closed = closedError(ctx.identifier, latest.state);
     if (closed !== null) return { status: "failed", error: closed.message, retryable: false };
+    comments = latest.comments;
     const { uploaded, notes } = await uploadAttachments(deps, artifactsDir, result);
     const section = buildEnrichmentSection(result, uploaded, [...notes, ...extraNotes.map((note) => deps.redactor.redact(note))], {
       now: deps.now(),
@@ -127,7 +130,8 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainR
   const swap = ctx.trigger.kind !== "mr.review" && ctx.trigger.action === "triage" && labels !== undefined && result.triage !== null ? { labels, triage: result.triage } : null;
   let warning: string | undefined;
   try {
-    await tracker.postComment(ctx.issueId, buildTriageComment(result, ctx.jobId));
+    const body = buildTriageComment(result, ctx.jobId);
+    if (!alreadyCommented(comments, body)) await tracker.postComment(ctx.issueId, body);
   } catch (err) {
     // The verdict (and a needs-info ticket's questions) lives only in this comment: never move the label without it.
     if (swap !== null) return { status: "publish_failed", error: `comment: ${errorMessage(err)}` };

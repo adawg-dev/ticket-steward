@@ -360,6 +360,20 @@ describe("publishImplementOnly", () => {
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
   });
 
+  it("does not post the implement comment twice when a label-swap failure is retried", async () => {
+    const ctx = claim();
+    tracker.failNextSwap();
+    const first = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
+    expect(first).toEqual({ status: "publish_failed", error: "labels: Linear down" });
+    expect(tracker.comments("issue-1")).toHaveLength(1);
+
+    const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
+
+    expect(retry).toEqual({ status: "succeeded" });
+    expect(tracker.comments("issue-1")).toHaveLength(1);
+    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
+  });
+
   it("pushes from the bundle on retry after the first push was rejected", async () => {
     const allowPushes = await rejectPushes();
     const ctx = claim();

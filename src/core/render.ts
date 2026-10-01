@@ -78,6 +78,12 @@ export const replaceSection = (description: string, section: string): string => 
 };
 
 /** A stored result from before triage existed gets the old enrichment comment. */
+/** True when a comment with this body's first line (which names the job) is already on the ticket: a publish retry must not post it twice. */
+export const alreadyCommented = (comments: ReadonlyArray<{ body: string }>, body: string): boolean => {
+  const head = body.split("\n", 1)[0]?.trim() ?? "";
+  return head !== "" && comments.some((comment) => comment.body.split("\n", 1)[0]?.trim() === head);
+};
+
 export const buildTriageComment = (result: StoredBrainResult, jobId: number): string => {
   if (result.triage === null) return `Enrichment added (job ${jobId}, confidence ${result.confidence}). ${truncate(result.summary, SUMMARY_MAX)}`;
   const head = `Triage (job ${jobId}, confidence ${result.confidence}): `;

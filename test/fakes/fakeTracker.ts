@@ -68,7 +68,9 @@ export class FakeTracker implements Tracker {
   }
 
   async fetchTicket(issueId: string): Promise<TicketBundle> {
-    return structuredClone(this.issue(issueId));
+    const bundle = structuredClone(this.issue(issueId));
+    const posted = (this.issueComments.get(issueId) ?? []).map((body) => ({ author: "Ticket Steward", body, createdAt: "2026-01-01T00:00:00.000Z" }));
+    return { ...bundle, comments: [...bundle.comments, ...posted] };
   }
 
   async readDescription(issueId: string): Promise<string> {

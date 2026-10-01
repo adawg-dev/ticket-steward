@@ -229,7 +229,9 @@ its git work stops at pushing one new branch; the kickoff pipeline opens the MR.
 
 Create five labels in Linear at the workspace level (names match case-insensitively; override
 any of them under `tracker.labels`: `triage`, `implement`, `needsInfo`, `readyForHuman`,
-`implemented`):
+`implemented`). Putting the five in one Linear label group is fine and keeps a ticket on one
+stage at a time: the steward swaps a label in a single update, and a retried publish does not
+post its comment twice):
 
 | Label | Applied by | Meaning |
 | --- | --- | --- |

@@ -1,7 +1,7 @@
 import type { CodeHostConfig, LabelsConfig } from "../config/schema.js";
 import { closedReason } from "../core/intake.js";
 import type { Redactor } from "../core/redact.js";
-import { truncate } from "../core/render.js";
+import { alreadyCommented, truncate } from "../core/render.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
 import type { Tracker } from "../tracker/types.js";
@@ -51,15 +51,18 @@ export const publishImplement = async (input: {
   branchUrl: string | null;
 }): Promise<JobOutcome> => {
   const { ctx, tracker, labels, stored } = input;
+  let comments: ReadonlyArray<{ body: string }>;
   try {
     const latest = await tracker.fetchTicket(ctx.issueId);
     const closed = closedReason(ctx.identifier, latest.state);
     if (closed !== null) return { status: "failed", error: closed, retryable: false };
+    comments = latest.comments;
   } catch (err) {
     return { status: "publish_failed", error: `comment: ${errorMessage(err)}` };
   }
   try {
-    await tracker.postComment(ctx.issueId, input.redactor.redact(buildImplementComment({ jobId: ctx.jobId, stored, branch: input.branch, branchUrl: input.branchUrl })));
+    const body = input.redactor.redact(buildImplementComment({ jobId: ctx.jobId, stored, branch: input.branch, branchUrl: input.branchUrl }));
+    if (!alreadyCommented(comments, body)) await tracker.postComment(ctx.issueId, body);
   } catch (err) {
     return { status: "publish_failed", error: `comment: ${errorMessage(err)}` };
   }
