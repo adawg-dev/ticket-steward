@@ -279,6 +279,19 @@ describe("startWorker", () => {
     await handle.stop();
   });
 
+  it("fails a job with an unreadable stored trigger instead of leaving it running", async () => {
+    const badId = stores.jobs.enqueue(createdTrigger);
+    stores.db.prepare("UPDATE jobs SET trigger = ? WHERE id = ?").run("{not json", badId);
+    const laterId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    const handle = start();
+
+    await waitForStatus(laterId, "succeeded");
+    expect(stores.jobs.get(badId)?.status).toBe("failed");
+    expect(stores.jobs.get(badId)?.error).toContain("trigger");
+    expect(runJobMock).toHaveBeenCalledTimes(1);
+    await handle.stop();
+  });
+
   it("keeps the loop alive when claiming a job throws", async () => {
     const claimSpy = vi.spyOn(stores.jobs, "claimNext").mockImplementationOnce(() => {
       throw new Error("Intended Test Error");

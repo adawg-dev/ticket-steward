@@ -34,11 +34,14 @@ export interface Job {
   startedAt: string | null;
   finishedAt: string | null;
   notBefore: string | null;
-  /** Stored-result columns holding JSON the schemas reject; the matching field is null. Such a job must fail, not run. */
+  /**
+   * Stored columns holding JSON that cannot be read: a bad result is null, a bad trigger is a bare `cli` trigger built from
+   * the row's columns. Such a job must fail, not run.
+   */
   unreadable: StoredColumn[];
 }
 
-export type StoredColumn = "result" | "review_result" | "implement_result";
+export type StoredColumn = "trigger" | "result" | "review_result" | "implement_result";
 
 interface JobRow {
   id: number;
@@ -82,6 +85,22 @@ const readStored = <T>(raw: string | null, column: StoredColumn, schema: StoredS
   return null;
 };
 
+const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "mr.review"]);
+
+/** The stored trigger, or (noted in `unreadable`) a stand-in from the row's own columns when it is not a trigger object. */
+const readTrigger = (row: JobRow, unreadable: StoredColumn[]): TriggerEvent => {
+  try {
+    const value: unknown = JSON.parse(row.trigger);
+    if (typeof value === "object" && value !== null && "kind" in value && typeof value.kind === "string" && TRIGGER_KINDS.has(value.kind)) {
+      return value as TriggerEvent;
+    }
+  } catch {
+    // Falls through to the stand-in below.
+  }
+  unreadable.push("trigger");
+  return { kind: "cli", issueId: row.issue_id, identifier: row.identifier, teamKey: row.team_key };
+};
+
 const toJob = (row: JobRow): Job => {
   const unreadable: StoredColumn[] = [];
   return {
@@ -91,7 +110,7 @@ const toJob = (row: JobRow): Job => {
     teamKey: row.team_key,
     kind: row.kind,
     subject: row.subject,
-    trigger: JSON.parse(row.trigger) as TriggerEvent,
+    trigger: readTrigger(row, unreadable),
     status: row.status,
     attempts: row.attempts,
     result: readStored(row.result, "result", StoredBrainResultSchema, unreadable),

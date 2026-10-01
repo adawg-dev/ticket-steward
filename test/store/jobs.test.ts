@@ -51,6 +51,20 @@ describe("JobStore", () => {
     expect(job?.notBefore).toBeNull();
   });
 
+  it("loads a job whose stored trigger is unreadable and names the column", () => {
+    const good = stores.jobs.enqueue(createdEvent);
+    const bad = stores.jobs.enqueue(secondEvent);
+    stores.db.prepare("UPDATE jobs SET trigger = ? WHERE id = ?").run("{not json", bad);
+
+    expect(stores.jobs.list({ limit: 10 }).map((job) => job.id)).toEqual([bad, good]);
+    const job = stores.jobs.get(bad);
+    expect(job?.unreadable).toEqual(["trigger"]);
+    expect(job?.issueId).toBe("issue-2");
+    expect(job?.trigger).toEqual({ kind: "cli", issueId: "issue-2", identifier: job?.identifier, teamKey: job?.teamKey });
+    stores.db.prepare("UPDATE jobs SET trigger = ? WHERE id = ?").run('{"kind":"nope"}', good);
+    expect(stores.jobs.get(good)?.unreadable).toEqual(["trigger"]);
+  });
+
   it("claimNext returns the oldest queued job and marks it running", () => {
     const first = stores.jobs.enqueue(createdEvent);
     stores.jobs.enqueue(secondEvent);
