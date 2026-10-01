@@ -61,20 +61,38 @@ describe("stageAndGuard", () => {
   it("finds a secret in a binary file", async () => {
     await writeFile(join(worktree.path, "blob.bin"), Buffer.from("\0sk-live-abcdef123456\0"));
     const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value from the overlay", detail: "blob.bin" });
+    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "blob.bin" });
   });
 
   it("finds a secret when .gitattributes marks the file -diff", async () => {
     await writeFile(join(worktree.path, ".gitattributes"), "*.ts -diff\n");
     await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
     const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value from the overlay", detail: "src/a.ts" });
+    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
   });
 
   it("refuses a diff containing a secret value and names the file, not the value", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
     const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value from the overlay", detail: "src/a.ts" });
+    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
+  });
+  it("finds a secret on an added line that starts with ++", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 1;\n++sk-live-abcdef123456\n");
+    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
+  });
+
+  it("finds a secret in a file whose name is pathspec magic and names the file", async () => {
+    await writeFile(join(worktree.path, ":(glob)zz"), "sk-live-abcdef123456\n");
+    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: ":(glob)zz" });
+  });
+
+  it("names a file with a quoted name", async () => {
+    await writeFile(join(worktree.path, 'tab\t"q"\u00e9.txt'), "sk-live-abcdef123456\n");
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: 'tab\t"q"\u00e9.txt' });
   });
 });
 
@@ -137,7 +155,15 @@ describe("guardCommit", () => {
     await git(worktree.path, ["rm", "--cached", "--quiet", ".env"]);
     await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--amend", "--no-gpg-sign", "-m", "c"]);
     const amended = await git(worktree.path, ["rev-parse", "HEAD"]);
-    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha: amended, ...guard })).toEqual({ ok: false, reason: "the change contains a secret value from the overlay", detail: "src/a.ts" });
+    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha: amended, ...guard })).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
+  });
+
+  it("refuses a commit whose message carries a secret value, never naming the value", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await stageAndGuard({ worktreePath: worktree.path, ...guard });
+    await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--no-gpg-sign", "-m", "c\n\nkey: sk-live-abcdef123456"]);
+    const sha = await git(worktree.path, ["rev-parse", "HEAD"]);
+    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: false, reason: "the commit message contains a secret value", detail: "commit message" });
   });
 
   it("refuses a commit whose parent is not the base", async () => {

@@ -195,7 +195,7 @@ describe("runImplement", () => {
     const ctx = claim();
     const brain = editingBrain(implemented, async (w) => writeFile(join(w, "src/adapter.ts"), 'export const s = "supersecretvalue123";\n'));
     const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value from the overlay" });
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value" });
     expect(tracker.comments("issue-1")[0]).not.toContain("supersecretvalue123");
   });
 
@@ -228,9 +228,29 @@ describe("runImplement", () => {
 
     const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
 
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value from the overlay" });
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value" });
     expect(tracker.comments("issue-1")[0]).toContain("src/leak.txt");
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
+  });
+
+  it("hands back when a commit-msg hook appends a secret to the message, pushing nothing", async () => {
+    await writeFile(join(repo.overlayDir, ".env"), "API_SECRET=supersecretvalue123\n");
+    const ctx = claim();
+    const brain = editingBrain(implemented, async (w) => {
+      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
+      await mkdir(join(w, ".husky"), { recursive: true });
+      // Read from the overlay at commit time, so the hook file itself carries no secret for the change guard to see.
+      await writeFile(join(w, ".husky/commit-msg"), 'cut -d= -f2 .env >> "$1"\n');
+    });
+
+    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the commit message contains a secret value" });
+    expect(tracker.comments("issue-1")[0]).toContain("commit message");
+    expect(tracker.comments("issue-1")[0]).not.toContain("supersecretvalue123");
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
+    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
+    expect(stores.jobs.get(ctx.jobId)?.pushedAt ?? null).toBeNull();
   });
 
   it("hands back when the change contains one of the steward's own secrets", async () => {
@@ -240,7 +260,7 @@ describe("runImplement", () => {
 
     const outcome = await runImplement(ctx, deps);
 
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value from the overlay" });
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value" });
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });
 

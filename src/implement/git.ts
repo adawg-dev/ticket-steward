@@ -16,6 +16,25 @@ const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")
 export type GuardInput = { overlayFiles: string[]; skillsPrefix: string; secretValues: string[] };
 
 const SECRET_DIFF_FLAGS = ["--no-color", "--unified=0", "--text", "--no-ext-diff", "--no-textconv"];
+/** Each path is passed back to git as a pathspec; literal, so a name like `:(glob)x` names that file and not a pattern. */
+const LITERAL_PATHSPECS = { GIT_LITERAL_PATHSPECS: "1" };
+
+/**
+ * The added lines of a diff, read by position: `---`/`+++` are file headers only before a file's first `@@` hunk;
+ * inside a hunk every `+` line is content, including one whose text starts with `++`.
+ */
+export const addedLines = (diff: string): string[] => {
+  const added: string[] = [];
+  let inHunk = false;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff ")) inHunk = false;
+    else if (line.startsWith("@@")) inHunk = true;
+    else if (inHunk && line.startsWith("+")) added.push(line.slice(1));
+  }
+  return added;
+};
+
+const usableSecrets = (values: string[]): string[] => values.filter((value) => value.length >= MIN_SECRET_LENGTH);
 
 /**
  * The shared path guard and secret scan, over `git diff <range>`: `--cached` for the index, `<base> <sha>` for a commit.
@@ -27,15 +46,14 @@ const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: R
   const overlay = new Set(input.overlayFiles);
   const copied = paths.filter((path) => overlay.has(path) || path.startsWith(input.skillsPrefix));
   if (copied.length > 0) return { ok: false, reason: "the change would commit files the steward copied in", detail: copied.join("\n") };
-  const secrets = input.secretValues.filter((value) => value.length >= MIN_SECRET_LENGTH);
+  const secrets = usableSecrets(input.secretValues);
   if (secrets.length > 0) {
     const leaking: string[] = [];
     for (const path of paths) {
-      const diff = await git(["diff", ...SECRET_DIFF_FLAGS, ...range, "--", path], cwd, env);
-      const added = diff.stdout.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++"));
-      if (added.some((line) => secrets.some((secret) => line.includes(secret)))) leaking.push(path);
+      const diff = await git(["diff", ...SECRET_DIFF_FLAGS, ...range, "--", path], cwd, { ...env, ...LITERAL_PATHSPECS });
+      if (addedLines(diff.stdout).some((line) => secrets.some((secret) => line.includes(secret)))) leaking.push(path);
     }
-    if (leaking.length > 0) return { ok: false, reason: "the change contains a secret value from the overlay", detail: leaking.join("\n") };
+    if (leaking.length > 0) return { ok: false, reason: "the change contains a secret value", detail: leaking.join("\n") };
   }
   return { ok: true, paths };
 };
@@ -48,7 +66,8 @@ export const stageAndGuard = async (input: GuardInput & { worktreePath: string }
 
 /**
  * Re-checks what was actually committed, since the repo's hooks (which the agent can edit) run between the staged
- * guard and the commit: the commit must sit directly on `baseSha`, and `baseSha..sha` must pass the same guard.
+ * guard and the commit: the commit must sit directly on `baseSha`, `baseSha..sha` must pass the same guard, and the
+ * commit message must carry no secret value.
  * Replace refs are ignored, so the diff is of the real objects that get pushed.
  */
 export const guardCommit = async (input: GuardInput & { worktreePath: string; baseSha: string; sha: string }): Promise<GuardResult> => {
@@ -57,7 +76,16 @@ export const guardCommit = async (input: GuardInput & { worktreePath: string; ba
   if (parents.length !== 1 || parents[0] !== input.baseSha) {
     return { ok: false, reason: "the commit is not a single commit on top of the base", detail: `parents: ${parents.join(" ") || "(none)"}` };
   }
-  return guardDiff(input.worktreePath, [input.baseSha, input.sha], input, env);
+  const diffed = await guardDiff(input.worktreePath, [input.baseSha, input.sha], input, env);
+  if (!diffed.ok) return diffed;
+  // The agent wrote the message and its commit hooks could rewrite it: it is pushed too, so it gets the same scan.
+  const raw = await gitOrThrow(["cat-file", "commit", input.sha], input.worktreePath, env);
+  const headerEnd = raw.indexOf("\n\n");
+  const message = headerEnd === -1 ? "" : raw.slice(headerEnd + 2);
+  if (usableSecrets(input.secretValues).some((secret) => message.includes(secret))) {
+    return { ok: false, reason: "the commit message contains a secret value", detail: "commit message" };
+  }
+  return diffed;
 };
 
 /**
