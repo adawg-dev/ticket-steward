@@ -332,9 +332,17 @@ describe("implement jobs", () => {
     expect(stores.jobs.findQueued("issue-1")).toBeNull();
     expect(stores.jobs.findQueued("issue-1", "implement")?.id).toBe(id);
     stores.jobs.claimById(id);
+    stores.jobs.markPushed(id);
     stores.jobs.finish(id, { status: "succeeded" });
     expect(stores.jobs.hasSucceeded("issue-1")).toBe(false);
     expect(stores.jobs.hasSucceeded("issue-1", "implement")).toBe(true);
+  });
+
+  it("does not count a handed-back implement job (nothing pushed) as implemented", () => {
+    const id = stores.jobs.enqueue(implementEvent);
+    stores.jobs.claimById(id);
+    stores.jobs.finish(id, { status: "succeeded", warning: "handed back: the agent could not finish" });
+    expect(stores.jobs.hasSucceeded("issue-1", "implement")).toBe(false);
   });
 
   it("records the stored result, commit and push", () => {

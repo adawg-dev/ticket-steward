@@ -251,8 +251,8 @@ ready-for-agent ──implement job──▶ agent-implemented  (branch pushed)
 ```
 
 A label counts only when it is first added (or present when the ticket is created); removing
-and re-adding it does not re-run a ticket that already has an Enrichment section (triage) or a
-succeeded implement job. With an `implement` block configured, an update that adds both labels
+and re-adding it does not re-run a ticket that already has an Enrichment section (triage) or an
+implement job that pushed a branch (a hand-back does not count, so adding `ready-for-agent` again after fixing the ticket re-runs it). With an `implement` block configured, an update that adds both labels
 runs implement only; without one, `ready-for-agent` is not a trigger and the ticket triages.
 Triage is the enrich job plus a verdict. Labels change last in every publish, so a failure
 earlier leaves the trigger label on the ticket and the job `publish_failed`

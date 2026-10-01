@@ -184,7 +184,8 @@ export class JobStore {
       "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' AND kind = ? ORDER BY id LIMIT 1",
     );
     this.existsSucceeded = db.prepare<[string, IssueJobKind], { found: number }>(
-      "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded' AND kind = ?) AS found",
+      // A handed-back implement job also finishes succeeded; only one that pushed a branch implemented the ticket.
+      "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded' AND kind = ? AND (kind <> 'implement' OR pushed_at IS NOT NULL)) AS found",
     );
     this.selectQueuedBySubject = db.prepare<[string], JobRow>(
       "SELECT * FROM jobs WHERE subject = ? AND status = 'queued' ORDER BY id LIMIT 1",
