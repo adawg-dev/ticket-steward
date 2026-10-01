@@ -8,6 +8,7 @@ import { openStores } from "../../src/store/index.js";
 import type { TicketBundle } from "../../src/tracker/types.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
+import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { ExitSignal, makeContext, tmpConfigDir, waitFor, writeConfig } from "./helpers.js";
@@ -197,5 +198,24 @@ describe("steward enrich (inline)", () => {
 
     expect(context.stdout()).toBe(`job 1: publish-only (result stored at ${repo.sha})\njob 1 running (attempt 2)\njob 1 succeeded\n`);
     expect(tracker.getDescription("issue-1").startsWith("Edited by a human.\n\n<!-- ticket-steward:begin -->")).toBe(true);
+  });
+
+  it("runs an inline job on slot 1 and brings the slot down afterwards", async () => {
+    const runner = fakeSlotRunner();
+    configPath = await writeConfig(dir, {
+      dataDir: repo.dataDir,
+      overlayDir: repo.overlayDir,
+      promptPath: repo.promptPath,
+      fetchUrl: repo.repo,
+      port: null,
+      serverPort,
+      slots: { count: 2, appPortBase: (await freeTcpPort()) - 1, env: {} },
+    });
+    const context = makeContext({ factories: { tracker, brain: new FakeBrain({ result: brainResult }), codehost: new FakeCodeHost(), slotRunner: runner.run } });
+
+    await buildProgram(context.ctx).parseAsync(["node", "steward", "--config", configPath, "enrich", "API-1"]);
+
+    expect(context.stdout()).toBe("job 1 running (attempt 1)\njob 1 succeeded\n");
+    expect(runner.calls).toEqual([["down", "1"], ["up", "1"], ["ports", "1"], ["down", "1"]]);
   });
 });

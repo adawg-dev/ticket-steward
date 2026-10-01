@@ -145,8 +145,9 @@ steward overlay sync --from /path/to/sandbox-checkout --allow-pattern 'prod-read
 ```
 
 Per job, every overlay file is copied into the worktree at the same relative path, mode
-0600, with `localhost:3000` / `127.0.0.1:3000` rewritten to the job's port when
-`workspace.portRewrite` is set.
+0600, with `localhost:3000` / `127.0.0.1:3000` rewritten to the job's port (`workspace.port`, or the
+slot's app port with `slots`) when `workspace.portRewrite` is set. With `slots`, `slots.env` then
+overrides keys in the job's copy (§1.11).
 
 ### 1.6 Public URL
 
@@ -361,7 +362,9 @@ webhook secret is set and `GITLAB_TOKEN` has the `api` scope and acts as `review
 set, all five labels exist in Linear; with `implement` configured, `GITLAB_PUSH_TOKEN` can `ls-remote` the repo (a read, so it
 cannot prove Developer access; the first real push does) and, for GitLab, `implement.protectedBranches` are protected with
 no Developer-role or project-bot push or merge grant (read with `GITLAB_TOKEN`); Playwright's Chromium is installed;
-`workspace.port` is free.
+`workspace.port` is free, or, with `slots` (§1.11): `/usr/local/sbin/steward-slot` is root-owned and not
+group- or world-writable, `slots.socket` exists, is a socket and answers `check`, every slot's app and
+service ports are free (a slot left up is named), and every `slots.env` key is defined in the overlay.
 
 ```bash
 sudo cp ops/ticket-steward.service /etc/systemd/system/ticket-steward.service
@@ -427,6 +430,97 @@ Review requires `codehost.kind: "gitlab"`.
 6. **Test.** Add the steward as a reviewer on an MR whose branch or title contains a
    ticket key (for example `api-123-fix-stream`). Within a few minutes the MR gets a
    summary note and any inline comments, and `steward jobs` lists a `review` job.
+
+### 1.11 Worker slots (optional)
+
+Without `slots`, the worker runs one job at a time on `workspace.port`, against whatever the overlay's
+env files point at. With `slots`, it runs `slots.count` jobs at once (1–9). Each job gets a **slot**: an
+app port (`slots.appPortBase + n`) and three containers created fresh for that job and removed when it
+ends: Postgres 17 with TimescaleDB (databases `concentrate` and `concentrate_tg`), Redis and RabbitMQ.
+`slots.env` rewrites the job's copy of the overlay so every service the job starts talks to its slot,
+never to Timescale Cloud, the dev Redis cluster, the dev RabbitMQ or a remote Postgres. Two jobs for the
+same ticket (or the same merge request) never run at once.
+
+**Why a socket-activated root helper.** The agent runs as `steward`, and Docker access is root access, so
+`steward` stays out of the `docker` group, and the steward unit keeps `NoNewPrivileges=yes` (no sudo, no
+setuid). Instead systemd listens on `/run/steward-slot.sock` (owner root, group `steward`, mode 0660) and,
+for each connection, starts one `steward-slot@.service` instance that runs
+`/usr/local/sbin/steward-slot --socket` as root. The helper reads one request line, `<command> <n>` (`up|down|status|ports
+<n>`, or `check`; `n` 1–9, at most 64 bytes), runs it, and replies with the command's output followed by a last line `exit <code>`,
+and refuses anything else with `exit 2`. The brain's policy also denies `sudo` and `docker`. The accepted
+risk: the agent runs as `steward`, so it can connect to the socket and `down` another slot; that slot's
+job then fails and is retried.
+
+**Install** (as root, from a checkout of this repo):
+
+```bash
+install -o root -g root -m 0755 ops/steward-slot /usr/local/sbin/steward-slot
+install -d -o root -g root -m 0755 /etc/ticket-steward/slots /etc/ticket-steward/slots/init /etc/ticket-steward/slots/docker
+install -o root -g root -m 0644 ops/slots-compose.yml /etc/ticket-steward/slots/compose.yml
+install -o root -g root -m 0644 ops/slots-init/01-databases.sql /etc/ticket-steward/slots/init/01-databases.sql
+install -o root -g root -m 0644 ops/steward-slot.socket ops/steward-slot@.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now steward-slot.socket
+docker pull timescale/timescaledb-ha:pg17-ts2.27-all
+docker pull redis:7-alpine
+docker pull rabbitmq:4.2.0-management
+printf 'check\n' | sudo -u steward socat - UNIX-CONNECT:/run/steward-slot.sock   # prints ok, then exit 0
+```
+
+**Config.** Add `slots` and remove `workspace.port` (config load rejects it next to `slots`). Keep
+`workspace.portRewrite`: it now rewrites `localhost:<from>` to the slot's app port, a substring rewrite
+that keeps the other origins of a `CORS_ORIGIN` list.
+
+```ts
+slots: {
+  count: 2,
+  appPortBase: 4100,           // slot n's app port is 4100 + n
+  // socket: "/run/steward-slot.sock", upTimeoutSeconds: 180 (defaults)
+  env: {
+    DB_HOST: "localhost",
+    DB_PORT: "{{postgres}}",
+    DB_NAME: "concentrate",
+    DB_USER: "postgres",
+    DB_PASSWORD: "steward-slot",
+    PGPASSWORD: "steward-slot",
+    DB_SSL: "false",
+    TG_READ_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
+    TG_WRITE_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
+    TG_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
+    REDIS_URL: "redis://localhost:{{redis}}",
+    REDIS_CLUSTER_NODES: null, // deleted: kickoff's client then uses REDIS_URL
+    REDIS_PASSWORD: null,
+    RABBITMQ_URL: "amqp://steward:steward-slot@localhost:{{rabbitmq}}",
+  },
+},
+```
+
+Each `env` key is replaced in every copied overlay file that defines it (a `KEY=value` line, optionally
+`export `-prefixed); `null` removes the line; keys are never added, and a key no overlay file defines
+fails the job (not retried) and doctor, by name. Templates: `{{app}}`, `{{postgres}}`, `{{redis}}`,
+`{{rabbitmq}}`; any other `{{name}}` fails config load. The overlay directory itself never changes, so
+the redactor and the implement secret guard still know the remote credentials the overrides replaced.
+Host ports come from the helper's `ports <n>`: Postgres `15032 + 100n`, Redis `16079 + 100n`, RabbitMQ
+`15072 + 100n`, all on 127.0.0.1. The slot credentials are throwaway, not secrets.
+
+Per job: free the app port, `down` then `up` the slot (abandoned after `upTimeoutSeconds`; the helper
+instance itself is capped at 300 s), create the worktree, copy the overlay with the overrides, run
+`workspace.setup` (`reset-dbs.sh` reads `e2e/user/.env`, which now holds the slot's values), run the
+brain with `STEWARD_PORT` set to the slot's app port, publish, and `down` the slot. A slot that does not
+come up fails the job as retryable with `setup failed: slot <n>: …` and the helper's output tail in the
+attempt's `setupTail`. `steward serve` brings every slot down when it starts and when it stops;
+retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward enrich|implement KEY` without serve runs on slot 1.
+
+**Troubleshooting.**
+
+- `steward-slot status <n>` (as root) lists a slot's containers; `steward-slot down <n>` removes them.
+- `cannot reach the slot helper at /run/steward-slot.sock: connect ENOENT`: the socket unit is not running;
+  `systemctl enable --now steward-slot.socket`. `EACCES`: the steward user is not in group `steward`, or
+  `SocketGroup`/`SocketMode` were changed.
+- `helper closed without an exit status`: the helper instance died; `journalctl -u 'steward-slot@*'`.
+- Doctor reports `slot <n> is up` while serve is stopped: a crashed run left it; `steward-slot down <n>`.
+- A port in use that is not a slot: `ss -ltnp 'sport = :<port>'` names the holder; move `appPortBase` or stop it.
+- `steward jobs` prints `# running: slot 1 job 12, …` while serve runs; `/health` has the same list under `worker.running`.
 
 ## 2. Why the overlay holds sandbox credentials
 

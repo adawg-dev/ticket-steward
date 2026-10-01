@@ -273,4 +273,21 @@ describe("steward jobs", () => {
 
     expect(stdout()).toBe("removed 0 worktrees, 0 job directories, 0 deliveries\n");
   });
+
+  it("prints the running slots first when serve is up", async () => {
+    const workerUp: typeof fetch = async (input) => {
+      if (String(input) !== localHealthUrl(3020)) throw new Error("Intended Test Error");
+      return new Response(JSON.stringify({ ok: true, worker: { running: [{ slot: 1, jobId: 12 }, { slot: 2, jobId: 14 }] } }), { status: 200 });
+    };
+    const { stdout, done } = run(["jobs"], workerUp);
+    await done;
+    expect(stdout()).toBe("# running: slot 1 job 12, slot 2 job 14\n");
+  });
+
+  it("prints running: none for an idle serve", async () => {
+    const idle: typeof fetch = async () => new Response(JSON.stringify({ ok: true, worker: { running: [] } }), { status: 200 });
+    const { stdout, done } = run(["jobs"], idle);
+    await done;
+    expect(stdout()).toBe("# running: none\n");
+  });
 });

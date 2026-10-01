@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import type { Command } from "commander";
+import { z } from "zod";
 import { openStores, type Job, type JobStatus } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 import { fail, loadFromProgram, println, type CliContext } from "./context.js";
@@ -48,6 +49,21 @@ const pretty = (value: unknown): string => JSON.stringify(value, null, 2);
 
 const listArtifacts = async (dir: string): Promise<string[]> => (existsSync(dir) ? (await readdir(dir)).sort() : []);
 
+const HealthWorker = z.object({ worker: z.object({ running: z.array(z.object({ slot: z.number(), jobId: z.number() })) }) });
+
+/** The running slots as `steward serve` reports them; null when serve does not answer. */
+const runningLine = async (ctx: CliContext, port: number): Promise<string | null> => {
+  try {
+    const response = await ctx.fetchImpl(localHealthUrl(port), { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+    const parsed = HealthWorker.safeParse(await response.json());
+    if (!parsed.success) return null;
+    const { running } = parsed.data.worker;
+    return `# running: ${running.length === 0 ? "none" : running.map(({ slot, jobId }) => `slot ${slot} job ${jobId}`).join(", ")}`;
+  } catch {
+    return null;
+  }
+};
+
 export const registerJobs = (program: Command, ctx: CliContext): void => {
   const jobs = program
     .command("jobs")
@@ -57,6 +73,8 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .action(async (opts: { status?: JobStatus; limit: number }) => {
       const { config } = await loadFromProgram(program, ctx);
       const rows = openStores(config.dataDir).jobs.list({ ...(opts.status === undefined ? {} : { status: opts.status }), limit: opts.limit });
+      const running = await runningLine(ctx, config.server.port);
+      if (running !== null) println(ctx, running);
       for (const job of rows) println(ctx, jobLine(job));
     });
 

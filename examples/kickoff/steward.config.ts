@@ -16,7 +16,6 @@ export default defineConfig({
     setup: ["bash /etc/ticket-steward/reset-dbs.sh", "pnpm install --frozen-lockfile --ignore-scripts", "pnpm turbo build --filter='./packages/*'"],
     setupTimeoutMinutes: 15,
     portRewrite: { from: 3000 },
-    port: 4100,
     keepOnFailure: true,
   },
   retention: { keptWorktrees: 3, days: 30 },
@@ -30,5 +29,27 @@ export default defineConfig({
     prompt: "./prompts/implement.md",
     checks: ["pnpm turbo check-types lint --filter='...[{{baseSha}}]'"],
     commitAuthor: { name: "Ticket Steward", email: "steward@concentrate.ai" },
+  },
+  // Parallel jobs, each on fresh local Postgres+TimescaleDB, Redis and RabbitMQ containers (docs/ops.md §1.11).
+  // Without this block, put `port: 4100` back in workspace and jobs run one at a time against the overlay's services.
+  slots: {
+    count: 2,
+    appPortBase: 4100,
+    env: {
+      DB_HOST: "localhost",
+      DB_PORT: "{{postgres}}",
+      DB_NAME: "concentrate",
+      DB_USER: "postgres",
+      DB_PASSWORD: "steward-slot",
+      PGPASSWORD: "steward-slot",
+      DB_SSL: "false",
+      TG_READ_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
+      TG_WRITE_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
+      TG_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
+      REDIS_URL: "redis://localhost:{{redis}}",
+      REDIS_CLUSTER_NODES: null, // deleted: kickoff's client then uses REDIS_URL
+      REDIS_PASSWORD: null,
+      RABBITMQ_URL: "amqp://steward:steward-slot@localhost:{{rabbitmq}}",
+    },
   },
 });

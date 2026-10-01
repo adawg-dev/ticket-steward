@@ -12,6 +12,7 @@ import { createLinearTracker } from "../tracker/linear/index.js";
 import type { Tracker } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
 import { injectToken, Mirror } from "../workspace/mirror.js";
+import { SlotClient } from "../workspace/slots.js";
 import type { CliContext } from "./context.js";
 import { binPath, mirrorPath } from "./paths.js";
 
@@ -60,6 +61,8 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promi
     now: () => new Date(),
     ...(review === undefined ? {} : { review }),
     ...(injectedBrain === undefined ? {} : brainRunner(injectedBrain)),
+    // serve gives each worker loop its own slot; inline runs (enrich|implement KEY, jobs retry) use slot 1 under run.lock.
+    ...(config.slots === undefined ? {} : { slot: { n: 1, client: new SlotClient(config.slots, ctx.factories?.slotRunner) } }),
   };
   return { loaded, stores, tracker, deps };
 };
