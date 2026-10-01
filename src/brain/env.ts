@@ -17,7 +17,8 @@ const credentialEnv = (secrets: Secrets, brain: BrainConfig): Record<string, str
   return env;
 };
 
-export const buildBrainEnv = (secrets: Secrets, brain: BrainConfig, port: number): Record<string, string> => ({
+/** The job's process env without any credential: setup, checks and commit hooks run with this. */
+export const buildWorkspaceEnv = (port: number): Record<string, string> => ({
   PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
   HOME: process.env.HOME ?? homedir(),
   LANG: process.env.LANG ?? "C.UTF-8",
@@ -28,5 +29,9 @@ export const buildBrainEnv = (secrets: Secrets, brain: BrainConfig, port: number
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_TERMINAL_PROMPT: "0",
   CI: "1",
+});
+
+export const buildBrainEnv = (secrets: Secrets, brain: BrainConfig, port: number): Record<string, string> => ({
+  ...buildWorkspaceEnv(port),
   ...credentialEnv(secrets, brain),
 });

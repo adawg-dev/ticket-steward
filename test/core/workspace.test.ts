@@ -1,6 +1,8 @@
 import type { PipelineDeps } from "../../src/core/deps.js";
-import { jobPaths } from "../../src/core/workspace.js";
+import { join } from "node:path";
+import { brainInput, jobPaths } from "../../src/core/workspace.js";
 import type { RunContext } from "../../src/core/types.js";
+import type { Worktree } from "../../src/workspace/worktree.js";
 
 const ctx = (dryRun: boolean): RunContext => ({
   jobId: 12,
@@ -18,6 +20,7 @@ describe("jobPaths", () => {
   it("names the worktree after the job and attempt", () => {
     expect(jobPaths(ctx(false), deps)).toEqual({
       worktreeName: "12-2",
+      jobDir: "/data/jobs/12",
       workRoot: "/data/work",
       artifactsDir: "/data/jobs/12/artifacts",
       transcriptPath: "/data/jobs/12/attempt-2.jsonl",
@@ -26,5 +29,37 @@ describe("jobPaths", () => {
 
   it("uses a pid-scoped worktree for dry runs", () => {
     expect(jobPaths(ctx(true), deps).worktreeName).toBe(`dry-${process.pid}`);
+  });
+
+  it("exposes the job directory", () => {
+    expect(jobPaths(ctx(false), deps).jobDir).toBe(join(deps.config.dataDir, "jobs", String(ctx(false).jobId)));
+  });
+});
+
+describe("brainInput", () => {
+  const fullDeps = {
+    config: {
+      dataDir: "/data",
+      brain: { kind: "claude-code", model: "claude-test", maxTurns: 80, timeoutMinutes: 30 },
+      workspace: { overlayDir: "/overlay" },
+    },
+    mirror: { path: "/mirror.git" },
+    binPath: "/bin/steward",
+    configPath: "/etc/steward/config.json",
+  } as unknown as PipelineDeps;
+  const worktree: Worktree = { path: "/data/work/12-2", sha: "abc123", destroy: async () => undefined };
+  const paths = jobPaths(ctx(false), fullDeps);
+
+  it("uses the configured brain limits by default", () => {
+    const input = brainInput(fullDeps, paths, worktree, "prompt", {}, "enrich");
+    expect(input.timeoutMs).toBe(1_800_000);
+    expect(input.maxTurns).toBe(80);
+  });
+
+  it("uses per-kind limits when given", () => {
+    const input = brainInput(fullDeps, paths, worktree, "prompt", {}, "implement", { timeoutMinutes: 60, maxTurns: 150 });
+    expect(input.timeoutMs).toBe(3_600_000);
+    expect(input.maxTurns).toBe(150);
+    expect(input.output).toBe("implement");
   });
 });

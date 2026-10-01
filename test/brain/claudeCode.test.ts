@@ -2,6 +2,7 @@ import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createClaudeCodeBrain, type QueryImpl } from "../../src/brain/claudeCode.js";
 import type { BrainInput } from "../../src/brain/types.js";
 import { brainResultJsonSchema } from "../../src/core/result.js";
+import { implementResultJsonSchema } from "../../src/implement/result.js";
 import { reviewResultJsonSchema } from "../../src/review/result.js";
 
 const input: BrainInput = {
@@ -107,5 +108,14 @@ describe("claude-code brain", () => {
 
     const captured = queryMock.mock.calls[0]?.[0].options;
     expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: reviewResultJsonSchema });
+  });
+
+  it("asks for the implement schema when the input is an implement", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
+
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run({ ...input, output: "implement" }, onMessage);
+
+    const captured = queryMock.mock.calls[0]?.[0].options;
+    expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: implementResultJsonSchema });
   });
 });

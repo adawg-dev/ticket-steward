@@ -20,6 +20,7 @@ import type { JobOutcome, RunContext } from "./types.js";
 
 export interface JobPaths {
   worktreeName: string;
+  jobDir: string;
   workRoot: string;
   artifactsDir: string;
   transcriptPath: string;
@@ -35,6 +36,7 @@ export const errorMessage = (err: unknown): string => (err instanceof Error ? er
 export const jobPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths => {
   const jobDir = join(deps.config.dataDir, "jobs", String(ctx.jobId));
   return {
+    jobDir,
     worktreeName: ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`,
     workRoot: join(deps.config.dataDir, "work"),
     artifactsDir: join(jobDir, "artifacts"),
@@ -105,7 +107,7 @@ const stewardSkillNames = (skillsDir: string | undefined): string[] =>
         .map((entry) => entry.name)
         .sort();
 
-export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktree, prompt: string, env: Record<string, string>, output: BrainOutput): BrainInput => {
+export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktree, prompt: string, env: Record<string, string>, output: BrainOutput, limits?: { timeoutMinutes: number; maxTurns: number }): BrainInput => {
   const { config, mirror } = deps;
   return {
     workspacePath: worktree.path,
@@ -113,8 +115,8 @@ export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktr
     transcriptPath: paths.transcriptPath,
     prompt,
     env,
-    timeoutMs: config.brain.timeoutMinutes * MINUTE_MS,
-    maxTurns: config.brain.maxTurns,
+    timeoutMs: (limits?.timeoutMinutes ?? config.brain.timeoutMinutes) * MINUTE_MS,
+    maxTurns: limits?.maxTurns ?? config.brain.maxTurns,
     model: config.brain.model,
     ...(config.brain.kind === "openai-agents" && config.brain.reasoningEffort !== undefined ? { reasoningEffort: config.brain.reasoningEffort } : {}),
     mcpServers: {

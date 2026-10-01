@@ -1,4 +1,4 @@
-import { buildBrainEnv } from "../../src/brain/env.js";
+import { buildBrainEnv, buildWorkspaceEnv } from "../../src/brain/env.js";
 import type { BrainConfig } from "../../src/config/schema.js";
 
 const BASE_KEYS = ["CI", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "HOME", "LANG", "NODE_ENV", "PATH", "PORT", "STEWARD_PORT", "TERM"];
@@ -56,5 +56,11 @@ describe("buildBrainEnv", () => {
   it("openai-agents omits OPENAI_BASE_URL when it is not configured", () => {
     const env = buildBrainEnv({ OPENAI_API_KEY: allSecrets.OPENAI_API_KEY, ANTHROPIC_API_KEY: allSecrets.ANTHROPIC_API_KEY }, openaiAgents, 4100);
     expect(Object.keys(env).sort()).toEqual([...BASE_KEYS.slice(0, 6), "OPENAI_API_KEY", ...BASE_KEYS.slice(6)]);
+  });
+
+  it("builds a workspace env without any credentials", () => {
+    const env = buildWorkspaceEnv(4100);
+    expect(env.STEWARD_PORT).toBe("4100");
+    expect(Object.keys(env).filter((key) => /KEY|TOKEN|SECRET/.test(key))).toEqual([]);
   });
 });
