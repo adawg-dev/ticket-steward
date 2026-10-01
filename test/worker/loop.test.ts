@@ -148,6 +148,9 @@ const heldRuns = () => {
 
 const issue2 = { ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" };
 
+/** The helper serves slots 1-9; down covers all of them so slots the agent brought up itself are cleaned too. */
+const ALL_SLOTS_DOWN = Array.from({ length: 9 }, (_, i) => ["down", String(i + 1)]);
+
 describe("startWorker", () => {
   beforeEach(async () => {
     vi.restoreAllMocks();
@@ -635,13 +638,13 @@ describe("startWorker", () => {
     expect(runImplement).toHaveBeenCalledTimes(1);
   });
 
-  it("brings every slot down at startup before claiming", async () => {
+  it("brings every slot of the helper's range down at startup before claiming, whatever slots.count is", async () => {
     const runner = fakeSlotRunner();
     const jobId = stores.jobs.enqueue(createdTrigger);
     start(onSlots(runner, slotConfig(3)));
 
     await waitForStatus(jobId, "succeeded");
-    expect(runner.calls).toEqual([["down", "1"], ["down", "2"], ["down", "3"]]);
+    expect(runner.calls).toEqual(ALL_SLOTS_DOWN);
   });
 
   it("stop aborts every running job, waits for all of them, brings every slot down, then releases the lock", async () => {
@@ -658,7 +661,7 @@ describe("startWorker", () => {
     expect(stores.jobs.get(first)?.status).toBe("queued");
     expect(stores.jobs.get(second)?.status).toBe("queued");
     expect(handle.state()).toEqual({ running: [] });
-    expect(runner.calls).toEqual([["down", "1"], ["down", "2"], ["down", "1"], ["down", "2"]]);
+    expect(runner.calls).toEqual([...ALL_SLOTS_DOWN, ...ALL_SLOTS_DOWN]);
     const lock = acquireRunLock(dataDir);
     expect(lock).not.toBeNull();
     lock?.release();

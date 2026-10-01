@@ -86,6 +86,13 @@ describe("steward-slot", () => {
     ]);
   });
 
+  it("check lets compose's real error through when the file does not parse", async () => {
+    const result = await slot(["check"], { FAKE_DOCKER_CONFIG_ERROR: "yaml: line 3: mapping values are not allowed" });
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe(`compose file ${COMPOSE} does not parse`);
+    expect(result.stderr).toBe("yaml: line 3: mapping values are not allowed");
+  });
+
   it("check names a missing image and exits 1", async () => {
     const result = await slot(["check"], { FAKE_DOCKER_MISSING: "redis:7-alpine" });
     expect(result.exitCode).toBe(1);
@@ -120,6 +127,18 @@ describe("steward-slot --socket", () => {
       expect(await dockerCalls()).toEqual([]);
     },
   );
+
+  it("rejects a line over 64 bytes made of multibyte characters, whatever the locale", async () => {
+    const result = await request(`${"é".repeat(40)}\n`, { LC_ALL: "C.UTF-8" });
+    expect(result.stdout).toBe(`${MALFORMED}\nexit 2`);
+    expect(await dockerCalls()).toEqual([]);
+  });
+
+  it("exits 0 when the client has already gone, instead of dying on SIGPIPE", async () => {
+    const script = `{ sleep 0.3; echo 'ports 1'; } | bash ${HELPER} --socket | true; echo "\${PIPESTATUS[1]}"`;
+    const result = await execa("bash", ["-c", script], { env: helperEnv({}), extendEnv: false, reject: false });
+    expect(result.stdout).toBe("0");
+  });
 
   it.each([{ input: "up 1" }, { input: `${"x".repeat(100)}\n` }, { input: "" }])("answers a request that is not one short line with exit 2", async ({ input }) => {
     expect((await request(input)).stdout).toBe(`${MALFORMED}\nexit 2`);
@@ -164,7 +183,7 @@ describe("slot ops files", () => {
     const socket = (await readFile(resolve("ops/steward-slot.socket"), "utf8")).split("\n");
     for (const line of ["ListenStream=/run/steward-slot.sock", "SocketUser=root", "SocketGroup=steward", "SocketMode=0660", "Accept=yes"]) expect(socket).toContain(line);
     const service = await readFile(resolve("ops/steward-slot@.service"), "utf8");
-    for (const line of ["ExecStart=/usr/local/sbin/steward-slot --socket", "StandardInput=socket", "StandardOutput=socket", "RuntimeMaxSec=300"]) expect(service.split("\n")).toContain(line);
+    for (const line of ["ExecStart=/usr/local/sbin/steward-slot --socket", "StandardInput=socket", "StandardOutput=socket", "RuntimeMaxSec=300", "Wants=docker.service", "After=docker.service"]) expect(service.split("\n")).toContain(line);
     expect(service).not.toMatch(/^User=/m);
   });
 });

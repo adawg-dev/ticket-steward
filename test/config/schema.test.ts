@@ -200,6 +200,11 @@ describe("slots config", () => {
     expect(parsed.error?.issues).toEqual([expect.objectContaining({ path: ["workspace", "port"], message: "workspace.port is required unless slots is set" })]);
   });
 
+  it("caps upTimeoutSeconds at 290, under the helper unit's RuntimeMaxSec", () => {
+    expect(StewardConfigSchema.parse(withSlots({ ...slotsInput, upTimeoutSeconds: 290 })).slots?.upTimeoutSeconds).toBe(290);
+    expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, upTimeoutSeconds: 291 })).success).toBe(false);
+  });
+
   it("rejects a slot count outside 1-9", () => {
     expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, count: 0 })).success).toBe(false);
     expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, count: 10 })).success).toBe(false);

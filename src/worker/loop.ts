@@ -51,6 +51,8 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BACKOFF_MS = [60_000, 300_000];
 const DEFAULT_SWEEP_MS = 60 * 60 * 1000;
 const DELIVERY_RETENTION_DAYS = 7;
+/** The helper serves slots 1-9 whatever slots.count is. */
+const HELPER_SLOTS = 9;
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -144,11 +146,11 @@ class Worker {
     logger.info("worker stopped");
   }
 
-  /** Brings every slot down; without `slots` there are no containers. */
+  /** Brings the helper's whole slot range down, so slots the agent started itself or left over after lowering `slots.count` are cleaned; without `slots` there are no containers. */
   private async downAll(): Promise<void> {
     const ref = this.deps.slot;
     if (ref === undefined) return;
-    await Promise.all(this.lanes.map((lane) => ref.client.down(lane.slot)));
+    await Promise.all(Array.from({ length: HELPER_SLOTS }, (_, i) => ref.client.down(i + 1)));
   }
 
   private async loop(lane: Lane): Promise<void> {

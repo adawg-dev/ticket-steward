@@ -6,6 +6,8 @@
 # per connection, running `steward-slot --socket` as root. Operators run the same commands directly as root.
 # It accepts only the commands below and a slot number 1-9, so the steward never passes arguments to Docker.
 set -euo pipefail
+# Byte-accurate request cap: with a UTF-8 locale `read -n` would count characters.
+export LC_ALL=C
 
 readonly COMPOSE_FILE=/etc/ticket-steward/slots/compose.yml
 readonly MAX_REQUEST_BYTES=64
@@ -35,7 +37,7 @@ main() {
   if [[ "$command" == "check" ]]; then
     [[ $# -eq 1 ]] || usage
     export_ports 1
-    docker compose -f "$COMPOSE_FILE" config --quiet >/dev/null 2>&1 || { echo "compose file $COMPOSE_FILE does not parse"; exit 1; }
+    docker compose -f "$COMPOSE_FILE" config --quiet >/dev/null || { echo "compose file $COMPOSE_FILE does not parse"; exit 1; }
     local images
     images="$(docker compose -f "$COMPOSE_FILE" config --images)" || { echo "compose file $COMPOSE_FILE lists no images"; exit 1; }
     for image in $images; do
@@ -57,7 +59,8 @@ main() {
 }
 
 # Socket mode: one request line from the connection, the command's output (stderr too), then `exit <code>`.
-# The status travels in-band, so this process itself always exits 0 and the per-connection unit never fails.
+# The status travels in-band, so this process itself always exits 0 and the per-connection unit never fails;
+# a client that disconnects early (SIGPIPE on write) must not fail the instance either.
 serve_request() {
   local line code
   local -a words=()
@@ -76,7 +79,9 @@ serve_request() {
 
 if [[ "${1:-}" == "--socket" ]]; then
   [[ $# -eq 1 ]] || usage
-  serve_request
+  trap '' PIPE
+  # A write to a gone client now fails with EPIPE instead of killing the process; that is not an error here.
+  serve_request || true
   exit 0
 fi
 main "$@"

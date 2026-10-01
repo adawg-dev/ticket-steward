@@ -2,6 +2,8 @@
 # Runs as root: the helper validates the request itself and is the only thing on this host the steward can ask to touch Docker.
 [Unit]
 Description=Ticket Steward slot helper request
+Wants=docker.service
+After=docker.service
 CollectMode=inactive-or-failed
 
 [Service]

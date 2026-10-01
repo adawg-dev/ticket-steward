@@ -464,7 +464,9 @@ systemctl enable --now steward-slot.socket
 docker pull timescale/timescaledb-ha:pg17-ts2.27-all
 docker pull redis:7-alpine
 docker pull rabbitmq:4.2.0-management
-printf 'check\n' | sudo -u steward socat - UNIX-CONNECT:/run/steward-slot.sock   # prints ok, then exit 0
+# one request over the helper socket; prints everything until the helper closes (no extra package needed)
+slot-req() { node -e 'const s=require("net").connect("/run/steward-slot.sock",()=>s.write(process.argv[1]+"\n"));s.pipe(process.stdout);s.on("error",e=>{console.error(e.message);process.exit(1)})' "$1"; }
+sudo -u steward bash -c "$(declare -f slot-req); slot-req check"   # prints ok, then exit 0
 ```
 
 **Config.** Add `slots` and remove `workspace.port` (config load rejects it next to `slots`). Keep
@@ -475,22 +477,22 @@ that keeps the other origins of a `CORS_ORIGIN` list.
 slots: {
   count: 2,
   appPortBase: 4100,           // slot n's app port is 4100 + n
-  // socket: "/run/steward-slot.sock", upTimeoutSeconds: 180 (defaults)
+  // socket: "/run/steward-slot.sock", upTimeoutSeconds: 180, max 290 (defaults)
   env: {
-    DB_HOST: "localhost",
+    DB_HOST: "127.0.0.1",
     DB_PORT: "{{postgres}}",
     DB_NAME: "concentrate",
     DB_USER: "postgres",
     DB_PASSWORD: "steward-slot",
     PGPASSWORD: "steward-slot",
     DB_SSL: "false",
-    TG_READ_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
-    TG_WRITE_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
-    TG_CONN_STR: "postgres://postgres:steward-slot@localhost:{{postgres}}/concentrate_tg",
-    REDIS_URL: "redis://localhost:{{redis}}",
+    TG_READ_CONN_STR: "postgres://postgres:steward-slot@127.0.0.1:{{postgres}}/concentrate_tg",
+    TG_WRITE_CONN_STR: "postgres://postgres:steward-slot@127.0.0.1:{{postgres}}/concentrate_tg",
+    TG_CONN_STR: "postgres://postgres:steward-slot@127.0.0.1:{{postgres}}/concentrate_tg",
+    REDIS_URL: "redis://127.0.0.1:{{redis}}",
     REDIS_CLUSTER_NODES: null, // deleted: kickoff's client then uses REDIS_URL
     REDIS_PASSWORD: null,
-    RABBITMQ_URL: "amqp://steward:steward-slot@localhost:{{rabbitmq}}",
+    RABBITMQ_URL: "amqp://steward:steward-slot@127.0.0.1:{{rabbitmq}}",
   },
 },
 ```
@@ -503,7 +505,7 @@ the redactor and the implement secret guard still know the remote credentials th
 Host ports come from the helper's `ports <n>`: Postgres `15032 + 100n`, Redis `16079 + 100n`, RabbitMQ
 `15072 + 100n`, all on 127.0.0.1. The slot credentials are throwaway, not secrets.
 
-Per job: free the app port, `down` then `up` the slot (abandoned after `upTimeoutSeconds`; the helper
+Per job: free the app port, `down` then `up` the slot (abandoned after `upTimeoutSeconds`, at most 290; the helper
 instance itself is capped at 300 s), create the worktree, copy the overlay with the overrides, run
 `workspace.setup` (`reset-dbs.sh` reads `e2e/user/.env`, which now holds the slot's values), run the
 brain with `STEWARD_PORT` set to the slot's app port, publish, and `down` the slot. A slot that does not

@@ -32,8 +32,8 @@ const SlotsSchema = z
     socket: z.string().min(1).default("/run/steward-slot.sock"),
     /** Slot n's app port is appPortBase + n. */
     appPortBase: z.number().int().positive().max(65_526),
-    /** Kills a hung `up`. */
-    upTimeoutSeconds: z.number().positive().default(180),
+    /** Kills a hung `up`; capped below the helper unit's RuntimeMaxSec=300, which would kill it anyway. */
+    upTimeoutSeconds: z.number().positive().max(290).default(180),
     /** Applied to every copied overlay file that defines the key; null deletes the line. */
     env: z.record(z.string().regex(ENV_KEY), z.string().nullable()).default({}),
   })
