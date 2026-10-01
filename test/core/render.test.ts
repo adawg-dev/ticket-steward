@@ -1,6 +1,8 @@
 import {
-  buildComment,
+  BRIEF_BEGIN,
+  BRIEF_END,
   buildEnrichmentSection,
+  buildTriageComment,
   linkify,
   replaceSection,
   truncate,
@@ -17,6 +19,7 @@ const result: BrainResult = {
   attachments: [],
   confidence: "high",
   repro: null,
+  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
 };
 
 const permalink: SectionMeta["permalink"] = (path, line) =>
@@ -51,6 +54,11 @@ describe("buildEnrichmentSection", () => {
         "**Template:** Bugs — missing: Repro Steps, Evidence",
         "",
         "Look at [src/handler.ts:12](https://gitlab.example.com/blob/1a2b3c4d5e6f/src/handler.ts#L12) and [src/handler.ts](https://gitlab.example.com/blob/1a2b3c4d5e6f/src/handler.ts).",
+        "",
+        "### Agent brief",
+        BRIEF_BEGIN,
+        "Goal: keep the last chunk.",
+        BRIEF_END,
         "",
         "![Login page](https://uploads.linear.app/shot.png)",
         "",
@@ -159,18 +167,32 @@ describe("linkify", () => {
   });
 });
 
-describe("buildComment", () => {
-  it("renders the comment with job id, confidence and summary", () => {
-    expect(buildComment(result, 42)).toBe(
-      "Enrichment added (job 42, confidence high). The handler drops the status code.",
-    );
+describe("triage rendering", () => {
+  const meta = { now: new Date("2026-09-11T14:02:30.000Z"), sha: "a".repeat(40), branch: "dev", jobId: 7, permalink: (p: string) => `https://x/${p}` };
+
+  it("puts the agent brief between markers for ready-for-human", () => {
+    const section = buildEnrichmentSection({ ...result, triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: fix it." } }, [], [], meta);
+    expect(section).toContain(`### Agent brief\n${BRIEF_BEGIN}\nGoal: fix it.\n${BRIEF_END}`);
+  });
+
+  it("has no brief for needs-info", () => {
+    const section = buildEnrichmentSection({ ...result, triage: { state: "needs-info", questions: ["Which page?"], agentBrief: null } }, [], [], meta);
+    expect(section).not.toContain(BRIEF_BEGIN);
+  });
+
+  it("lists numbered questions in the needs-info comment", () => {
+    const comment = buildTriageComment({ ...result, confidence: "medium", triage: { state: "needs-info", questions: ["Which page?", "Which browser?"], agentBrief: null } }, 7);
+    expect(comment).toBe("Triage (job 7, confidence medium): this ticket needs more information before it can be built.\n\n1. Which page?\n2. Which browser?");
+  });
+
+  it("points at the brief in the ready-for-human comment", () => {
+    const comment = buildTriageComment({ ...result, confidence: "high", summary: "Flush before close.", triage: { state: "ready-for-human", questions: [], agentBrief: "Goal" } }, 7);
+    expect(comment).toBe("Triage (job 7, confidence high): ready to build; the agent brief is in the Enrichment section. Flush before close.");
   });
 
   it("truncates the summary to 600 characters", () => {
-    const comment = buildComment({ ...result, summary: "s".repeat(700) }, 42);
-    expect(comment).toBe(
-      `Enrichment added (job 42, confidence high). ${"s".repeat(599)}…`,
-    );
+    const comment = buildTriageComment({ ...result, summary: "s".repeat(700) }, 42);
+    expect(comment.endsWith(`${"s".repeat(599)}…`)).toBe(true);
   });
 });
 

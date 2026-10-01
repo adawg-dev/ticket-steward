@@ -40,6 +40,14 @@ const templateLine = (template: BrainResult["template"]): string => {
   return `**Template:** ${template.matched} — missing: ${template.missing.join(", ")}`;
 };
 
+export const BRIEF_BEGIN = "<!-- ticket-steward:brief:begin -->";
+export const BRIEF_END = "<!-- ticket-steward:brief:end -->";
+
+const briefBlock = (triage: BrainResult["triage"], permalink: SectionMeta["permalink"]): string =>
+  triage.state === "ready-for-human" && triage.agentBrief !== null
+    ? ["### Agent brief", BRIEF_BEGIN, linkify(triage.agentBrief.trim(), permalink), BRIEF_END].join("\n")
+    : "";
+
 export const buildEnrichmentSection = (
   result: BrainResult,
   uploaded: Array<{ url: string; caption: string }>,
@@ -51,6 +59,7 @@ export const buildEnrichmentSection = (
   const blocks = [
     templateLine(result.template),
     linkify(result.enrichment.trim(), meta.permalink),
+    briefBlock(result.triage, meta.permalink),
     result.repro === null ? "" : renderReproMarkdown(result.repro),
     uploaded.map(({ url, caption }) => `![${caption}](${url})`).join("\n"),
     notes.map((note) => `_Note: ${note}_`).join("\n"),
@@ -68,5 +77,11 @@ export const replaceSection = (description: string, section: string): string => 
   return `${description.slice(0, footer).trimEnd()}\n\n${section}\n\n${description.slice(footer)}`;
 };
 
-export const buildComment = (result: BrainResult, jobId: number): string =>
-  `Enrichment added (job ${jobId}, confidence ${result.confidence}). ${truncate(result.summary, SUMMARY_MAX)}`;
+export const buildTriageComment = (result: BrainResult, jobId: number): string => {
+  const head = `Triage (job ${jobId}, confidence ${result.confidence}): `;
+  if (result.triage.state === "needs-info") {
+    const questions = result.triage.questions.filter((q) => q.trim() !== "").map((q, index) => `${index + 1}. ${q.trim()}`);
+    return [`${head}this ticket needs more information before it can be built.`, "", ...questions].join("\n");
+  }
+  return `${head}ready to build; the agent brief is in the Enrichment section. ${truncate(result.summary, SUMMARY_MAX)}`;
+};

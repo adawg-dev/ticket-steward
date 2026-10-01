@@ -7,6 +7,7 @@ const valid = {
   attachments: [],
   confidence: "high",
   repro: null,
+  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
 };
 
 describe("validateResult", () => {
@@ -42,7 +43,7 @@ describe("validateResult", () => {
 });
 
 describe("brainResultJsonSchema", () => {
-  it("requires all six top-level keys", () => {
+  it("requires all seven top-level keys", () => {
     expect(brainResultJsonSchema.required).toEqual([
       "template",
       "summary",
@@ -50,6 +51,7 @@ describe("brainResultJsonSchema", () => {
       "attachments",
       "confidence",
       "repro",
+      "triage",
     ]);
   });
 
@@ -65,6 +67,7 @@ const base = {
   enrichment: "e",
   attachments: [],
   confidence: "high",
+  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
 };
 
 const repro = {
@@ -94,5 +97,21 @@ describe("validateResult repro", () => {
 
   it("requires steps for a browser recipe", () => {
     expect(validateResult({ ...base, repro: { ...repro, method: "browser", command: null, steps: [] } })).toEqual({ ok: false, error: "repro.steps is empty" });
+  });
+});
+
+describe("triage validation", () => {
+  it("requires questions for needs-info", () => {
+    expect(validateResult({ ...valid, triage: { state: "needs-info", questions: [], agentBrief: null } })).toEqual({ ok: false, error: "triage needs-info without questions" });
+  });
+
+  it("requires an agent brief for ready-for-human", () => {
+    expect(validateResult({ ...valid, triage: { state: "ready-for-human", questions: [], agentBrief: null } })).toEqual({ ok: false, error: "triage ready-for-human without an agentBrief" });
+  });
+
+  it("rejects a result without triage", () => {
+    const rest: Record<string, unknown> = { ...valid };
+    delete rest.triage;
+    expect(validateResult(rest).ok).toBe(false);
   });
 });

@@ -33,4 +33,5 @@ export const brainResult: BrainResult = {
   attachments: [],
   confidence: "high",
   repro: null,
+  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
 };

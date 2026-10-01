@@ -58,6 +58,7 @@ const brainResult: BrainResult = {
   attachments: [],
   confidence: "high",
   repro: null,
+  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
 };
 
 const expectedSection = (sha: string, jobId: number, extra = ""): string =>
@@ -68,12 +69,20 @@ const expectedSection = (sha: string, jobId: number, extra = ""): string =>
     "",
     "**Template:** Bugs — missing: Repro Steps",
     "",
-    `See [src/adapter.ts:12](https://fake.example/blob/${sha}/src/adapter.ts#L12).${extra}`,
+    `See [src/adapter.ts:12](https://fake.example/blob/${sha}/src/adapter.ts#L12).`,
+    "",
+    "### Agent brief",
+    "<!-- ticket-steward:brief:begin -->",
+    "Goal: keep the last chunk.",
+    `<!-- ticket-steward:brief:end -->${extra}`,
     "<!-- ticket-steward:end -->",
   ].join("\n");
 
 const expectedComment = (jobId: number): string =>
-  `Enrichment added (job ${jobId}, confidence high). The adapter truncates the final chunk.`;
+  `Triage (job ${jobId}, confidence high): ready to build; the agent brief is in the Enrichment section. The adapter truncates the final chunk.`;
+
+const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented" };
+const withLabels = (config: StewardConfig): StewardConfig => ({ ...config, tracker: { ...config.tracker, labels: LABELS } });
 
 let repo: TmpRepo;
 let stores: Stores;
@@ -152,6 +161,43 @@ describe("runJob", () => {
   afterEach(async () => {
     stores.db.close();
     await repo.cleanup();
+  });
+
+  it("swaps needs-triage for ready-for-human last when triggered by the triage label", async () => {
+    tracker.addIssue({ ...issue, labels: ["bug", "needs-triage"] });
+    const ctx = claimJob({ ...createdTrigger, action: "triage" });
+
+    const outcome = await runJob(ctx, makeDeps(brainWith(), { config: withLabels(makeConfig()) }));
+
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(tracker.labelSwaps()).toEqual([{ issueId: "issue-1", from: "needs-triage", to: "ready-for-human" }]);
+    expect(tracker.labelsOf("issue-1")).toEqual(["bug", "ready-for-human"]);
+  });
+
+  it("swaps to needs-info for a needs-info verdict", async () => {
+    tracker.addIssue({ ...issue, labels: ["needs-triage"] });
+    const ctx = claimJob({ ...createdTrigger, action: "triage" });
+    const brain = brainWith({ result: { ...brainResult, triage: { state: "needs-info", questions: ["Which page?"], agentBrief: null } } });
+
+    await runJob(ctx, makeDeps(brain, { config: withLabels(makeConfig()) }));
+
+    expect(tracker.labelsOf("issue-1")).toEqual(["needs-info"]);
+  });
+
+  it("leaves labels alone for a job without the triage action", async () => {
+    const ctx = claimJob(createdTrigger);
+    await runJob(ctx, makeDeps(brainWith(), { config: withLabels(makeConfig()) }));
+    expect(tracker.labelSwaps()).toEqual([]);
+  });
+
+  it("keeps needs-triage and reports publish_failed when the label swap fails", async () => {
+    tracker.addIssue({ ...issue, labels: ["needs-triage"] });
+    const ctx = claimJob({ ...createdTrigger, action: "triage" });
+    tracker.failNextSwap();
+    const outcome = await runJob(ctx, makeDeps(brainWith(), { config: withLabels(makeConfig()) }));
+
+    expect(outcome).toEqual({ status: "publish_failed", error: "labels: Linear down" });
+    expect(tracker.labelsOf("issue-1")).toEqual(["needs-triage"]);
   });
 
   it("writes the section between markers and posts a comment for issue.created", async () => {

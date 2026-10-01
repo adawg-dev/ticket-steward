@@ -12,7 +12,7 @@ import { gatewayRoute, isGatewayIssue } from "./gateway.js";
 import { CLOSED_STATE_TYPES } from "./intake.js";
 import { renderPrompt } from "./prompt.js";
 import type { Redactor } from "./redact.js";
-import { buildComment, buildEnrichmentSection, replaceSection } from "./render.js";
+import { buildTriageComment, buildEnrichmentSection, replaceSection } from "./render.js";
 import { captureReproFiles, isBugTicket, normalizeRepro, reproFilesDir } from "./repro.js";
 import { validateResult, type BrainResult, type Repro } from "./result.js";
 import type { JobOutcome, RunContext } from "./types.js";
@@ -114,13 +114,22 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: BrainResult,
   } catch (err) {
     return { status: "publish_failed", error: errorMessage(err) };
   }
-  const comment = buildComment(result, ctx.jobId);
+  let warning: string | undefined;
   try {
-    await tracker.postComment(ctx.issueId, comment);
+    await tracker.postComment(ctx.issueId, buildTriageComment(result, ctx.jobId));
   } catch (err) {
-    return { status: "succeeded", warning: errorMessage(err) };
+    warning = errorMessage(err);
   }
-  return { status: "succeeded" };
+  const labels = config.tracker.labels;
+  if (ctx.trigger.kind !== "mr.review" && ctx.trigger.action === "triage" && labels !== undefined) {
+    const target = result.triage.state === "needs-info" ? labels.needsInfo : labels.readyForHuman;
+    try {
+      await tracker.swapLabel(ctx.issueId, labels.triage, target);
+    } catch (err) {
+      return { status: "publish_failed", error: `labels: ${errorMessage(err)}` };
+    }
+  }
+  return warning === undefined ? { status: "succeeded" } : { status: "succeeded", warning };
 };
 
 const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {

@@ -11,6 +11,7 @@ const result: BrainResult = {
   attachments: [],
   confidence: "high",
   repro: { status: "reproduced", method: "http", command: "curl -s localhost:4100/v1/x", steps: [], files: [], expected: "200", observed: "500" },
+  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
 };
 
 describe("isBugTicket", () => {
