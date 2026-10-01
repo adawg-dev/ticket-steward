@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BranchExistsError, bundleBase, commitWithHooks, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
+import { BranchExistsError, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
 import { gitEnvRecord } from "../../src/workspace/git.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
@@ -111,6 +111,58 @@ describe("commitWithHooks", () => {
     await installHookWrappers(worktree.path, join(root, "hooks"));
     await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message, author: AUTHOR, env: env() });
     expect(await readFile(join(mirror.path, "config"), "utf8")).toBe(before);
+  });
+});
+
+describe("guardCommit", () => {
+  const guard = { overlayFiles: [".env"], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] };
+  const commitAll = async (): Promise<string> => {
+    await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--no-gpg-sign", "-m", "c"]);
+    return git(worktree.path, ["rev-parse", "HEAD"]);
+  };
+
+  it("passes a clean single commit on the base", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await stageAndGuard({ worktreePath: worktree.path, ...guard });
+    const sha = await commitAll();
+    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: true, paths: ["src/a.ts"] });
+  });
+
+  it("refuses a committed overlay file and a committed secret", async () => {
+    await writeFile(join(worktree.path, ".env"), "TOKEN=abc123abc123\n");
+    await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
+    await git(worktree.path, ["add", "-f", ".env", "src/a.ts"]);
+    const sha = await commitAll();
+    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: false, reason: "the change would commit files the steward copied in", detail: ".env" });
+    await git(worktree.path, ["rm", "--cached", "--quiet", ".env"]);
+    await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--amend", "--no-gpg-sign", "-m", "c"]);
+    const amended = await git(worktree.path, ["rev-parse", "HEAD"]);
+    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha: amended, ...guard })).toEqual({ ok: false, reason: "the change contains a secret value from the overlay", detail: "src/a.ts" });
+  });
+
+  it("refuses a commit whose parent is not the base", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await stageAndGuard({ worktreePath: worktree.path, ...guard });
+    await commitAll();
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 3;\n");
+    await git(worktree.path, ["add", "src/a.ts"]);
+    const sha = await commitAll();
+    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toMatchObject({ ok: false, reason: "the commit is not a single commit on top of the base" });
+  });
+});
+
+describe("installHookWrappers", () => {
+  it("skips post-commit and clears wrappers left by an earlier attempt", async () => {
+    const hooksDir = join(root, "hooks");
+    await mkdir(hooksDir, { recursive: true });
+    await writeFile(join(hooksDir, "commit-msg"), "#!/bin/sh\nexit 0\n");
+    await mkdir(join(worktree.path, ".husky"), { recursive: true });
+    await writeFile(join(worktree.path, ".husky/pre-commit"), "exit 0\n");
+    await writeFile(join(worktree.path, ".husky/post-commit"), "git commit --amend -a --no-edit\n");
+
+    expect(await installHookWrappers(worktree.path, hooksDir)).toEqual(["pre-commit"]);
+    expect(existsSync(join(hooksDir, "commit-msg"))).toBe(false);
+    expect(existsSync(join(hooksDir, "post-commit"))).toBe(false);
   });
 });
 

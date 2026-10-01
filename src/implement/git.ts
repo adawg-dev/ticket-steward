@@ -6,21 +6,23 @@ import type { RemoteCredentials } from "../workspace/mirror.js";
 import { branchRefPattern, carriesTicket } from "./branch.js";
 
 const MIN_SECRET_LENGTH = 8;
-const GIT_HOOKS = new Set(["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"]);
+/** Hooks that run before the commit object exists; post-commit is left out so nothing can change HEAD after the commit. */
+const GIT_HOOKS = new Set(["pre-commit", "prepare-commit-msg", "commit-msg"]);
 
 export type GuardResult = { ok: true; paths: string[] } | { ok: false; reason: string; detail: string };
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
-const stagedPaths = async (worktreePath: string): Promise<string[]> => {
-  const out = await gitOrThrow(["diff", "--cached", "--name-only", "-z"], worktreePath);
-  return out.split("\0").filter((path) => path !== "");
-};
+export type GuardInput = { overlayFiles: string[]; skillsPrefix: string; secretValues: string[] };
 
-/** Stages everything and refuses (nothing committed) if the change is empty, includes steward-copied files, or leaks an overlay secret. */
-export const stageAndGuard = async (input: { worktreePath: string; overlayFiles: string[]; skillsPrefix: string; secretValues: string[] }): Promise<GuardResult> => {
-  await gitOrThrow(["add", "-A"], input.worktreePath);
-  const paths = await stagedPaths(input.worktreePath);
+const SECRET_DIFF_FLAGS = ["--no-color", "--unified=0", "--text", "--no-ext-diff", "--no-textconv"];
+
+/**
+ * The shared path guard and secret scan, over `git diff <range>`: `--cached` for the index, `<base> <sha>` for a commit.
+ * Refuses an empty change, steward-copied files (overlay, skills) and added lines carrying a secret value.
+ */
+const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: Record<string, string> = {}): Promise<GuardResult> => {
+  const paths = (await gitOrThrow(["diff", "--name-only", "-z", ...range], cwd, env)).split("\0").filter((path) => path !== "");
   if (paths.length === 0) return { ok: false, reason: "the agent reported the work as implemented but changed nothing", detail: "" };
   const overlay = new Set(input.overlayFiles);
   const copied = paths.filter((path) => overlay.has(path) || path.startsWith(input.skillsPrefix));
@@ -29,7 +31,7 @@ export const stageAndGuard = async (input: { worktreePath: string; overlayFiles:
   if (secrets.length > 0) {
     const leaking: string[] = [];
     for (const path of paths) {
-      const diff = await git(["diff", "--cached", "--no-color", "--unified=0", "--text", "--no-ext-diff", "--no-textconv", "--", path], input.worktreePath);
+      const diff = await git(["diff", ...SECRET_DIFF_FLAGS, ...range, "--", path], cwd, env);
       const added = diff.stdout.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++"));
       if (added.some((line) => secrets.some((secret) => line.includes(secret)))) leaking.push(path);
     }
@@ -38,11 +40,33 @@ export const stageAndGuard = async (input: { worktreePath: string; overlayFiles:
   return { ok: true, paths };
 };
 
+/** Stages everything and refuses (nothing committed) if the change is empty, includes steward-copied files, or leaks a secret. */
+export const stageAndGuard = async (input: GuardInput & { worktreePath: string }): Promise<GuardResult> => {
+  await gitOrThrow(["add", "-A"], input.worktreePath);
+  return guardDiff(input.worktreePath, ["--cached"], input);
+};
+
+/**
+ * Re-checks what was actually committed, since the repo's hooks (which the agent can edit) run between the staged
+ * guard and the commit: the commit must sit directly on `baseSha`, and `baseSha..sha` must pass the same guard.
+ * Replace refs are ignored, so the diff is of the real objects that get pushed.
+ */
+export const guardCommit = async (input: GuardInput & { worktreePath: string; baseSha: string; sha: string }): Promise<GuardResult> => {
+  const env = { GIT_NO_REPLACE_OBJECTS: "1" };
+  const parents = (await gitOrThrow(["rev-list", "--parents", "-n", "1", input.sha], input.worktreePath, env)).split(" ").slice(1);
+  if (parents.length !== 1 || parents[0] !== input.baseSha) {
+    return { ok: false, reason: "the commit is not a single commit on top of the base", detail: `parents: ${parents.join(" ") || "(none)"}` };
+  }
+  return guardDiff(input.worktreePath, [input.baseSha, input.sha], input, env);
+};
+
 /**
  * Writes wrappers for the repo's Husky hooks into `hooksDir` (outside the worktree), so one commit can run them
  * via `-c core.hooksPath` without `husky install` touching the shared mirror config.
  */
 export const installHookWrappers = async (worktreePath: string, hooksDir: string): Promise<string[]> => {
+  // Steward-owned; cleared so a wrapper from an earlier attempt never survives.
+  await rm(hooksDir, { recursive: true, force: true });
   await mkdir(hooksDir, { recursive: true, mode: 0o700 });
   const huskyDir = join(worktreePath, ".husky");
   if (!existsSync(huskyDir)) return [];
