@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { git, gitOrThrow } from "./git.js";
+import { Mutex } from "./mutex.js";
 
 export interface RemoteCredentials {
   /** The fetch URL with any embedded `user:password@` removed. */
@@ -29,6 +30,9 @@ export const splitCredentials = (fetchUrlWithToken: string): RemoteCredentials =
   };
 };
 
+/** One lock per mirror path for the whole process, shared by every Mirror object on that path. */
+const locks = new Map<string, Mutex>();
+
 export class Mirror {
   private readonly remote: RemoteCredentials;
 
@@ -47,15 +51,25 @@ export class Mirror {
     return new Mirror(path, fetchUrlWithToken);
   }
 
+  /** Runs `fn` while no other fetch or worktree add/remove on this mirror runs in this process; git's lock files would fail one of two. */
+  exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const key = resolve(this.path);
+    const lock = locks.get(key) ?? new Mutex();
+    locks.set(key, lock);
+    return lock.run(fn);
+  }
+
   async fetch(): Promise<void> {
     if (!this.exists()) throw new Error(`mirror ${this.path} does not exist; run steward mirror init`);
-    await gitOrThrow(["remote", "set-url", "origin", this.remote.url], this.path);
-    await gitOrThrow(["fetch", "--quiet", "--prune", "origin"], this.path, this.remote.env);
+    await this.exclusive(async () => {
+      await gitOrThrow(["remote", "set-url", "origin", this.remote.url], this.path);
+      await gitOrThrow(["fetch", "--quiet", "--prune", "origin"], this.path, this.remote.env);
+    });
   }
 
   /** Fetches one ref under its own name, e.g. refs/merge-requests/7/head; a fork's MR head exists only there. */
   async fetchRef(ref: string): Promise<void> {
-    await gitOrThrow(["fetch", "--quiet", "origin", `+${ref}:${ref}`], this.path, this.remote.env);
+    await this.exclusive(() => gitOrThrow(["fetch", "--quiet", "origin", `+${ref}:${ref}`], this.path, this.remote.env));
   }
 
   /** A mirror stores remote branches under refs/heads, so `origin/<branch>` resolves to the mirrored branch. */

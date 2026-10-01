@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -92,6 +93,45 @@ describe("Mirror", () => {
     const mirror = await Mirror.init(join(root, "mirror.git"), repo);
     await mirror.fetchRef("refs/merge-requests/7/head");
     expect(await mirror.resolveSha(head)).toBe(head);
+  });
+
+  it("runs fetch, fetchRef and worktree add under the mirror's exclusive section", async () => {
+    const { repo, sha } = await makeSourceRepo(root);
+    const mirror = await Mirror.init(join(root, "repo.git"), repo);
+    const exclusive = vi.spyOn(mirror, "exclusive");
+
+    await mirror.fetch();
+    await mirror.fetchRef("refs/heads/main");
+    const worktree = await createWorktree(mirror, join(root, "work"), "1-1", sha);
+    await worktree.destroy();
+
+    expect(exclusive).toHaveBeenCalledTimes(4);
+  });
+
+  it("serializes concurrent fetches from two Mirror objects on one path so both succeed", async () => {
+    const { repo } = await makeSourceRepo(root);
+    const mirror = await Mirror.init(join(root, "repo.git"), repo);
+    const other = new Mirror(join(root, "repo.git"), repo);
+    const next = await commitFile(repo, "second.txt", "two\n");
+
+    await Promise.all([mirror.fetch(), other.fetch(), mirror.fetchRef("refs/heads/main")]);
+
+    expect(await mirror.resolveSha("main")).toBe(next);
+  });
+
+  it("adds and removes worktrees concurrently without git lock errors", async () => {
+    const { repo, sha } = await makeSourceRepo(root);
+    const mirror = await Mirror.init(join(root, "repo.git"), repo);
+    const work = join(root, "work");
+    const first = await createWorktree(mirror, work, "1-1", sha);
+
+    const [second, third] = await Promise.all([createWorktree(mirror, work, "2-1", sha), createWorktree(mirror, work, "3-1", sha), first.destroy()]);
+
+    expect(existsSync(first.path)).toBe(false);
+    const listed = await git(mirror.path, ["worktree", "list", "--porcelain"]);
+    expect(listed).toContain(second.path);
+    expect(listed).toContain(third.path);
+    expect(listed).not.toContain(first.path);
   });
 });
 
