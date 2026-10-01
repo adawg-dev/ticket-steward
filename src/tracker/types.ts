@@ -54,6 +54,8 @@ export interface Tracker {
   readDescription(issueId: string): Promise<string>;
   writeDescription(issueId: string, description: string): Promise<void>;
   postComment(issueId: string, body: string): Promise<void>;
+  /** Adds `to` (if missing), then removes `from` (if present); names match case-insensitively. */
+  swapLabel(issueId: string, from: string, to: string): Promise<void>;
   uploadFile(localPath: string, contentType: string): Promise<{ url: string }>;
   /** True once the tracker rejected its credentials (Linear answered 401); the worker stops claiming jobs until a restart. */
   apiKeyRejected(): boolean;

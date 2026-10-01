@@ -1,7 +1,7 @@
 import type { TicketBundle, Tracker } from "./types.js";
 
 export interface RecordedWrite {
-  method: "writeDescription" | "postComment" | "uploadFile";
+  method: "writeDescription" | "postComment" | "uploadFile" | "swapLabel";
   args: string[];
 }
 
@@ -29,6 +29,10 @@ export class ReadOnlyTracker implements Tracker {
 
   async postComment(issueId: string, body: string): Promise<void> {
     this.record("postComment", [issueId, body]);
+  }
+
+  async swapLabel(issueId: string, from: string, to: string): Promise<void> {
+    this.record("swapLabel", [issueId, from, to]);
   }
 
   async uploadFile(localPath: string, contentType: string): Promise<{ url: string }> {

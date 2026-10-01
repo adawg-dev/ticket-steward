@@ -10,6 +10,9 @@ const updateIssueMock = vi.fn<LinearClient["updateIssue"]>();
 const createCommentMock = vi.fn<LinearClient["createComment"]>();
 const fileUploadMock = vi.fn<LinearClient["fileUpload"]>();
 const issueMock = vi.fn<LinearClient["issue"]>();
+const issueAddLabelMock = vi.fn<LinearClient["issueAddLabel"]>();
+const issueRemoveLabelMock = vi.fn<LinearClient["issueRemoveLabel"]>();
+const issueLabelsMock = vi.fn<LinearClient["issueLabels"]>();
 const clientFactoryMock = vi.fn<(apiKey: string) => LinearClient>();
 
 const fakeClient = {
@@ -17,6 +20,9 @@ const fakeClient = {
   createComment: createCommentMock,
   fileUpload: fileUploadMock,
   issue: issueMock,
+  issueAddLabel: issueAddLabelMock,
+  issueRemoveLabel: issueRemoveLabelMock,
+  issueLabels: issueLabelsMock,
 } as unknown as LinearClient;
 
 const okPayload = { success: true, lastSyncId: 1 };
@@ -161,5 +167,51 @@ describe("LinearTracker", () => {
     createCommentMock.mockRejectedValueOnce(new Error("boom"));
     await makeTracker().postComment("issue-uuid-1", "hello");
     expect(createCommentMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("LinearTracker.swapLabel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clientFactoryMock.mockReturnValue(fakeClient);
+    issueAddLabelMock.mockResolvedValue(okPayload as never);
+    issueRemoveLabelMock.mockResolvedValue(okPayload as never);
+    issueMock.mockResolvedValue({
+      labels: async () => ({ nodes: [{ id: "l-triage", name: "needs-triage" }] }),
+      team: Promise.resolve({ id: "team-1" }),
+    } as never);
+    issueLabelsMock.mockResolvedValue({
+      nodes: [
+        { id: "l-info-workspace", team: undefined },
+        { id: "l-info-team", team: Promise.resolve({ id: "team-1" }) },
+      ],
+    } as never);
+  });
+
+  it("adds the team label first, then removes the old one", async () => {
+    await makeTracker().swapLabel("issue-1", "Needs-Triage", "needs-info");
+    expect(issueLabelsMock).toHaveBeenCalledWith({ filter: { name: { eqIgnoreCase: "needs-info" } } });
+    expect(issueAddLabelMock).toHaveBeenCalledWith("issue-1", "l-info-team");
+    expect(issueRemoveLabelMock).toHaveBeenCalledWith("issue-1", "l-triage");
+    expect(issueAddLabelMock.mock.invocationCallOrder[0]).toBeLessThan(issueRemoveLabelMock.mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it("falls back to the workspace label", async () => {
+    issueLabelsMock.mockResolvedValue({ nodes: [{ id: "l-info-workspace", team: undefined }] } as never);
+    await makeTracker().swapLabel("issue-1", "needs-triage", "needs-info");
+    expect(issueAddLabelMock).toHaveBeenCalledWith("issue-1", "l-info-workspace");
+  });
+
+  it("fails when the target label does not exist", async () => {
+    issueLabelsMock.mockResolvedValue({ nodes: [] } as never);
+    await expect(makeTracker().swapLabel("issue-1", "needs-triage", "needs-info")).rejects.toThrow(
+      'Linear label "needs-info" does not exist for this team or the workspace',
+    );
+    expect(issueRemoveLabelMock).not.toHaveBeenCalled();
+  });
+
+  it("skips the removal when the old label is absent", async () => {
+    await makeTracker().swapLabel("issue-1", "ready-for-agent", "needs-info");
+    expect(issueRemoveLabelMock).not.toHaveBeenCalled();
   });
 });

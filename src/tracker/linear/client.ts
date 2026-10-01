@@ -31,6 +31,15 @@ export class LinearApiKeyRejectedError extends Error {
   }
 }
 
+/** A team's own label wins over a workspace label of the same name. */
+const labelIdFor = async (client: LinearClient, name: string, teamId: string | null): Promise<string> => {
+  const found = await client.issueLabels({ filter: { name: { eqIgnoreCase: name } } });
+  const owners = await Promise.all(found.nodes.map(async (label) => ({ id: label.id, teamId: (await label.team)?.id ?? null })));
+  const match = owners.find((owner) => owner.teamId !== null && owner.teamId === teamId) ?? owners.find((owner) => owner.teamId === null);
+  if (match === undefined) throw new Error(`Linear label "${name}" does not exist for this team or the workspace`);
+  return match.id;
+};
+
 export class LinearTracker implements Tracker {
   readonly kind = "linear";
   private readonly fetchImpl: typeof fetch;
@@ -110,6 +119,18 @@ export class LinearTracker implements Tracker {
 
   async postComment(issueId: string, body: string): Promise<void> {
     await this.write((client) => client.createComment({ issueId, body }));
+  }
+
+  async swapLabel(issueId: string, from: string, to: string): Promise<void> {
+    await this.write(async (client) => {
+      const issue = await client.issue(issueId);
+      const [labels, team] = await Promise.all([issue.labels(), issue.team]);
+      const target = await labelIdFor(client, to, team?.id ?? null);
+      if (!labels.nodes.some((label) => label.id === target)) await client.issueAddLabel(issueId, target);
+      const wanted = from.toLowerCase();
+      const current = labels.nodes.find((label) => label.name.toLowerCase() === wanted);
+      if (current !== undefined) await client.issueRemoveLabel(issueId, current.id);
+    });
   }
 
   async uploadFile(localPath: string, contentType: string): Promise<{ url: string }> {

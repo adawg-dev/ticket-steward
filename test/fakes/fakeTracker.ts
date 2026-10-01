@@ -8,7 +8,9 @@ export class FakeTracker implements Tracker {
   private readonly issues = new Map<string, TicketBundle>();
   private readonly issueComments = new Map<string, string[]>();
   private readonly uploaded: RecordedUpload[] = [];
+  private readonly swaps: Array<{ issueId: string; from: string; to: string }> = [];
   private failingWrites = 0;
+  private failingSwaps = 0;
   private rejected = false;
 
   constructor(issues: TicketBundle[] = []) {
@@ -37,6 +39,18 @@ export class FakeTracker implements Tracker {
 
   failNextWrite(): void {
     this.failingWrites += 1;
+  }
+
+  labelSwaps(): Array<{ issueId: string; from: string; to: string }> {
+    return [...this.swaps];
+  }
+
+  labelsOf(issueId: string): string[] {
+    return [...this.issue(issueId).labels];
+  }
+
+  failNextSwap(): void {
+    this.failingSwaps += 1;
   }
 
   rejectApiKey(): void {
@@ -70,6 +84,19 @@ export class FakeTracker implements Tracker {
     this.write();
     this.issue(issueId);
     this.issueComments.set(issueId, [...(this.issueComments.get(issueId) ?? []), body]);
+  }
+
+  async swapLabel(issueId: string, from: string, to: string): Promise<void> {
+    if (this.failingSwaps > 0) {
+      this.failingSwaps -= 1;
+      throw new Error("Linear down");
+    }
+    this.write();
+    const current = this.issue(issueId);
+    const kept = current.labels.filter((label) => label.toLowerCase() !== from.toLowerCase());
+    const labels = kept.some((label) => label.toLowerCase() === to.toLowerCase()) ? kept : [...kept, to];
+    this.issues.set(issueId, { ...current, labels });
+    this.swaps.push({ issueId, from, to });
   }
 
   async uploadFile(localPath: string, contentType: string): Promise<{ url: string }> {

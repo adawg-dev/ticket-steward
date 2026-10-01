@@ -1,4 +1,5 @@
 import { ReadOnlyTracker } from "../../src/tracker/readOnly.js";
+import { FakeTracker } from "../fakes/fakeTracker.js";
 import type { TicketBundle, Tracker } from "../../src/tracker/types.js";
 
 const bundle: TicketBundle = {
@@ -32,6 +33,7 @@ const inner: Tracker = {
   writeDescription: writeDescriptionMock,
   postComment: postCommentMock,
   uploadFile: uploadFileMock,
+  swapLabel: async () => {},
   apiKeyRejected: apiKeyRejectedMock,
 };
 
@@ -75,5 +77,13 @@ describe("ReadOnlyTracker", () => {
     expect(await tracker.uploadFile("/tmp/artifacts/shot.png", "image/png")).toEqual({ url: "file:///tmp/artifacts/shot.png" });
     expect(tracker.writes).toEqual([{ method: "uploadFile", args: ["/tmp/artifacts/shot.png", "image/png"] }]);
     expect(uploadFileMock).not.toHaveBeenCalled();
+  });
+
+  it("records swapLabel without forwarding it", async () => {
+    const fake = new FakeTracker([bundle]);
+    const tracker = new ReadOnlyTracker(fake);
+    await tracker.swapLabel("issue-uuid-1", "needs-triage", "needs-info");
+    expect(tracker.writes).toEqual([{ method: "swapLabel", args: ["issue-uuid-1", "needs-triage", "needs-info"] }]);
+    expect(fake.labelSwaps()).toEqual([]);
   });
 });
