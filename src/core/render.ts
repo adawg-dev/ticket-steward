@@ -1,7 +1,7 @@
 import { gatewayFooterStart } from "./gateway.js";
 import { STEWARD_BEGIN, STEWARD_END } from "./intake.js";
 import { renderReproMarkdown } from "./repro.js";
-import type { BrainResult } from "./result.js";
+import type { BrainResult, StoredBrainResult } from "./result.js";
 
 export interface SectionMeta {
   now: Date;
@@ -43,13 +43,13 @@ const templateLine = (template: BrainResult["template"]): string => {
 export const BRIEF_BEGIN = "<!-- ticket-steward:brief:begin -->";
 export const BRIEF_END = "<!-- ticket-steward:brief:end -->";
 
-const briefBlock = (triage: BrainResult["triage"], permalink: SectionMeta["permalink"]): string =>
-  triage.state === "ready-for-human" && triage.agentBrief !== null
+const briefBlock = (triage: StoredBrainResult["triage"], permalink: SectionMeta["permalink"]): string =>
+  triage !== null && triage.state === "ready-for-human" && triage.agentBrief !== null
     ? ["### Agent brief", BRIEF_BEGIN, linkify(triage.agentBrief.trim(), permalink), BRIEF_END].join("\n")
     : "";
 
 export const buildEnrichmentSection = (
-  result: BrainResult,
+  result: StoredBrainResult,
   uploaded: Array<{ url: string; caption: string }>,
   notes: string[],
   meta: SectionMeta,
@@ -77,7 +77,9 @@ export const replaceSection = (description: string, section: string): string => 
   return `${description.slice(0, footer).trimEnd()}\n\n${section}\n\n${description.slice(footer)}`;
 };
 
-export const buildTriageComment = (result: BrainResult, jobId: number): string => {
+/** A stored result from before triage existed gets the old enrichment comment. */
+export const buildTriageComment = (result: StoredBrainResult, jobId: number): string => {
+  if (result.triage === null) return `Enrichment added (job ${jobId}, confidence ${result.confidence}). ${truncate(result.summary, SUMMARY_MAX)}`;
   const head = `Triage (job ${jobId}, confidence ${result.confidence}): `;
   if (result.triage.state === "needs-info") {
     const questions = result.triage.questions.filter((q) => q.trim() !== "").map((q, index) => `${index + 1}. ${q.trim()}`);

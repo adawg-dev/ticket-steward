@@ -386,6 +386,58 @@ describe("runJob", () => {
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 
+  it("keeps needs-triage and reports publish_failed when the triage comment fails, then publishOnly swaps", async () => {
+    tracker.addIssue({ ...issue, labels: ["needs-triage"] });
+    const ctx = claimJob({ ...createdTrigger, action: "triage" });
+    const brain = brainWith({ result: { ...brainResult, triage: { state: "needs-info", questions: ["Which page?"], agentBrief: null } } });
+    vi.spyOn(tracker, "postComment").mockRejectedValueOnce(new Error("comment down"));
+
+    const first = await runJob(ctx, makeDeps(brain, { config: withLabels(makeConfig()) }));
+
+    expect(first).toEqual({ status: "publish_failed", error: "comment: comment down" });
+    expect(tracker.labelSwaps()).toEqual([]);
+    expect(tracker.labelsOf("issue-1")).toEqual(["needs-triage"]);
+
+    stores.jobs.finish(ctx.jobId, first);
+    stores.jobs.claimById(ctx.jobId);
+    stores.attempts.start(ctx.jobId);
+    const second = await publishOnly({ ...ctx, attempt: 2 }, makeDeps(brain, { config: withLabels(makeConfig()) }));
+
+    expect(second).toEqual({ status: "succeeded" });
+    expect(tracker.comments("issue-1")[0]).toContain("1. Which page?");
+    expect(tracker.labelsOf("issue-1")).toEqual(["needs-info"]);
+  });
+
+  it("still succeeds with a warning when the comment fails on a job that swaps no labels", async () => {
+    const ctx = claimJob(createdTrigger);
+    vi.spyOn(tracker, "postComment").mockRejectedValueOnce(new Error("comment down"));
+
+    const outcome = await runJob(ctx, makeDeps(brainWith(), { config: withLabels(makeConfig()) }));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "comment down" });
+    expect(tracker.labelSwaps()).toEqual([]);
+  });
+
+  it("re-publishes a stored result from before triage existed: no brief, the old comment, no label swap", async () => {
+    tracker.addIssue({ ...issue, labels: ["needs-triage"] });
+    const ctx = claimJob({ ...createdTrigger, action: "triage" });
+    const legacy: Record<string, unknown> = { ...brainResult };
+    delete legacy.triage;
+    stores.db.prepare("UPDATE jobs SET status = 'publish_failed', result = ?, result_sha = ? WHERE id = ?").run(JSON.stringify(legacy), repo.sha, ctx.jobId);
+    stores.jobs.claimById(ctx.jobId);
+    stores.attempts.start(ctx.jobId);
+
+    const outcome = await publishOnly({ ...ctx, attempt: 2 }, makeDeps(brainWith(), { config: withLabels(makeConfig()) }));
+
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(stores.jobs.get(ctx.jobId)?.result?.triage).toBeNull();
+    const description = tracker.getDescription("issue-1");
+    expect(description).toContain("## Enrichment");
+    expect(description).not.toContain("Agent brief");
+    expect(tracker.comments("issue-1")).toEqual([`Enrichment added (job ${ctx.jobId}, confidence high). The adapter truncates the final chunk.`]);
+    expect(tracker.labelSwaps()).toEqual([]);
+  });
+
   it("records writes in dry-run and leaves the description and store untouched", async () => {
     const readOnly = new ReadOnlyTracker(tracker);
     const ctx: RunContext = { jobId: 0, attempt: 1, issueId: "issue-1", identifier: "API-1", teamKey: "API", trigger: createdTrigger, dryRun: true };

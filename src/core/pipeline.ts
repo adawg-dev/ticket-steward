@@ -14,7 +14,7 @@ import { renderPrompt } from "./prompt.js";
 import type { Redactor } from "./redact.js";
 import { buildTriageComment, buildEnrichmentSection, replaceSection } from "./render.js";
 import { captureReproFiles, isBugTicket, normalizeRepro, reproFilesDir } from "./repro.js";
-import { validateResult, type BrainResult, type Repro } from "./result.js";
+import { validateResult, type Repro, type StoredBrainResult } from "./result.js";
 import type { JobOutcome, RunContext } from "./types.js";
 import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, patchAttempt, prepareWorkspace, redactOutcome, type JobPaths } from "./workspace.js";
 
@@ -45,17 +45,20 @@ const redactRepro = (repro: Repro | null, redactor: Redactor): Repro | null =>
         observed: redactor.redact(repro.observed),
       };
 
-const redactResult = (result: BrainResult, redactor: Redactor): BrainResult => ({
+const redactResult = (result: StoredBrainResult, redactor: Redactor): StoredBrainResult => ({
   ...result,
   summary: redactor.redact(result.summary),
   enrichment: redactor.redact(result.enrichment),
   attachments: result.attachments.map((item) => ({ ...item, caption: redactor.redact(item.caption) })),
   repro: redactRepro(result.repro, redactor),
-  triage: {
-    ...result.triage,
-    questions: result.triage.questions.map((question) => redactor.redact(question)),
-    agentBrief: result.triage.agentBrief === null ? null : redactor.redact(result.triage.agentBrief),
-  },
+  triage:
+    result.triage === null
+      ? null
+      : {
+          ...result.triage,
+          questions: result.triage.questions.map((question) => redactor.redact(question)),
+          agentBrief: result.triage.agentBrief === null ? null : redactor.redact(result.triage.agentBrief),
+        },
 });
 
 const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env: Record<string, string>, onWorktree: (worktree: Worktree) => void): Promise<Prepared> => {
@@ -83,7 +86,7 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env
   return { bundle, worktree, prompt, isBug };
 };
 
-const uploadAttachments = async (deps: PipelineDeps, artifactsDir: string, result: BrainResult): Promise<{ uploaded: Array<{ url: string; caption: string }>; notes: string[] }> => {
+const uploadAttachments = async (deps: PipelineDeps, artifactsDir: string, result: StoredBrainResult): Promise<{ uploaded: Array<{ url: string; caption: string }>; notes: string[] }> => {
   const { accepted, notes } = await resolveAttachments(artifactsDir, result.attachments);
   const uploaded: Array<{ url: string; caption: string }> = [];
   for (const item of accepted) {
@@ -98,7 +101,7 @@ const uploadAttachments = async (deps: PipelineDeps, artifactsDir: string, resul
   return { uploaded, notes: notes.map((note) => deps.redactor.redact(note)) };
 };
 
-const publish = async (ctx: RunContext, deps: PipelineDeps, stored: BrainResult, sha: string, artifactsDir: string, extraNotes: string[] = []): Promise<JobOutcome> => {
+const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainResult, sha: string, artifactsDir: string, extraNotes: string[] = []): Promise<JobOutcome> => {
   const { tracker, config, codehost } = deps;
   const result = redactResult(stored, deps.redactor);
   try {
@@ -119,17 +122,21 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: BrainResult,
   } catch (err) {
     return { status: "publish_failed", error: errorMessage(err) };
   }
+  const labels = config.tracker.labels;
+  // A legacy stored result (no triage) has no verdict to swap to.
+  const swap = ctx.trigger.kind !== "mr.review" && ctx.trigger.action === "triage" && labels !== undefined && result.triage !== null ? { labels, triage: result.triage } : null;
   let warning: string | undefined;
   try {
     await tracker.postComment(ctx.issueId, buildTriageComment(result, ctx.jobId));
   } catch (err) {
+    // The verdict (and a needs-info ticket's questions) lives only in this comment: never move the label without it.
+    if (swap !== null) return { status: "publish_failed", error: `comment: ${errorMessage(err)}` };
     warning = errorMessage(err);
   }
-  const labels = config.tracker.labels;
-  if (ctx.trigger.kind !== "mr.review" && ctx.trigger.action === "triage" && labels !== undefined) {
-    const target = result.triage.state === "needs-info" ? labels.needsInfo : labels.readyForHuman;
+  if (swap !== null) {
+    const target = swap.triage.state === "needs-info" ? swap.labels.needsInfo : swap.labels.readyForHuman;
     try {
-      await tracker.swapLabel(ctx.issueId, labels.triage, target);
+      await tracker.swapLabel(ctx.issueId, swap.labels.triage, target);
     } catch (err) {
       return { status: "publish_failed", error: `labels: ${errorMessage(err)}` };
     }

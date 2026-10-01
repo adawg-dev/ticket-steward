@@ -35,6 +35,16 @@ export const BrainResultSchema = z.object({
 
 export type BrainResult = z.infer<typeof BrainResultSchema>;
 
+/**
+ * A result as read back from the job store. Rows saved before triage existed have no `triage` (and the oldest no
+ * `repro`); both read as null, so a legacy row still re-publishes: no brief, the old-style comment, no label swap.
+ */
+export const StoredBrainResultSchema = BrainResultSchema.extend({
+  repro: ReproSchema.nullable().default(null),
+  triage: TriageSchema.nullable().default(null),
+});
+export type StoredBrainResult = z.infer<typeof StoredBrainResultSchema>;
+
 export const brainResultJsonSchema: Record<string, unknown> = z.toJSONSchema(BrainResultSchema, {
   target: "draft-07",
 });

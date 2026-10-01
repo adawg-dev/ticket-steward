@@ -1,5 +1,5 @@
 import { jobKindFor, type IssueJobKind } from "../core/intake.js";
-import type { BrainResult } from "../core/result.js";
+import { StoredBrainResultSchema, type BrainResult, type StoredBrainResult } from "../core/result.js";
 import type { JobOutcome } from "../core/types.js";
 import { StoredImplementSchema, type StoredImplement } from "../implement/result.js";
 import { StoredReviewSchema, type StoredReview } from "../review/result.js";
@@ -22,7 +22,7 @@ export interface Job {
   trigger: TriggerEvent;
   status: JobStatus;
   attempts: number;
-  result: BrainResult | null;
+  result: StoredBrainResult | null;
   resultSha: string | null;
   reviewResult: StoredReview | null;
   implementResult: StoredImplement | null;
@@ -70,7 +70,7 @@ const toJob = (row: JobRow): Job => ({
   trigger: JSON.parse(row.trigger) as TriggerEvent,
   status: row.status,
   attempts: row.attempts,
-  result: row.result === null ? null : (JSON.parse(row.result) as BrainResult),
+  result: row.result === null ? null : StoredBrainResultSchema.parse(JSON.parse(row.result)),
   resultSha: row.result_sha,
   reviewResult: row.review_result === null ? null : StoredReviewSchema.parse(JSON.parse(row.review_result)),
   implementResult: row.implement_result === null ? null : StoredImplementSchema.parse(JSON.parse(row.implement_result)),
