@@ -7,7 +7,7 @@ import { renderTicketMarkdown } from "../core/context.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { isBugTicket, renderReproMarkdown, restoreReproFiles } from "../core/repro.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, patchAttempt, prepareWorkspace, redactOutcome } from "../core/workspace.js";
+import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome } from "../core/workspace.js";
 import type { ReproRecord } from "../store/index.js";
 import type { ReviewTrigger } from "../tracker/types.js";
 import { gitOrThrow } from "../workspace/git.js";
@@ -15,7 +15,6 @@ import type { Worktree } from "../workspace/worktree.js";
 import { renderReviewPrompt } from "./prompt.js";
 import { postUnverifiable, publishReview } from "./publish.js";
 import { normalizeReviewResult, validateReviewResult, type StoredReview } from "./result.js";
-import { appPortOf } from "../config/schema.js";
 
 const DIFF_FILE = "mr.diff";
 
@@ -75,7 +74,7 @@ const executeReview = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (w
   }
 
   const paths = jobPaths(ctx, deps);
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, appPortOf(deps.config, 1));
+  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps));
   let worktree: Worktree;
   let diff: string;
   let prompt: string;
@@ -101,7 +100,7 @@ const executeReview = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (w
       diffPath,
       workspacePath: worktree.path,
       artifactsDir: paths.artifactsDir,
-      stewardPort: appPortOf(deps.config, 1),
+      stewardPort: jobPort(deps),
       ticket,
       hasRecipe: repro !== null,
       recipe: repro === null ? "" : renderReproMarkdown(repro.recipe),
@@ -109,7 +108,7 @@ const executeReview = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (w
       maxComments: settings.maxComments,
     });
   } catch (err) {
-    return { status: "failed", error: deps.signal?.aborted === true ? INTERRUPTED_ERROR : errorMessage(err), retryable: true };
+    return prepareFailed(deps, err);
   }
 
   let run: BrainRun;

@@ -10,6 +10,8 @@ import { publishReviewOnly, runReview } from "../../src/review/pipeline.js";
 import type { ReviewResult } from "../../src/review/result.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { ReviewTrigger, TicketBundle } from "../../src/tracker/types.js";
+import { SlotClient } from "../../src/workspace/slots.js";
+import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { commitFile, git } from "../workspace/helpers.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
@@ -172,6 +174,24 @@ describe("runReview", () => {
   it("retries while GitLab is still computing the diff", async () => {
     api.mr = { ...api.mr, diffRefs: null };
     expect(await runReview(claim(), makeDeps(new FakeBrain()))).toEqual({ status: "failed", error: "!7 diff is not ready yet", retryable: true });
+  });
+
+  it("reviews on the job's slot and brings the slot down afterwards", async () => {
+    tracker.addIssue(issue(["Feature"]));
+    const appPortBase = (await freeTcpPort()) - 1;
+    const runner = fakeSlotRunner();
+    const slots = { count: 1, socket: "/run/steward-slot.sock", appPortBase, upTimeoutSeconds: 180, env: {} };
+    const base = makeConfig();
+    const brain = new FakeBrain({ result: reviewResult });
+    const deps: PipelineDeps = {
+      ...makeDeps(brain),
+      config: { ...base, workspace: { ...base.workspace, port: undefined }, slots },
+      slot: { n: 1, client: new SlotClient(slots, runner.run) },
+    };
+
+    expect((await runReview(claim(), deps)).status).toBe("succeeded");
+    expect(brain.lastInput().env.STEWARD_PORT).toBe(String(appPortBase + 1));
+    expect(runner.calls).toEqual([["down", "1"], ["up", "1"], ["ports", "1"], ["down", "1"]]);
   });
 });
 

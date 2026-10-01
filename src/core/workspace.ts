@@ -4,20 +4,21 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import type { BrainInput, BrainOutput, McpServerSpec } from "../brain/types.js";
+import { INTERRUPTED_ERROR, type BrainInput, type BrainOutput, type McpServerSpec } from "../brain/types.js";
 import { codehostMcpSpec } from "../codehost/server.js";
+import { appPortOf } from "../config/schema.js";
 import { logger } from "../log.js";
 import { DB_FILENAME } from "../store/db.js";
 import type { AttemptPatch } from "../store/index.js";
-import { copyOverlay } from "../workspace/overlay.js";
+import { copyOverlay, OverrideKeysError } from "../workspace/overlay.js";
 import { freePort, isPortFree } from "../workspace/retention.js";
 import { runSetup } from "../workspace/setup.js";
 import { copySkills } from "../workspace/skills.js";
+import { renderSlotEnv, SlotError, type Slot } from "../workspace/slots.js";
 import { createWorktree, type Worktree } from "../workspace/worktree.js";
 import type { PipelineDeps } from "./deps.js";
 import type { Redactor } from "./redact.js";
 import type { JobOutcome, RunContext } from "./types.js";
-import { appPortOf } from "../config/schema.js";
 
 export interface JobPaths {
   worktreeName: string;
@@ -70,7 +71,26 @@ export const redactOutcome = (outcome: JobOutcome, redactor: Redactor): JobOutco
   return { ...outcome, error: redactor.redact(outcome.error) };
 };
 
-/** Creates the worktree at `sha`, then lays down the artifacts dir, overlay and skills, and runs setup. */
+/** The job's app port: its slot's with `slots` configured, otherwise `workspace.port`. */
+export const jobPort = (deps: Pick<PipelineDeps, "config" | "slot">): number => appPortOf(deps.config, deps.slot?.n ?? 1);
+
+/** With `slots`: frees the slot's app port and brings its containers up fresh. Null without `slots`. */
+const startSlot = async (ctx: RunContext, deps: PipelineDeps, appPort: number): Promise<Slot | null> => {
+  if (deps.config.slots === undefined) return null;
+  if (deps.slot === undefined) throw new Error("slots is configured but this run has no slot");
+  const { n, client } = deps.slot;
+  if (!(await isPortFree(appPort))) await freePort(appPort);
+  try {
+    return { n, appPort, ports: await client.start(n, deps.signal) };
+  } catch (err) {
+    if (!(err instanceof SlotError)) throw err;
+    const tail = deps.redactor.redact(err.tail);
+    patchAttempt(ctx, deps, { setupTail: tail });
+    throw new Error(`setup failed: slot ${n}: ${tail}`);
+  }
+};
+
+/** Brings the job's slot up (with `slots`), creates the worktree at `sha`, then lays down the artifacts dir, overlay and skills, and runs setup. */
 export const prepareWorkspace = async (
   ctx: RunContext,
   deps: PipelineDeps,
@@ -80,11 +100,14 @@ export const prepareWorkspace = async (
   onWorktree: (worktree: Worktree) => void,
 ): Promise<Worktree> => {
   const { config, mirror } = deps;
+  const port = jobPort(deps);
+  const slot = await startSlot(ctx, deps, port);
   const worktree = await createWorktree(mirror, paths.workRoot, paths.worktreeName, sha);
   onWorktree(worktree);
   await mkdir(paths.artifactsDir, { recursive: true, mode: 0o700 });
-  const portRewrite = config.workspace.portRewrite === undefined ? {} : { portRewrite: { from: config.workspace.portRewrite.from, to: appPortOf(config, 1) } };
-  await copyOverlay(config.workspace.overlayDir, worktree.path, portRewrite);
+  const portRewrite = config.workspace.portRewrite === undefined ? {} : { portRewrite: { from: config.workspace.portRewrite.from, to: port } };
+  const overrides = slot === null || config.slots === undefined ? {} : { overrides: renderSlotEnv(config.slots.env, slot) };
+  await copyOverlay(config.workspace.overlayDir, worktree.path, { ...portRewrite, ...overrides });
   await copySkills(config.workspace.skillsDir, worktree.path);
   const setup = await runSetup(config.workspace.setup, worktree.path, env, {
     timeoutMs: config.workspace.setupTimeoutMinutes * MINUTE_MS,
@@ -130,16 +153,23 @@ export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktr
   };
 };
 
+/** Frees the app port, removes the worktree unless a failure keeps it, and brings the job's slot down. */
 export const cleanupWorkspace = async (deps: PipelineDeps, worktree: Worktree | null, outcome: JobOutcome): Promise<void> => {
-  const { keepOnFailure } = deps.config.workspace;
-  const port = appPortOf(deps.config, 1);
+  const port = jobPort(deps);
+  const keep = outcome.status !== "succeeded" && deps.config.workspace.keepOnFailure;
   try {
     if (!(await isPortFree(port))) await freePort(port);
-    if (worktree === null || (outcome.status !== "succeeded" && keepOnFailure)) return;
-    await worktree.destroy();
+    if (worktree !== null && !keep) await worktree.destroy();
   } catch (err) {
     logger.warn({ err: errorMessage(err) }, "workspace cleanup failed");
   }
+  if (deps.slot !== undefined) await deps.slot.client.release(deps.slot.n);
 };
+
+/** A failed workspace preparation: interrupted on shutdown, terminal for a slot override key the overlay lacks, otherwise retryable. */
+export const prepareFailed = (deps: PipelineDeps, err: unknown): JobOutcome =>
+  deps.signal?.aborted === true
+    ? { status: "failed", error: INTERRUPTED_ERROR, retryable: true }
+    : { status: "failed", error: errorMessage(err), retryable: !(err instanceof OverrideKeysError) };
 
 export const crashed = (err: unknown): JobOutcome => ({ status: "failed", error: errorMessage(err), retryable: false });

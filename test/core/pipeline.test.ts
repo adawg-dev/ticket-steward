@@ -14,6 +14,8 @@ import { openStores, type Stores } from "../../src/store/index.js";
 import { ReadOnlyTracker } from "../../src/tracker/readOnly.js";
 import type { IssueTrigger, TicketBundle } from "../../src/tracker/types.js";
 import { isPortFree } from "../../src/workspace/retention.js";
+import { SlotClient } from "../../src/workspace/slots.js";
+import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
@@ -657,5 +659,101 @@ describe("runJob", () => {
     expect(() => process.kill(pids.runnerPid, 0)).toThrow();
     expect(() => process.kill(pids.sleepPid ?? -1, 0)).toThrow();
     expect(existsSync(join(repo.dataDir, "work", `${ctx.jobId}-1`))).toBe(false);
+  });
+});
+
+describe("runJob on a slot", () => {
+  const OVERLAY_ENV = "DB_PORT=5432\nREDIS_CLUSTER_NODES=10.2.0.51:7000\nBASE_URL=http://localhost:3000\n";
+  let appPortBase: number;
+  let runner: FakeSlotRunner;
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    repo = await tmpRepo(PROMPT_TEMPLATE);
+    stores = openStores(repo.dataDir);
+    tracker = new FakeTracker([issue]);
+    port = await freeTcpPort();
+    // Slot 2's app port is appPortBase + 2: a port nothing listens on, so freePort never kills anything.
+    appPortBase = (await freeTcpPort()) - 2;
+    runner = fakeSlotRunner();
+    await mkdir(join(repo.overlayDir, "e2e", "user"), { recursive: true });
+    await writeFile(join(repo.overlayDir, "e2e", "user", ".env"), OVERLAY_ENV);
+  });
+
+  afterEach(async () => {
+    stores.db.close();
+    await repo.cleanup();
+  });
+
+  const slotsFor = (env: Record<string, string | null>) => ({ count: 2, socket: "/run/steward-slot.sock", appPortBase, upTimeoutSeconds: 180, env });
+
+  const slotConfig = (env: Record<string, string | null>): StewardConfig => ({
+    ...makeConfig({ port: undefined, portRewrite: { from: 3000 } }),
+    slots: slotsFor(env),
+  });
+
+  const slotDeps = (brain: FakeBrain, env: Record<string, string | null>, options: { afterBrain?: () => Promise<void>; signal?: AbortSignal } = {}): PipelineDeps => ({
+    ...makeDeps(brain, { config: slotConfig(env), ...options }),
+    slot: { n: 2, client: new SlotClient(slotsFor(env), runner.run) },
+  });
+
+  it("brings the slot up fresh, points the job's overlay copy at it and brings it down afterwards", async () => {
+    const ctx = claimJob(createdTrigger);
+    const brain = brainWith();
+    let copied = "";
+    const deps = slotDeps(brain, { DB_PORT: "{{postgres}}", REDIS_CLUSTER_NODES: null }, {
+      afterBrain: async () => {
+        copied = await readFile(join(repo.dataDir, "work", `${ctx.jobId}-1`, "e2e", "user", ".env"), "utf8");
+      },
+    });
+
+    expect(await runJob(ctx, deps)).toEqual({ status: "succeeded" });
+
+    expect(runner.calls).toEqual([["down", "2"], ["up", "2"], ["ports", "2"], ["down", "2"]]);
+    expect(copied).toBe(`DB_PORT=15232\nBASE_URL=http://localhost:${appPortBase + 2}\n`);
+    expect(brain.lastInput().env.STEWARD_PORT).toBe(String(appPortBase + 2));
+    expect(await readFile(join(repo.overlayDir, "e2e", "user", ".env"), "utf8")).toBe(OVERLAY_ENV);
+  });
+
+  it("fails retryably with the helper's tail when the slot does not come up, and still brings it down", async () => {
+    const ctx = claimJob(createdTrigger);
+    runner.respond("up", { exitCode: 1, output: "Error response from daemon: port is already allocated\n" });
+
+    const outcome = await runJob(ctx, slotDeps(brainWith(), {}));
+
+    expect(outcome).toEqual({ status: "failed", error: "setup failed: slot 2: Error response from daemon: port is already allocated\n[exit 1]", retryable: true });
+    expect(stores.attempts.forJob(ctx.jobId)[0]?.setupTail).toBe("Error response from daemon: port is already allocated\n[exit 1]");
+    expect(runner.calls).toEqual([["down", "2"], ["up", "2"], ["down", "2"]]);
+  });
+
+  it("fails without a retry when an override key is in no overlay file, naming only the key", async () => {
+    const ctx = claimJob(createdTrigger);
+
+    const outcome = await runJob(ctx, slotDeps(brainWith(), { DB_PORT: "{{postgres}}", MISSING_KEY: "hunter2-value" }));
+
+    expect(outcome).toEqual({ status: "failed", error: "slot override keys not found in the overlay: MISSING_KEY", retryable: false });
+    expect(runner.calls.at(-1)).toEqual(["down", "2"]);
+  });
+
+  it("reports an interrupted run when shutdown aborts a slot that is still coming up", async () => {
+    const ctx = claimJob(createdTrigger);
+    runner.hang("up");
+    const controller = new AbortController();
+
+    const running = runJob(ctx, slotDeps(brainWith(), {}, { signal: controller.signal }));
+    await vi.waitFor(() => expect(runner.calls).toContainEqual(["up", "2"]));
+    controller.abort();
+
+    expect(await running).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+    expect(runner.calls.at(-1)).toEqual(["down", "2"]);
+  });
+
+  it("refuses to run without a slot when slots is configured", async () => {
+    const ctx = claimJob(createdTrigger);
+
+    const outcome = await runJob(ctx, makeDeps(brainWith(), { config: slotConfig({}) }));
+
+    expect(outcome).toEqual({ status: "failed", error: "slots is configured but this run has no slot", retryable: true });
+    expect(runner.calls).toEqual([]);
   });
 });

@@ -10,6 +10,8 @@ import type { ImplementResult } from "../../src/implement/result.js";
 import { publishImplementOnly, runImplement } from "../../src/implement/pipeline.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { IssueTrigger, TicketBundle } from "../../src/tracker/types.js";
+import { SlotClient } from "../../src/workspace/slots.js";
+import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
@@ -348,6 +350,25 @@ describe("runImplement", () => {
   it("leaves labels alone for a CLI-triggered job", async () => {
     await runImplement(claim({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" }), makeDeps(editingBrain(implemented).runBrain));
     expect(tracker.labelSwaps()).toEqual([]);
+  });
+
+  it("runs the brain and the steward's checks against the slot's app port", async () => {
+    const appPortBase = (await freeTcpPort()) - 1;
+    const runner = fakeSlotRunner();
+    const slots = { count: 1, socket: "/run/steward-slot.sock", appPortBase, upTimeoutSeconds: 180, env: {} };
+    const base = makeConfig({ checks: [`test "$STEWARD_PORT" = "${appPortBase + 1}"`] });
+    const brain = editingBrain(implemented);
+    const ctx = claim();
+
+    const outcome = await runImplement(ctx, {
+      ...makeDeps(brain.runBrain, { ...base, workspace: { ...base.workspace, port: undefined }, slots }),
+      slot: { n: 1, client: new SlotClient(slots, runner.run) },
+    });
+
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(stores.jobs.get(ctx.jobId)?.pushedAt).not.toBeNull();
+    expect(brain.calls[0]?.env.STEWARD_PORT).toBe(String(appPortBase + 1));
+    expect(runner.calls).toEqual([["down", "1"], ["up", "1"], ["ports", "1"], ["down", "1"]]);
   });
 });
 

@@ -7,6 +7,7 @@ import type { StewardConfig } from "../config/schema.js";
 import type { Stores } from "../store/index.js";
 import type { Tracker } from "../tracker/types.js";
 import type { Mirror } from "../workspace/mirror.js";
+import type { SlotRef } from "../workspace/slots.js";
 import type { Redactor } from "./redact.js";
 
 export interface PipelineDeps {
@@ -26,4 +27,6 @@ export interface PipelineDeps {
   runBrain?: typeof runBrainDetached;
   /** Aborted on shutdown: setup and the brain stop, and the outcome carries `INTERRUPTED_ERROR`. */
   signal?: AbortSignal;
+  /** With `slots` configured: the job's slot (each worker loop's own, or slot 1 for inline CLI runs). */
+  slot?: SlotRef;
 }

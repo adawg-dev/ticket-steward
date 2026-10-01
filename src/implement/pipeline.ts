@@ -3,13 +3,13 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { buildBrainEnv, buildWorkspaceEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
 import type { BrainRun } from "../brain/types.js";
-import { appPortOf, type ImplementConfig } from "../config/schema.js";
+import type { ImplementConfig } from "../config/schema.js";
 import { renderTicketMarkdown } from "../core/context.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
 import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, patchAttempt, prepareWorkspace, redactOutcome, type JobPaths } from "../core/workspace.js";
+import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, type JobPaths } from "../core/workspace.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
 import { git } from "../workspace/git.js";
@@ -137,7 +137,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) }, null);
   }
 
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, appPortOf(deps.config, 1));
+  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps));
   let worktree: Worktree;
   let prompt: string;
   try {
@@ -152,7 +152,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
       baseBranch: deps.config.workspace.baseBranch,
       sha: baseSha,
       artifactsDir: paths.artifactsDir,
-      stewardPort: appPortOf(deps.config, 1),
+      stewardPort: jobPort(deps),
       hasBrief: brief !== null,
       brief: brief ?? "",
       branchTypes: settings.branchTypes.join(", "),
@@ -160,7 +160,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
       checks: stewardChecks(settings.checks, baseSha).map((command) => `- \`${command}\``).join("\n"),
     });
   } catch (err) {
-    return { status: "failed", error: deps.signal?.aborted === true ? INTERRUPTED_ERROR : errorMessage(err), retryable: true };
+    return prepareFailed(deps, err);
   }
 
   let run: BrainRun;
@@ -188,7 +188,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   const guard = await stageAndGuard({ worktreePath: worktree.path, stewardFiles, secretValues: secrets });
   if (!guard.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", guard.reason, guard.detail) }, null);
 
-  const workspaceEnv = buildWorkspaceEnv(appPortOf(deps.config, 1));
+  const workspaceEnv = buildWorkspaceEnv(jobPort(deps));
   const checks = stewardChecks(settings.checks, baseSha);
   const checked = await runSetup(checks, worktree.path, workspaceEnv, {
     timeoutMs: settings.checksTimeoutMinutes * MINUTE_MS,

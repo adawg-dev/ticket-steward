@@ -16,8 +16,7 @@ import { alreadyCommented, buildTriageComment, buildEnrichmentSection, replaceSe
 import { captureReproFiles, isBugTicket, normalizeRepro, reproFilesDir } from "./repro.js";
 import { validateResult, type Repro, type StoredBrainResult } from "./result.js";
 import type { JobOutcome, RunContext } from "./types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, patchAttempt, prepareWorkspace, redactOutcome, type JobPaths } from "./workspace.js";
-import { appPortOf } from "../config/schema.js";
+import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, type JobPaths } from "./workspace.js";
 
 export type { PipelineDeps } from "./deps.js";
 export { redactOutcome } from "./workspace.js";
@@ -80,7 +79,7 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env
     artifactsDir: paths.artifactsDir,
     teamKey: ctx.teamKey,
     teamName: bundle.team.name,
-    stewardPort: appPortOf(config, 1),
+    stewardPort: jobPort(deps),
     gateway: isGatewayIssue(bundle.description) ? (gatewayRoute(bundle.description) ?? { className: "unknown", teamKey: "unknown" }) : null,
     isBug,
   });
@@ -152,13 +151,13 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainR
 const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
   const { config, secrets } = deps;
   const paths = jobPaths(ctx, deps);
-  const env = buildBrainEnv(secrets, config.brain, appPortOf(config, 1));
+  const env = buildBrainEnv(secrets, config.brain, jobPort(deps));
   let prepared: Prepared;
   try {
     prepared = await prepare(ctx, deps, paths, env, onWorktree);
   } catch (err) {
     if (err instanceof ClosedTicketError) return { status: "failed", error: err.message, retryable: false };
-    return { status: "failed", error: deps.signal?.aborted === true ? INTERRUPTED_ERROR : errorMessage(err), retryable: true };
+    return prepareFailed(deps, err);
   }
   const { worktree, prompt } = prepared;
   let run: BrainRun;
