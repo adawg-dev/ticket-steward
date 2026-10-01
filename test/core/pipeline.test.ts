@@ -353,6 +353,39 @@ describe("runJob", () => {
     expect(tracker.comments("issue-1")).toEqual([expectedComment(ctx.jobId)]);
   });
 
+  it("redacts secrets from the agent brief and the triage comment", async () => {
+    const secret = "sk-ant-brief-secret-value";
+    const ready = brainWith({ result: { ...brainResult, triage: { state: "ready-for-human", questions: [], agentBrief: `Goal: use ${secret}.` } } });
+    const ctx = claimJob(createdTrigger);
+    await runJob(ctx, { ...makeDeps(ready), redactor: new Redactor([secret]) });
+    expect(tracker.getDescription("issue-1")).not.toContain(secret);
+
+    tracker.addIssue({ ...issue, id: "issue-2", identifier: "ENG-2" });
+    const asking = brainWith({ result: { ...brainResult, triage: { state: "needs-info", questions: [`Is ${secret} right?`], agentBrief: null } } });
+    const ctx2 = claimJob({ ...createdTrigger, issueId: "issue-2", identifier: "ENG-2" });
+    await runJob(ctx2, { ...makeDeps(asking), redactor: new Redactor([secret]) });
+    expect(tracker.comments("issue-2").join("\n")).not.toContain(secret);
+    expect(tracker.comments("issue-2").join("\n")).toContain("1. Is ");
+  });
+
+  it("re-swaps the label on publishOnly after a failed swap", async () => {
+    tracker.addIssue({ ...issue, labels: ["needs-triage"] });
+    const ctx = claimJob({ ...createdTrigger, action: "triage" });
+    const brain = brainWith();
+    tracker.failNextSwap();
+    const first = await runJob(ctx, makeDeps(brain, { config: withLabels(makeConfig()) }));
+    expect(first.status).toBe("publish_failed");
+
+    stores.jobs.finish(ctx.jobId, first);
+    stores.jobs.claimById(ctx.jobId);
+    stores.attempts.start(ctx.jobId);
+    const second = await publishOnly({ ...ctx, attempt: 2 }, makeDeps(brain, { config: withLabels(makeConfig()) }));
+
+    expect(second).toEqual({ status: "succeeded" });
+    expect(brain.runs).toBe(1);
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
+  });
+
   it("records writes in dry-run and leaves the description and store untouched", async () => {
     const readOnly = new ReadOnlyTracker(tracker);
     const ctx: RunContext = { jobId: 0, attempt: 1, issueId: "issue-1", identifier: "API-1", teamKey: "API", trigger: createdTrigger, dryRun: true };

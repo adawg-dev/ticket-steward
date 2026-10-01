@@ -51,6 +51,11 @@ const redactResult = (result: BrainResult, redactor: Redactor): BrainResult => (
   enrichment: redactor.redact(result.enrichment),
   attachments: result.attachments.map((item) => ({ ...item, caption: redactor.redact(item.caption) })),
   repro: redactRepro(result.repro, redactor),
+  triage: {
+    ...result.triage,
+    questions: result.triage.questions.map((question) => redactor.redact(question)),
+    agentBrief: result.triage.agentBrief === null ? null : redactor.redact(result.triage.agentBrief),
+  },
 });
 
 const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env: Record<string, string>, onWorktree: (worktree: Worktree) => void): Promise<Prepared> => {
