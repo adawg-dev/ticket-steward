@@ -29,14 +29,22 @@ content-addressed store is safe to share).
 ### 1. Slot helper (root)
 
 `/usr/local/sbin/steward-slot` is a bash script owned by root, mode 0755, installed from `ops/steward-slot` in this repo.
-A sudoers drop-in, `/etc/sudoers.d/ticket-steward-slots`, allows exactly:
+The steward reaches it through systemd socket activation, never through sudo, so the steward unit keeps
+`NoNewPrivileges=yes`:
 
-```
-steward ALL=(root) NOPASSWD: /usr/local/sbin/steward-slot
-```
+- `steward-slot.socket` (from `ops/steward-slot.socket`): `ListenStream=/run/steward-slot.sock`, `SocketUser=root`,
+  `SocketGroup=steward`, `SocketMode=0660`, `Accept=yes`.
+- `steward-slot@.service` (from `ops/steward-slot@.service`): one instance per connection, as root,
+  `ExecStart=/usr/local/sbin/steward-slot --socket`, `StandardInput=socket`, `StandardOutput=socket`,
+  `StandardError=journal` (the helper sends each command's stderr down the socket itself), `RuntimeMaxSec=300`.
 
-The script validates its own arguments: anything not on this list exits 2 with a usage line. `n` must be an integer
-1–9 with no leading zero.
+In socket mode the helper reads exactly one request line from the connection (at most 64 bytes, 10 s to arrive), splits
+it into the command and its argument, validates them with the same rules as the CLI, runs the command with its stdout
+and stderr going to the connection, and ends with a last line `exit <code>`. A malformed request (too long, no newline,
+not on the list below) gets `exit 2`. The status travels in-band, so the per-connection unit itself never fails.
+
+The helper keeps its CLI mode (`steward-slot up 1`) for operators and tests. In both modes it validates its own
+arguments: anything not on this list exits 2 with a usage line. `n` must be an integer 1–9 with no leading zero.
 
 | Command | Does | Output |
 | --- | --- | --- |
@@ -73,7 +81,7 @@ A new optional top-level block:
 ```ts
 slots: {
   count: 2,                                  // 1–9
-  helper: "/usr/local/sbin/steward-slot",    // default
+  socket: "/run/steward-slot.sock",          // default; the helper's socket
   appPortBase: 4100,                         // slot n's app port = appPortBase + n
   upTimeoutSeconds: 180,                     // default; kills a hung `up`
   env: {                                     // applied to every copied overlay file that defines the key
@@ -127,22 +135,23 @@ is still redacted wherever it appears.
 where `Slot = { n, appPort, ports }`. Per job:
 
 1. `freePort(slot.appPort)`, as today for the single port.
-2. `sudo -n <helper> down <n>`, then `sudo -n <helper> up <n>`. Either one failing (or `up` exceeding
-   `upTimeoutSeconds`) fails the job as retryable, `setup failed: slot <n>: <last 4 KB of helper output>`. The tail goes
+2. `down <n>`, then `up <n>`, each one request over `slots.socket`. Either one failing (a non-zero `exit` line, a
+   missing exit line, a connection error, or `up` exceeding `upTimeoutSeconds`, after which the steward drops the
+   connection) fails the job as retryable, `setup failed: slot <n>: <last 4 KB of helper output>`. The tail goes
    into the attempt's `setupTail` after redaction.
 3. Create the worktree (under the mirror mutex, §6). Copy the overlay with the rendered overrides and with
    `portRewrite` aimed at `appPort`. Copy the skills.
 4. Run `workspace.setup`. `reset-dbs.sh` needs no change: it reads `e2e/user/.env`, which now holds the slot's values.
 5. The brain gets `STEWARD_PORT=<appPort>`. Prompts get `{{stewardPort}}` = `appPort`.
 6. Publish as today.
-7. In `finally`: `sudo -n <helper> down <n>`. A failure is logged as a warning; the next `up` starts with `down` anyway.
+7. In `finally`: `down <n>` over the socket. A failure is logged as a warning; the next `up` starts with `down` anyway.
 
 Brain policy (`src/brain/policy.ts`) adds two `DENIED_COMMANDS` entries:
 - `/(^|\s)sudo(\s|$)/`;
 - `/(^|\s)docker(\s|$)/`, which also blocks `docker compose`.
 
-This is defence in depth. The accepted risk is that an agent which gets around the policy could `down` another slot. The
-damage is limited to that slot's job failing and being retried.
+This is defence in depth. The accepted risk: the agent runs as `steward`, so it can connect to the socket and `down`
+another slot. The damage is limited to that slot's job failing and being retried.
 
 ### 5. Worker concurrency
 
@@ -173,11 +182,13 @@ of mirror objects (`rev-parse`, the implement push repo's alternates, bundles) n
 
 New checks when `slots` is set. Each failure names what to fix.
 
-- The helper path exists, is owned by root, and is not writable by group or others. The sudoers rule works:
-  `sudo -n <helper> check` exits 0, which also covers the compose file parsing and the images being present.
+- `/usr/local/sbin/steward-slot` exists, is owned by root, and is not writable by group or others (doctor can read it;
+  it is world-readable).
+- `slots.socket` exists and is a socket, and `check` over it ends with `exit 0`, which also covers the socket unit,
+  the compose file parsing and the images being present.
 - For each slot: `ports <n>` parses. The app port and the three service ports are free, with every slot `down` at that
   moment (doctor runs while serve is stopped or idle; a port held by a running slot reads as in use and is reported as
-  "slot n is up").
+  "slot n is up", with `steward-slot down n` as root as the fix).
 - Every `slots.env` key appears in at least one overlay file. The check lists the missing keys.
 - `workspace.port` is absent (config load already rejects it; doctor reports the config error).
 
@@ -188,7 +199,7 @@ New checks when `slots` is set. Each failure names what to fix.
 | `up`/`down` before setup fails, or `up` times out | job `failed`, retryable, slot tail in `setupTail` |
 | override key missing from the overlay | job `failed`, not retryable (config problem), keys named |
 | `down` after the job fails | warning logged; job outcome unchanged |
-| `sudo -n` asks for a password (sudoers missing) | same as `up` failing; doctor catches it beforehand |
+| socket missing or its unit inactive, or the helper dies mid-request (no exit line) | same as `up` failing, the reason in the tail; doctor catches a missing socket beforehand |
 | two loops reach for the mirror | serialized by the mutex; no error |
 
 ### 9. Testing
@@ -201,33 +212,45 @@ New checks when `slots` is set. Each failure names what to fix.
   values, comments and other lines untouched, the original overlay unchanged.
 - **Slot client** (`src/workspace/slots.ts`): runs the helper through an injectable runner. It parses `ports`, maps
   failures to the error text above, and runs `down` in `finally`.
+- **Socket runner:** a real unix-socket server on a temp path stands in for systemd and covers success, a non-zero exit,
+  a missing exit line, the timeout, an abort, and a missing socket. One test pipes each connection into the real
+  helper's `--socket` mode.
 - **Mirror mutex:** two concurrent `fetch` calls both succeed on a real bare repo.
 - **Policy:** `sudo …` and `docker …` (including `docker compose`) are denied for the Bash and `run_shell` tools.
 - **Config:** `slots` parses with defaults. An unknown template fails. `workspace.port` with `slots` fails with the pointer.
   `portRewrite` with `slots` rewrites to the slot's app port. Without `slots`, it behaves as today.
 - **Helper:** `test/ops/steward-slot.test.ts` runs the script with a fake `docker` on `PATH` and covers argument
-  validation (bad command, `0`, `10`, `01`, `1;rm`), the `ports` output, and the compose project names.
+  validation (bad command, `0`, `10`, `01`, `1;rm`), the `ports` output, and the compose project names, in CLI mode
+  and in `--socket` mode (one line in, output plus `exit <code>` out, malformed requests answered with `exit 2`).
 - Typecheck, lint and the full suite stay green. Tests that exercise containers live are not part of the suite.
 
 ### 10. Rollout (ops, run by the controller after merge)
 
-1. Install `ops/steward-slot` to `/usr/local/sbin` (root, 0755), and `ops/slots-compose.yml` plus `init/` to
-   `/etc/ticket-steward/slots/` (root-owned).
-2. Write the sudoers drop-in and validate it with `visudo -cf`.
+1. Install `ops/steward-slot` to `/usr/local/sbin` (root, 0755), `ops/slots-compose.yml` plus `init/` to
+   `/etc/ticket-steward/slots/` (root-owned), and `ops/steward-slot.socket` and `ops/steward-slot@.service` to
+   `/etc/systemd/system/`.
+2. `systemctl daemon-reload`, `systemctl enable --now steward-slot.socket`; `/run/steward-slot.sock` is
+   `root:steward 0660`.
 3. `docker pull` the three images.
-4. `sudo -u steward sudo -n steward-slot check`, then `up 1`, `status 1`, `down 1`, timing `up` (target under 30 s).
+4. As `steward`, send `check`, then `up 1`, `status 1`, `down 1` over the socket with a small node or `socat` client,
+   timing `up` (target under 30 s). Then repeat `check` from inside the steward unit's sandbox
+   (`systemd-run --uid=steward -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes …`):
+   `ProtectSystem=strict` makes `/` read-only, and `connect()` on the existing socket is expected to still work. This
+   is the thing to verify; if it fails, the steward unit gets `ReadWritePaths=/run/steward-slot.sock` in a drop-in.
 5. Add `slots` to the live config, keeping the `.bak` copy, and remove `workspace.port` (`portRewrite` stays). Run
    `steward doctor`.
 6. Restart while idle. Label two tickets. Confirm that `docker ps` shows `steward-slot-1` and `steward-slot-2` during the
    run and nothing afterwards, and that both jobs finish.
 7. Update `docs/ops.md` with a "Worker slots" section: why, install, config, the threat note, and troubleshooting
-   (`steward-slot status n`, ports in use).
+   (`steward-slot status n`, the socket missing or inactive, ports in use).
 
 ## Decisions
 
 - Fresh containers per job rather than a fixed pool that gets reset: the owner's choice. The price is container start
   time on every job.
-- A root helper behind sudoers rather than giving `steward` Docker access: Docker access would give the agent root.
+- A root helper rather than giving `steward` Docker access: Docker access would give the agent root.
+- The helper is reached through a systemd socket-activated unit rather than sudo (the controller's ruling when the owner did not pick between this and a NoNewPrivileges=no drop-in; reversible): the steward unit
+  keeps `NoNewPrivileges=yes`, nothing setuid is involved, and the helper sees only one validated request line.
 - One `timescaledb-ha` container holds both databases, matching the current native layout. Timescale locally is a
   database on the same server, not a second server.
 - Overrides by key: replace or delete, never add. Unconfigured keys fail loudly.

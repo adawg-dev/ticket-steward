@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** With an optional `slots` block, the worker runs `slots.count` jobs at once, each on its own slot (an app port plus fresh Postgres+TimescaleDB, Redis and RabbitMQ containers brought up by a root helper through `sudo -n` and removed when the job ends), and every service a job starts talks only to its slot; without `slots`, behaviour is unchanged.
+**Goal:** With an optional `slots` block, the worker runs `slots.count` jobs at once, each on its own slot (an app port plus fresh Postgres+TimescaleDB, Redis and RabbitMQ containers brought up by a root helper that systemd socket-activates per request, and removed when the job ends), and every service a job starts talks only to its slot; without `slots`, behaviour is unchanged.
 
-**Architecture:** A root-owned bash helper (`ops/steward-slot`) is the only thing that touches Docker; the steward talks to it through `SlotClient` (`src/workspace/slots.ts`) with an injectable runner. `PipelineDeps` gains `slot?: SlotRef`; `prepareWorkspace` brings the slot up and copies the overlay with rendered `slots.env` overrides, `cleanupWorkspace` brings it down. The worker runs one loop per slot; `claimNext` skips tickets/MRs that already have a running job, the mirror serializes fetches and worktree add/remove with an in-process mutex, and retention only sweeps while nothing runs.
+**Architecture:** A root-owned bash helper (`ops/steward-slot`) is the only thing that touches Docker; systemd runs it as root, one instance per connection to `/run/steward-slot.sock` (group `steward`, 0660), so the steward unit keeps `NoNewPrivileges=yes` and no sudo is involved. The steward talks to it through `SlotClient` (`src/workspace/slots.ts`) over that socket, with an injectable runner. `PipelineDeps` gains `slot?: SlotRef`; `prepareWorkspace` brings the slot up and copies the overlay with rendered `slots.env` overrides, `cleanupWorkspace` brings it down. The worker runs one loop per slot; `claimNext` skips tickets/MRs that already have a running job, the mirror serializes fetches and worktree add/remove with an in-process mutex, and retention only sweeps while nothing runs.
 
-**Tech Stack:** TypeScript (ESM, Node 22), zod 4, vitest, better-sqlite3, execa 10, bash, Docker Compose v2 (ops only).
+**Tech Stack:** TypeScript (ESM, Node 22), zod 4, vitest, better-sqlite3, `node:net` (unix socket client), bash, systemd socket activation and Docker Compose v2 (ops only).
 
 **Spec:** `docs/superpowers/specs/2026-10-01-worker-slots-design.md`
 
@@ -17,23 +17,24 @@
 - Every commit message ends with the trailer line exactly: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Conventional-commit subjects in the repo's style (`feat(scope): …`, `fix(scope): …`, `docs(ops): …`), lower-case, no trailing period.
 - Each task ends with `npm run -s typecheck`, `npm run -s lint` and the task's vitest files green; Task 10 runs the full suite (`npx vitest run`).
-- No live Docker in tests: the slot client is exercised through an injectable `SlotRunner`, the bash helper through a fake `docker` on `PATH`, `sudoRunner` through a fake `sudo` on `PATH`.
+- No live Docker in tests: the slot client is exercised through an injectable `SlotRunner`, the bash helper through a fake `docker` on `PATH`, `socketRunner` through a real unix-socket server in the test standing in for systemd.
 - Nothing in Tasks 1–10 runs `sudo` or `docker`, or touches `/etc` or `/usr/local`. Rollout is the final "Ops (controller only, not a subagent task)" section.
 - `slots` is optional; absent means today's behaviour (one loop, `workspace.port`, `portRewrite`, no containers).
 - With `slots`, `workspace.port` is rejected with the message `workspace.port was replaced by slots.appPortBase (see docs/ops.md)`; `workspace.portRewrite` stays and targets the slot's app port.
-- `slots` values: `count` 1–9; `helper` default `/usr/local/sbin/steward-slot`; slot n's app port = `appPortBase + n`; `upTimeoutSeconds` default 180; templates `{{app}}`, `{{postgres}}`, `{{redis}}`, `{{rabbitmq}}`; an unknown `{{name}}` fails config load.
+- `slots` values: `count` 1–9; `socket` default `/run/steward-slot.sock`; slot n's app port = `appPortBase + n`; `upTimeoutSeconds` default 180; templates `{{app}}`, `{{postgres}}`, `{{redis}}`, `{{rabbitmq}}`; an unknown `{{name}}` fails config load.
 - Overrides replace (unquoted, keeping `export `) or delete (`null`) `KEY=value` lines, never add; a key no overlay file defines fails with `slot override keys not found in the overlay: KEY1, KEY2` (keys only, never values).
 - Helper commands exactly `up|down|status|ports <n>` and `check`; `n` is 1–9 with no leading zero; anything else exits 2 with a usage line. The port formula (`postgres = 15032 + 100n`, `redis = 16079 + 100n`, `rabbitmq = 15072 + 100n`) lives only in the helper; the steward learns ports from `ports <n>` JSON.
+- The steward reaches the helper only through `/run/steward-slot.sock`: one connection carries one request line `<command> <n>\n` (at most 64 bytes), and the reply is the command's output followed by a last line `exit <code>`; a malformed request gets `exit 2`. The helper keeps its CLI mode (`steward-slot up 1`) for operators and tests. The steward unit keeps `NoNewPrivileges=yes`; nothing uses sudo.
 - Images `timescale/timescaledb-ha:pg17-ts2.27-all`, `redis:7-alpine`, `rabbitmq:4.2.0-management`; Postgres user `postgres` / password `steward-slot`; RabbitMQ `steward` / `steward-slot`; databases `concentrate` and `concentrate_tg` (with `timescaledb`); every port on `127.0.0.1`; data on tmpfs; no named volumes.
 - A slot that fails to come up fails the job retryably with `setup failed: slot <n>: <last 4 KB of helper output>`, the redacted tail in the attempt's `setupTail`.
 
 ## Review Focus
 
-1. **A hung `up` (wedged Docker daemon).** Expected: the real `sudoRunner` kills it after `upTimeoutSeconds` and the job fails retryably with `[timed out after N s]` in the tail. Pinned by Task 2 (`sudoRunner` "kills a helper that runs past the timeout", `SlotClient` "reports a hung up as timed out").
+1. **A hung `up` (wedged Docker daemon).** Expected: the real `socketRunner` drops the connection after `upTimeoutSeconds` and the job fails retryably with `[timed out after N s]` in the tail; the root helper instance itself is capped by `RuntimeMaxSec=300`, and the job's release `down` follows. Pinned by Task 2 (`socketRunner` "gives up after the timeout", `SlotClient` "reports a hung up as timed out").
 2. **Shutdown while a slot is still coming up.** Expected: the `up` is canceled through the signal, the outcome is `INTERRUPTED_ERROR` (requeued, not failed), and the slot still goes `down`. Pinned by Task 7 ("reports an interrupted run when shutdown aborts a slot that is still coming up").
 3. **One loop's interrupted job requeuing another loop's running job.** Today `record()` calls the global `requeueInterrupted`, which requeues every running job and closes their attempts; with two loops that would let a second loop claim a job that is still running. Expected: only the interrupted job is requeued. Pinned by Task 5 ("requeueInterruptedJob requeues only that job") and Task 8 ("an interrupted job leaves the job on the other slot running").
 4. **Overlay lines as kickoff writes them.** `export KEY = "v"`, single quotes, indentation, CRLF endings, the same key in several files, a key in one file but not another. Expected: every defining line is rewritten, nothing is added anywhere, every other byte stays. Pinned by Task 3 ("applies to every file that defines the key, keeps CRLF and never adds a key", "replaces values unquoted…").
-5. **`sudo` refusing (missing sudoers rule, or `NoNewPrivileges=yes` in the systemd unit, which doctor run from a shell does not see).** Expected: sudo's own message reaches the job's `setupTail` and doctor's `slot sudo` line, and the docs/unit carry the drop-in. Pinned by Task 2 ("does not run up when the leading down fails"), Task 7 ("fails retryably with the helper's tail…"), Task 9 ("reports a failed sudo check"), Task 10 (unit comment, docs) and the Ops checklist (systemd-run check).
+5. **The socket missing or its unit inactive** (`steward-slot.socket` not enabled, the steward user not in group `steward`, or the helper instance dying mid-request). Expected: the runner's own reason (`cannot reach the slot helper at /run/steward-slot.sock: connect ENOENT …`, or `helper closed without an exit status`) reaches the job's `setupTail` and doctor's `slot socket` line, which names the unit to enable. Pinned by Task 2 (`socketRunner` "names the socket when nothing listens there", "fails a reply without an exit line"; `SlotClient` "does not run up when the leading down fails…"), Task 7 ("fails retryably with the helper's tail…"), Task 9 ("reports a missing socket…", "reports a failed check over the socket…") and the Ops checklist (step 4a, from inside the unit's sandbox).
 
 ---
 
@@ -42,11 +43,12 @@
 | File | Responsibility |
 | --- | --- |
 | `src/config/schema.ts` (modify) | `slots` block, template constants, `appPortOf`, `workspace.port` optional and rejected next to `slots` |
-| `ops/steward-slot` (create, 0755) | Root helper: argument validation, port formula, `docker compose` calls |
+| `ops/steward-slot` (create, 0755) | Root helper: CLI and `--socket` modes, argument validation, port formula, `docker compose` calls |
+| `ops/steward-slot.socket`, `ops/steward-slot@.service` (create) | systemd socket activation: `/run/steward-slot.sock` (root:steward 0660), one root helper instance per connection |
 | `ops/slots-compose.yml` (create) | The three slot services (images, tmpfs, healthchecks, 127.0.0.1 binds, credentials) |
 | `ops/slots-init/01-databases.sql` (create) | Creates `concentrate`, `concentrate_tg` and the `timescaledb` extension |
 | `src/workspace/setup.ts` (modify) | Export `keepTail` |
-| `src/workspace/slots.ts` (create) | `SlotClient`, `sudoRunner`, `SlotError`, `renderSlotEnv`, slot types |
+| `src/workspace/slots.ts` (create) | `SlotClient`, `socketRunner`, `SlotError`, `renderSlotEnv`, slot types |
 | `src/workspace/overlay.ts` (modify) | `overrides` option, `OverrideKeysError`, `missingOverrideKeys` |
 | `src/workspace/mutex.ts` (create) | Promise-chain mutex |
 | `src/workspace/mirror.ts` (modify) | `exclusive()`; `fetch`/`fetchRef` under it |
@@ -60,7 +62,7 @@
 | `src/server/app.ts`, `src/cli/serve.ts` (modify) | `/health` `worker.running` array |
 | `src/cli/context.ts`, `src/cli/doctor.ts` (modify) | `slotRunner` factory; slot checks |
 | `src/cli/runtime.ts`, `src/cli/jobs.ts`, `src/cli/prompt.ts` (modify) | Slot 1 for inline runs; running-slots header; prompt port |
-| `docs/ops.md`, `ops/ticket-steward.service`, `examples/kickoff/steward.config.ts` (modify) | Worker slots docs, unit note, example config |
+| `docs/ops.md`, `examples/kickoff/steward.config.ts` (modify) | Worker slots docs, example config |
 | `test/fakes/fakeSlotRunner.ts`, `test/ops/fakeDocker.sh` (create) | Test doubles |
 | `test/ops/steward-slot.test.ts`, `test/workspace/slots.test.ts`, `test/workspace/mutex.test.ts` (create) | New tests |
 
@@ -80,7 +82,7 @@
   - `export type SlotTemplate = (typeof SLOT_TEMPLATES)[number]`
   - `export const SLOT_TEMPLATE_PATTERN: RegExp` (global; use only with `matchAll`/`replace`)
   - `export const isSlotTemplate: (name: string) => name is SlotTemplate`
-  - `StewardConfig["slots"]`: `{ count: number; helper: string; appPortBase: number; upTimeoutSeconds: number; env: Record<string, string | null> } | undefined`
+  - `StewardConfig["slots"]`: `{ count: number; socket: string; appPortBase: number; upTimeoutSeconds: number; env: Record<string, string | null> } | undefined`
   - `StewardConfig["workspace"]["port"]`: `number | undefined`
   - `export type SlotsConfig = NonNullable<StewardConfig["slots"]>`
   - `export const appPortOf: (config: Pick<StewardConfig, "slots" | "workspace">, n: number) => number`
@@ -100,7 +102,7 @@ describe("slots config", () => {
 
   it("parses slots with defaults", () => {
     const parsed = StewardConfigSchema.parse(withSlots(slotsInput));
-    expect(parsed.slots).toEqual({ count: 2, helper: "/usr/local/sbin/steward-slot", appPortBase: 4100, upTimeoutSeconds: 180, env: {} });
+    expect(parsed.slots).toEqual({ count: 2, socket: "/run/steward-slot.sock", appPortBase: 4100, upTimeoutSeconds: 180, env: {} });
     expect(parsed.workspace.port).toBeUndefined();
   });
 
@@ -174,7 +176,8 @@ export const isSlotTemplate = (name: string): name is SlotTemplate => SLOT_TEMPL
 const SlotsSchema = z
   .object({
     count: z.number().int().min(1).max(9),
-    helper: z.string().min(1).default("/usr/local/sbin/steward-slot"),
+    /** The slot helper's socket (ops/steward-slot.socket); systemd runs the root helper per connection. */
+    socket: z.string().min(1).default("/run/steward-slot.sock"),
     /** Slot n's app port is appPortBase + n. */
     appPortBase: z.number().int().positive().max(65_526),
     /** Kills a hung `up`. */
@@ -277,26 +280,28 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ---
 
-### Task 2: Slot helper, compose file and slot client
+### Task 2: Slot helper, its socket units, compose file and slot client
 
 **Files:**
-- Create: `ops/steward-slot` (mode 0755), `ops/slots-compose.yml`, `ops/slots-init/01-databases.sql`
+- Create: `ops/steward-slot` (mode 0755), `ops/steward-slot.socket`, `ops/steward-slot@.service`, `ops/slots-compose.yml`, `ops/slots-init/01-databases.sql`
 - Create: `src/workspace/slots.ts`
 - Modify: `src/workspace/setup.ts:3` (export `keepTail`)
 - Create: `test/ops/fakeDocker.sh` (mode 0755), `test/ops/steward-slot.test.ts`, `test/fakes/fakeSlotRunner.ts`, `test/workspace/slots.test.ts`
 
 **Interfaces:**
 - Consumes: `SLOT_TEMPLATE_PATTERN`, `isSlotTemplate`, `SlotTemplate`, `SlotsConfig` from Task 1.
-- Produces (from `src/workspace/slots.ts`):
-  - `export interface SlotPorts { postgres: number; redis: number; rabbitmq: number }`
-  - `export interface Slot { n: number; appPort: number; ports: SlotPorts }`
-  - `export interface HelperResult { exitCode: number; stdout: string; output: string; timedOut: boolean; canceled: boolean }`
-  - `export type SlotRunner = (args: string[], opts: { timeoutMs: number; signal?: AbortSignal }) => Promise<HelperResult>`
-  - `export class SlotError extends Error { readonly n: number; readonly tail: string }` (message `slot <n>: <tail>`)
-  - `export const sudoRunner: (helper: string) => SlotRunner`
-  - `export class SlotClient { constructor(settings: Pick<SlotsConfig, "helper" | "upTimeoutSeconds">, runner?: SlotRunner); ports(n: number): Promise<SlotPorts>; start(n: number, signal?: AbortSignal): Promise<SlotPorts>; release(n: number): Promise<void>; down(n: number): Promise<boolean>; status(n: number): Promise<string>; check(): Promise<{ ok: boolean; output: string }> }`
-  - `export interface SlotRef { n: number; client: SlotClient }`
-  - `export const renderSlotEnv: (env: Record<string, string | null>, slot: Slot) => Record<string, string | null>`
+- Produces:
+  - Helper wire protocol (socket mode, `steward-slot --socket`, one connection = one request): the client writes one line `<command> <n>\n` (or `check\n`, at most 64 bytes); the helper writes the command's stdout and stderr, then a last line `exit <code>`, then closes. A malformed request gets `exit 2`.
+  - From `src/workspace/slots.ts`:
+    - `export interface SlotPorts { postgres: number; redis: number; rabbitmq: number }`
+    - `export interface Slot { n: number; appPort: number; ports: SlotPorts }`
+    - `export interface HelperResult { exitCode: number; stdout: string; output: string; timedOut: boolean; canceled: boolean }`
+    - `export type SlotRunner = (args: string[], opts: { timeoutMs: number; signal?: AbortSignal }) => Promise<HelperResult>`
+    - `export class SlotError extends Error { readonly n: number; readonly tail: string }` (message `slot <n>: <tail>`)
+    - `export const socketRunner: (socketPath: string) => SlotRunner`
+    - `export class SlotClient { constructor(settings: Pick<SlotsConfig, "socket" | "upTimeoutSeconds">, runner?: SlotRunner); ports(n: number): Promise<SlotPorts>; start(n: number, signal?: AbortSignal): Promise<SlotPorts>; release(n: number): Promise<void>; down(n: number): Promise<boolean>; status(n: number): Promise<string>; check(): Promise<{ ok: boolean; output: string }> }`
+    - `export interface SlotRef { n: number; client: SlotClient }`
+    - `export const renderSlotEnv: (env: Record<string, string | null>, slot: Slot) => Record<string, string | null>`
   - `src/workspace/setup.ts`: `export const keepTail: (text: string, tailBytes: number) => string`
   - Test fake (`test/fakes/fakeSlotRunner.ts`): `helperPorts(n): SlotPorts`, `fakeSlotRunner(portsFor?): FakeSlotRunner` with `run`, `calls: string[][]`, `timeouts: number[]`, `respond(command, Partial<HelperResult>)`, `hang(command)`.
 
@@ -324,6 +329,7 @@ import { removeDir, tmpDir } from "../workspace/helpers.js";
 
 const HELPER = resolve("ops/steward-slot");
 const COMPOSE = "/etc/ticket-steward/slots/compose.yml";
+const MALFORMED = "steward-slot: expected one request line of at most 64 bytes";
 
 let root: string;
 let log: string;
@@ -340,12 +346,13 @@ afterEach(async () => {
   await removeDir(root);
 });
 
-const slot = (args: string[], env: Record<string, string> = {}) =>
-  execa("bash", [HELPER, ...args], {
-    env: { PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`, FAKE_DOCKER_LOG: log, ...env },
-    extendEnv: false,
-    reject: false,
-  });
+const helperEnv = (env: Record<string, string>): Record<string, string> => ({ PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`, FAKE_DOCKER_LOG: log, ...env });
+
+/** CLI mode, the way an operator runs it as root. */
+const slot = (args: string[], env: Record<string, string> = {}) => execa("bash", [HELPER, ...args], { env: helperEnv(env), extendEnv: false, reject: false });
+
+/** Socket mode, the way steward-slot@.service runs it: the connection is stdin and stdout. */
+const request = (input: string, env: Record<string, string> = {}) => execa("bash", [HELPER, "--socket"], { env: helperEnv(env), extendEnv: false, reject: false, input });
 
 const dockerCalls = async (): Promise<string[]> => (await readFile(log, "utf8").catch(() => "")).split("\n").filter((line) => line !== "");
 
@@ -361,6 +368,7 @@ describe("steward-slot", () => {
     { args: ["up", "1", "2"] },
     { args: ["down", "-1"] },
     { args: ["check", "1"] },
+    { args: ["--socket", "up"] },
   ])("rejects $args with exit 2 and a usage line, without running docker", async ({ args }) => {
     const result = await slot(args);
     expect(result.exitCode).toBe(2);
@@ -409,7 +417,41 @@ describe("steward-slot", () => {
   });
 });
 
-describe("slot compose file and init script", () => {
+describe("steward-slot --socket", () => {
+  it("runs the one request line and ends with its exit status", async () => {
+    const result = await request("up 2\n");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("exit 0");
+    expect(await dockerCalls()).toEqual([`compose -p steward-slot-2 -f ${COMPOSE} up -d --wait --wait-timeout 120|15232|16279|15272`]);
+  });
+
+  it("sends the command's output before the exit line", async () => {
+    expect((await request("ports 1\n")).stdout).toBe('{"postgres":15132,"redis":16179,"rabbitmq":15172}\nexit 0');
+  });
+
+  it("reports a failing command's status in-band and exits 0 itself, so the unit never fails", async () => {
+    const result = await request("check\n", { FAKE_DOCKER_MISSING: "redis:7-alpine" });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("image redis:7-alpine is not pulled\nexit 1");
+  });
+
+  it.each([{ input: "up 1;rm\n" }, { input: "up 01\n" }, { input: "up 1 2\n" }, { input: "--socket\n" }, { input: "\n" }])(
+    "answers $input with a usage line and exit 2, without running docker",
+    async ({ input }) => {
+      const result = await request(input);
+      expect(result.stdout).toContain("usage: steward-slot");
+      expect(result.stdout.endsWith("\nexit 2")).toBe(true);
+      expect(await dockerCalls()).toEqual([]);
+    },
+  );
+
+  it.each([{ input: "up 1" }, { input: `${"x".repeat(100)}\n` }, { input: "" }])("answers a request that is not one short line with exit 2", async ({ input }) => {
+    expect((await request(input)).stdout).toBe(`${MALFORMED}\nexit 2`);
+    expect(await dockerCalls()).toEqual([]);
+  });
+});
+
+describe("slot ops files", () => {
   it("publishes every port on 127.0.0.1 only, keeps data on tmpfs, and pins the images and credentials", async () => {
     const compose = await readFile(resolve("ops/slots-compose.yml"), "utf8");
     expect(compose.split("\n").filter((line) => line.includes("${STEWARD_SLOT_")).map((line) => line.trim())).toEqual([
@@ -441,15 +483,23 @@ describe("slot compose file and init script", () => {
       ].join("\n"),
     );
   });
+
+  it("socket-activates one root helper per connection, reachable by group steward only", async () => {
+    const socket = (await readFile(resolve("ops/steward-slot.socket"), "utf8")).split("\n");
+    for (const line of ["ListenStream=/run/steward-slot.sock", "SocketUser=root", "SocketGroup=steward", "SocketMode=0660", "Accept=yes"]) expect(socket).toContain(line);
+    const service = await readFile(resolve("ops/steward-slot@.service"), "utf8");
+    for (const line of ["ExecStart=/usr/local/sbin/steward-slot --socket", "StandardInput=socket", "StandardOutput=socket", "RuntimeMaxSec=300"]) expect(service.split("\n")).toContain(line);
+    expect(service).not.toMatch(/^User=/m);
+  });
 });
 ```
 
 - [ ] **Step 2: Run the helper tests to verify they fail**
 
 Run: `npx vitest run test/ops/steward-slot.test.ts`
-Expected: FAIL; bash reports `ops/steward-slot: No such file or directory` (exit 127), and the compose/SQL reads throw `ENOENT`.
+Expected: FAIL; bash reports `ops/steward-slot: No such file or directory` (exit 127), and the compose, SQL and unit reads throw `ENOENT`.
 
-- [ ] **Step 3: Write the helper, the compose file and the init script**
+- [ ] **Step 3: Write the helper, its units, the compose file and the init script**
 
 Create `ops/steward-slot` and run `chmod 0755 ops/steward-slot`:
 
@@ -457,18 +507,19 @@ Create `ops/steward-slot` and run `chmod 0755 ops/steward-slot`:
 #!/usr/bin/env bash
 # steward-slot: throwaway Postgres+TimescaleDB, Redis and RabbitMQ containers for one Ticket Steward worker slot.
 #
-# Installed root-owned, mode 0755, at /usr/local/sbin/steward-slot. The steward user runs it, and nothing else as
-# root, through /etc/sudoers.d/ticket-steward-slots:
-#   steward ALL=(root) NOPASSWD: /usr/local/sbin/steward-slot
+# Installed root-owned, mode 0755, at /usr/local/sbin/steward-slot. The steward never runs it itself: systemd's
+# steward-slot.socket (/run/steward-slot.sock, group steward, mode 0660) starts one steward-slot@.service instance
+# per connection, running `steward-slot --socket` as root. Operators run the same commands directly as root.
 # It accepts only the commands below and a slot number 1-9, so the steward never passes arguments to Docker.
 set -euo pipefail
 
 readonly COMPOSE_FILE=/etc/ticket-steward/slots/compose.yml
-# An empty root-owned config dir: under the steward unit's ProtectHome=yes, root's ~/.docker is unreadable.
+readonly MAX_REQUEST_BYTES=64
+# A fixed, empty, root-owned docker config dir: no user's docker config or registry credentials apply.
 export DOCKER_CONFIG=/etc/ticket-steward/slots/docker
 
 usage() {
-  echo "usage: steward-slot up|down|status|ports <1-9> | steward-slot check" >&2
+  echo "usage: steward-slot up|down|status|ports <1-9> | steward-slot check | steward-slot --socket" >&2
   exit 2
 }
 
@@ -483,31 +534,99 @@ compose() {
   docker compose -p "steward-slot-$1" -f "$COMPOSE_FILE" "${@:2}"
 }
 
-[[ $# -ge 1 ]] || usage
-command="$1"
+# One command: `up|down|status|ports <n>` or `check`.
+main() {
+  [[ $# -ge 1 ]] || usage
+  local command="$1"
+  if [[ "$command" == "check" ]]; then
+    [[ $# -eq 1 ]] || usage
+    export_ports 1
+    docker compose -f "$COMPOSE_FILE" config --quiet >/dev/null 2>&1 || { echo "compose file $COMPOSE_FILE does not parse"; exit 1; }
+    local images
+    images="$(docker compose -f "$COMPOSE_FILE" config --images)" || { echo "compose file $COMPOSE_FILE lists no images"; exit 1; }
+    for image in $images; do
+      docker image inspect "$image" >/dev/null 2>&1 || { echo "image $image is not pulled"; exit 1; }
+    done
+    echo ok
+    return 0
+  fi
+  [[ $# -eq 2 && "$2" =~ ^[1-9]$ ]] || usage
+  local n="$2"
+  export_ports "$n"
+  case "$command" in
+    up) compose "$n" up -d --wait --wait-timeout 120 ;;
+    down) compose "$n" down --volumes --remove-orphans --timeout 10 ;;
+    status) docker ps --filter "label=com.docker.compose.project=steward-slot-$n" --format '{{.Names}} {{.Status}}' ;;
+    ports) printf '{"postgres":%d,"redis":%d,"rabbitmq":%d}\n' "$STEWARD_SLOT_POSTGRES_PORT" "$STEWARD_SLOT_REDIS_PORT" "$STEWARD_SLOT_RABBITMQ_PORT" ;;
+    *) usage ;;
+  esac
+}
 
-if [[ "$command" == "check" ]]; then
+# Socket mode: one request line from the connection, the command's output (stderr too), then `exit <code>`.
+# The status travels in-band, so this process itself always exits 0 and the per-connection unit never fails.
+serve_request() {
+  local line code
+  local -a words=()
+  if ! IFS= read -r -t 10 -n $((MAX_REQUEST_BYTES + 1)) line || ((${#line} > MAX_REQUEST_BYTES)); then
+    echo "steward-slot: expected one request line of at most $MAX_REQUEST_BYTES bytes"
+    echo "exit 2"
+    return 0
+  fi
+  read -r -a words <<<"$line"
+  set +e
+  (main ${words[@]+"${words[@]}"}) </dev/null 2>&1
+  code=$?
+  set -e
+  echo "exit $code"
+}
+
+if [[ "${1:-}" == "--socket" ]]; then
   [[ $# -eq 1 ]] || usage
-  export_ports 1
-  docker compose -f "$COMPOSE_FILE" config --quiet >/dev/null 2>&1 || { echo "compose file $COMPOSE_FILE does not parse"; exit 1; }
-  images="$(docker compose -f "$COMPOSE_FILE" config --images)" || { echo "compose file $COMPOSE_FILE lists no images"; exit 1; }
-  for image in $images; do
-    docker image inspect "$image" >/dev/null 2>&1 || { echo "image $image is not pulled"; exit 1; }
-  done
-  echo ok
+  serve_request
   exit 0
 fi
+main "$@"
+```
 
-[[ $# -eq 2 && "$2" =~ ^[1-9]$ ]] || usage
-n="$2"
-export_ports "$n"
-case "$command" in
-  up) compose "$n" up -d --wait --wait-timeout 120 ;;
-  down) compose "$n" down --volumes --remove-orphans --timeout 10 ;;
-  status) docker ps --filter "label=com.docker.compose.project=steward-slot-$n" --format '{{.Names}} {{.Status}}' ;;
-  ports) printf '{"postgres":%d,"redis":%d,"rabbitmq":%d}\n' "$STEWARD_SLOT_POSTGRES_PORT" "$STEWARD_SLOT_REDIS_PORT" "$STEWARD_SLOT_RABBITMQ_PORT" ;;
-  *) usage ;;
-esac
+Create `ops/steward-slot.socket`:
+
+```ini
+# Ticket Steward slot helper socket (docs/ops.md §1.11). Install to /etc/systemd/system/, then
+#   systemctl daemon-reload && systemctl enable --now steward-slot.socket
+# Only root and group steward may connect; each connection starts one steward-slot@.service instance as root.
+# The steward unit keeps NoNewPrivileges=yes: it gains nothing, it only connects.
+[Unit]
+Description=Ticket Steward slot helper socket
+
+[Socket]
+ListenStream=/run/steward-slot.sock
+SocketUser=root
+SocketGroup=steward
+SocketMode=0660
+Accept=yes
+
+[Install]
+WantedBy=sockets.target
+```
+
+Create `ops/steward-slot@.service`:
+
+```ini
+# One slot-helper request (docs/ops.md §1.11). Started by steward-slot.socket per connection; never enable it directly.
+# Runs as root: the helper validates the request itself and is the only thing on this host the steward can ask to touch Docker.
+[Unit]
+Description=Ticket Steward slot helper request
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/steward-slot --socket
+StandardInput=socket
+StandardOutput=socket
+# The helper sends each command's stderr down the socket itself; only the script's own failures land here.
+StandardError=journal
+# Longer than up's 120 s wait plus a down; a request whose client went away cannot linger.
+RuntimeMaxSec=300
 ```
 
 Create `ops/slots-compose.yml`:
@@ -597,13 +716,13 @@ export const helperPorts = (n: number): SlotPorts => ({ postgres: 15032 + 100 * 
 
 export interface FakeSlotRunner {
   run: SlotRunner;
-  /** Every helper invocation's arguments, in order. */
+  /** Every helper request's arguments, in order. */
   calls: string[][];
-  /** The timeout each invocation was given, in order. */
+  /** The timeout each request was given, in order. */
   timeouts: number[];
-  /** Every later call of `command` answers `result`; fields left out mean success. */
+  /** Every later request for `command` answers `result`; fields left out mean success. */
   respond: (command: string, result: Partial<HelperResult>) => void;
-  /** Every later call of `command` waits until its signal aborts, then answers canceled. */
+  /** Every later request for `command` waits until its signal aborts, then answers canceled. */
   hang: (command: string) => void;
 }
 
@@ -648,13 +767,15 @@ export const fakeSlotRunner = (portsFor: (n: number) => SlotPorts = helperPorts)
 Create `test/workspace/slots.test.ts`:
 
 ```ts
-import { chmod, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { renderSlotEnv, SlotClient, SlotError, sudoRunner } from "../../src/workspace/slots.js";
+import { spawn } from "node:child_process";
+import { chmod, copyFile, mkdir } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
+import { join, resolve } from "node:path";
+import { renderSlotEnv, SlotClient, SlotError, socketRunner } from "../../src/workspace/slots.js";
 import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { removeDir, tmpDir } from "./helpers.js";
 
-const SETTINGS = { helper: "/usr/local/sbin/steward-slot", upTimeoutSeconds: 180 };
+const SETTINGS = { socket: "/run/steward-slot.sock", upTimeoutSeconds: 180 };
 
 describe("SlotClient", () => {
   beforeEach(() => {
@@ -669,8 +790,8 @@ describe("SlotClient", () => {
 
   it("rejects ports output that is not the port JSON", async () => {
     const runner = fakeSlotRunner();
-    runner.respond("ports", { stdout: "sudo: unable to resolve host\n", output: "sudo: unable to resolve host\n" });
-    await expect(new SlotClient(SETTINGS, runner.run).ports(1)).rejects.toThrow("slot 1: ports printed no port JSON: sudo: unable to resolve host");
+    runner.respond("ports", { stdout: "WARN docker is slow\n", output: "WARN docker is slow\n" });
+    await expect(new SlotClient(SETTINGS, runner.run).ports(1)).rejects.toThrow("slot 1: ports printed no port JSON: WARN docker is slow");
   });
 
   it("starts with down, then up under the configured timeout, then reads the ports", async () => {
@@ -696,10 +817,11 @@ describe("SlotClient", () => {
     await expect(new SlotClient(SETTINGS, runner.run).start(1)).rejects.toThrow("slot 1: Container steward-slot-1-rabbitmq-1  Waiting\n[timed out after 180 s]");
   });
 
-  it("does not run up when the leading down fails, and passes sudo's own words through", async () => {
+  it("does not run up when the leading down fails, and passes the runner's reason through", async () => {
     const runner = fakeSlotRunner();
-    runner.respond("down", { exitCode: 1, output: "sudo: a password is required\n" });
-    await expect(new SlotClient(SETTINGS, runner.run).start(1)).rejects.toThrow("slot 1: sudo: a password is required\n[exit 1]");
+    const reason = "cannot reach the slot helper at /run/steward-slot.sock: connect ENOENT /run/steward-slot.sock";
+    runner.respond("down", { exitCode: 1, output: reason });
+    await expect(new SlotClient(SETTINGS, runner.run).start(1)).rejects.toThrow(`slot 1: ${reason}\n[exit 1]`);
     expect(runner.calls).toEqual([["down", "1"]]);
   });
 
@@ -733,7 +855,7 @@ describe("SlotClient", () => {
     expect(await client.down(2)).toBe(false);
   });
 
-  it("status returns the running containers; check is ok only for exit 0 and the line ok", async () => {
+  it("status returns the running containers; check is ok only for exit 0 and a last line ok", async () => {
     const runner = fakeSlotRunner();
     const client = new SlotClient(SETTINGS, runner.run);
     runner.respond("status", { stdout: "steward-slot-1-postgres-1 Up 2 minutes\n" });
@@ -772,47 +894,104 @@ describe("renderSlotEnv", () => {
   });
 });
 
-describe("sudoRunner", () => {
+describe("socketRunner", () => {
   let root: string;
+  let socketPath: string;
+  let server: Server | null;
+  let requests: string[];
 
   beforeEach(async () => {
     root = await tmpDir();
-    await mkdir(join(root, "bin"));
-    // A sudo that insists on -n, then runs the rest as given.
-    await writeFile(join(root, "bin", "sudo"), '#!/usr/bin/env bash\n[[ "$1" == "-n" ]] || exit 99\nshift\nexec "$@"\n');
-    await chmod(join(root, "bin", "sudo"), 0o755);
-    vi.stubEnv("PATH", `${join(root, "bin")}:${process.env.PATH ?? ""}`);
+    socketPath = join(root, "slot.sock");
+    server = null;
+    requests = [];
   });
 
   afterEach(async () => {
-    vi.unstubAllEnvs();
+    const listening = server;
+    if (listening !== null) await new Promise<void>((done) => listening.close(() => done()));
     await removeDir(root);
   });
 
-  const helper = async (body: string): Promise<string> => {
-    const path = join(root, "helper");
-    await writeFile(path, `#!/usr/bin/env bash\n${body}`);
-    await chmod(path, 0o755);
-    return path;
-  };
+  /** Stands in for systemd and the helper: answers each request line with `reply(line)`, or never answers when `reply` is null. */
+  const serve = (reply: ((request: string) => string) | null): Promise<void> =>
+    new Promise((ready) => {
+      const listening = createServer((connection) => {
+        connection.setEncoding("utf8");
+        connection.on("error", () => undefined);
+        let received = "";
+        connection.on("data", (chunk: Buffer | string) => {
+          received += String(chunk);
+          if (!received.endsWith("\n")) return;
+          requests.push(received);
+          if (reply !== null) connection.end(reply(received));
+        });
+      });
+      server = listening;
+      listening.listen(socketPath, () => ready());
+    });
 
-  it("runs sudo -n <helper> <args> and keeps stdout apart from the interleaved output", async () => {
-    const result = await sudoRunner(await helper('echo "out $*"\necho warn >&2\n'))(["ports", "1"], { timeoutMs: 5_000 });
-    expect(result).toEqual({ exitCode: 0, stdout: "out ports 1", output: expect.stringContaining("warn"), timedOut: false, canceled: false });
-    expect(result.output).toContain("out ports 1");
+  it("sends one request line and returns the output before the exit line", async () => {
+    await serve(() => '{"postgres":15132,"redis":16179,"rabbitmq":15172}\nexit 0\n');
+    const result = await socketRunner(socketPath)(["ports", "1"], { timeoutMs: 5_000 });
+    expect(requests).toEqual(["ports 1\n"]);
+    const body = '{"postgres":15132,"redis":16179,"rabbitmq":15172}\n';
+    expect(result).toEqual({ exitCode: 0, stdout: body, output: body, timedOut: false, canceled: false });
   });
 
-  it("kills a helper that runs past the timeout and keeps what it printed", async () => {
-    const result = await sudoRunner(await helper("echo starting\nexec sleep 5\n"))(["up", "1"], { timeoutMs: 200 });
-    expect(result.timedOut).toBe(true);
-    expect(result.output).toContain("starting");
+  it("returns a non-zero exit status with the command's output", async () => {
+    await serve(() => "Error response from daemon: port is already allocated\nexit 1\n");
+    const result = await socketRunner(socketPath)(["up", "1"], { timeoutMs: 5_000 });
+    expect(result).toMatchObject({ exitCode: 1, output: "Error response from daemon: port is already allocated\n", timedOut: false, canceled: false });
   });
 
-  it("stops the helper when the signal aborts", async () => {
+  it("fails a reply without an exit line", async () => {
+    await serve(() => "Container steward-slot-1-postgres-1  Starting\n");
+    const result = await socketRunner(socketPath)(["up", "1"], { timeoutMs: 5_000 });
+    expect(result).toMatchObject({ exitCode: 1, output: "Container steward-slot-1-postgres-1  Starting\nhelper closed without an exit status" });
+  });
+
+  it("gives up after the timeout", async () => {
+    await serve(null);
+    const result = await socketRunner(socketPath)(["up", "1"], { timeoutMs: 100 });
+    expect(result).toMatchObject({ exitCode: 1, timedOut: true, canceled: false });
+  });
+
+  it("gives up when the signal aborts", async () => {
+    await serve(null);
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 100);
-    const result = await sudoRunner(await helper("exec sleep 5\n"))(["up", "1"], { timeoutMs: 5_000, signal: controller.signal });
-    expect(result.canceled).toBe(true);
+    const running = socketRunner(socketPath)(["up", "1"], { timeoutMs: 5_000, signal: controller.signal });
+    await vi.waitFor(() => expect(requests).toEqual(["up 1\n"]));
+    controller.abort();
+    expect(await running).toMatchObject({ exitCode: 1, timedOut: false, canceled: true });
+  });
+
+  it("names the socket when nothing listens there", async () => {
+    const result = await socketRunner(socketPath)(["check"], { timeoutMs: 5_000 });
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toContain(`cannot reach the slot helper at ${socketPath}: `);
+    expect(result.output).toContain("ENOENT");
+  });
+
+  it("speaks the real helper's socket mode (a stand-in for systemd's Accept=yes)", async () => {
+    await mkdir(join(root, "bin"));
+    await copyFile(resolve("test/ops/fakeDocker.sh"), join(root, "bin", "docker"));
+    await chmod(join(root, "bin", "docker"), 0o755);
+    const env = { PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`, FAKE_DOCKER_LOG: join(root, "docker.log") };
+    const listening = createServer((connection) => {
+      const helper = spawn("bash", [resolve("ops/steward-slot"), "--socket"], { env, stdio: ["pipe", "pipe", "inherit"] });
+      connection.on("error", () => undefined);
+      helper.stdin.on("error", () => undefined);
+      connection.pipe(helper.stdin);
+      helper.stdout.pipe(connection);
+    });
+    server = listening;
+    await new Promise<void>((ready) => listening.listen(socketPath, () => ready()));
+    const run = socketRunner(socketPath);
+
+    const body = '{"postgres":15232,"redis":16279,"rabbitmq":15272}\n';
+    expect(await run(["ports", "2"], { timeoutMs: 5_000 })).toEqual({ exitCode: 0, stdout: body, output: body, timedOut: false, canceled: false });
+    expect((await run(["up", "01"], { timeoutMs: 5_000 })).exitCode).toBe(2);
   });
 });
 ```
@@ -829,7 +1008,7 @@ In `src/workspace/setup.ts`, line 3, change `const keepTail = …` to `export co
 Create `src/workspace/slots.ts`:
 
 ```ts
-import { execa } from "execa";
+import { connect } from "node:net";
 import { z } from "zod";
 import { isSlotTemplate, SLOT_TEMPLATE_PATTERN, type SlotsConfig, type SlotTemplate } from "../config/schema.js";
 import { logger } from "../log.js";
@@ -850,20 +1029,23 @@ export interface Slot {
 
 export interface HelperResult {
   exitCode: number;
-  /** stdout alone: `ports` prints JSON there, while sudo or compose may warn on stderr. */
+  /** What the command printed; over the socket stdout and stderr arrive merged, so this equals `output`. */
   stdout: string;
-  /** stdout and stderr interleaved, for error tails. */
+  /** Everything the command printed, plus the runner's own reason when the request itself failed. */
   output: string;
   timedOut: boolean;
   canceled: boolean;
 }
 
-/** Runs the helper with `args`; never throws on a non-zero exit. */
+/** Runs one helper command; never throws, a failure is a non-zero `exitCode`. */
 export type SlotRunner = (args: string[], opts: { timeoutMs: number; signal?: AbortSignal }) => Promise<HelperResult>;
 
 const HELPER_TAIL_BYTES = 4 * 1024;
+const MAX_REPLY_BYTES = 64 * 1024;
 const HELPER_TIMEOUT_MS = 60_000;
 const SECOND_MS = 1_000;
+/** The helper's last line in socket mode. */
+const EXIT_LINE = /(?:^|\n)exit (\d+)\n?$/;
 
 const PortSchema = z.number().int().min(1).max(65_535);
 const PortsSchema = z.object({ postgres: PortSchema, redis: PortSchema, rabbitmq: PortSchema });
@@ -878,23 +1060,59 @@ export class SlotError extends Error {
   }
 }
 
-/** `sudo -n <helper> …`: -n makes a missing sudoers rule fail at once instead of waiting for a password. */
-export const sudoRunner =
-  (helper: string): SlotRunner =>
-  async (args, opts) => {
-    const result = await execa("sudo", ["-n", helper, ...args], {
-      env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" },
-      extendEnv: false,
-      all: true,
-      reject: false,
-      timeout: opts.timeoutMs,
-      ...(opts.signal === undefined ? {} : { cancelSignal: opts.signal }),
+/** Splits a socket reply into the command's output and the exit status it ends with; null when the status line is missing. */
+const parseReply = (reply: string): { exitCode: number; body: string } | null => {
+  const match = EXIT_LINE.exec(reply);
+  if (match === null) return null;
+  return { exitCode: Number(match[1]), body: reply.slice(0, match.index + (match[0].startsWith("\n") ? 1 : 0)) };
+};
+
+/**
+ * One request over the helper's socket (systemd starts a root helper per connection): `<command> <n>\n` out, the
+ * command's output and a last `exit <code>` line back. A timeout or an abort closes the connection.
+ */
+export const socketRunner =
+  (socketPath: string): SlotRunner =>
+  (args, opts) =>
+    new Promise((resolve) => {
+      let reply = "";
+      let failure: string | null = null;
+      let timedOut = false;
+      let canceled = false;
+      const socket = connect(socketPath);
+      const timer = setTimeout(() => {
+        timedOut = true;
+        socket.destroy();
+      }, opts.timeoutMs);
+      const onAbort = (): void => {
+        canceled = true;
+        socket.destroy();
+      };
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      if (opts.signal?.aborted === true) onAbort();
+      socket.setEncoding("utf8");
+      socket.on("connect", () => socket.write(`${args.join(" ")}\n`));
+      // setEncoding makes every chunk a string (split multi-byte characters are reassembled); the type still says Buffer.
+      socket.on("data", (chunk: Buffer | string) => {
+        reply = keepTail(reply + String(chunk), MAX_REPLY_BYTES);
+      });
+      socket.on("error", (err) => {
+        failure = `cannot reach the slot helper at ${socketPath}: ${err.message}`;
+      });
+      socket.on("close", () => {
+        clearTimeout(timer);
+        opts.signal?.removeEventListener("abort", onAbort);
+        const parsed = timedOut || canceled ? null : parseReply(reply);
+        if (parsed !== null) {
+          resolve({ exitCode: parsed.exitCode, stdout: parsed.body, output: parsed.body, timedOut, canceled });
+          return;
+        }
+        // A timeout or abort is reported by its flag (the client adds the note); anything else gets its reason appended.
+        const reason = timedOut || canceled ? "" : (failure ?? "helper closed without an exit status");
+        const separator = reply === "" || reply.endsWith("\n") ? "" : "\n";
+        resolve({ exitCode: 1, stdout: reply, output: reason === "" ? reply : `${reply}${separator}${reason}`, timedOut, canceled });
+      });
     });
-    // A spawn failure or a kill leaves no exit code; keep whatever the helper printed, else execa's reason.
-    const all = result.all ?? "";
-    const output = result.exitCode === undefined && all === "" ? (result.originalMessage ?? "sudo did not start") : all;
-    return { exitCode: result.exitCode ?? 1, stdout: result.stdout, output, timedOut: result.timedOut, canceled: result.isCanceled };
-  };
 
 const parseJson = (text: string): unknown => {
   try {
@@ -917,10 +1135,10 @@ export class SlotClient {
   private readonly run: SlotRunner;
 
   constructor(
-    private readonly settings: Pick<SlotsConfig, "helper" | "upTimeoutSeconds">,
+    private readonly settings: Pick<SlotsConfig, "socket" | "upTimeoutSeconds">,
     runner?: SlotRunner,
   ) {
-    this.run = runner ?? sudoRunner(settings.helper);
+    this.run = runner ?? socketRunner(settings.socket);
   }
 
   /** The slot's host ports as the helper reports them; the helper holds the only copy of the formula. */
@@ -965,10 +1183,11 @@ export class SlotClient {
     return result.stdout.trim();
   }
 
-  /** The helper's own check (compose file parses, images pulled); run through sudo, it also proves the sudoers rule. */
+  /** The helper's own check (compose file parses, images pulled); over the socket it also proves the socket units work. */
   async check(): Promise<{ ok: boolean; output: string }> {
     const result = await this.run(["check"], { timeoutMs: HELPER_TIMEOUT_MS });
-    return { ok: result.exitCode === 0 && result.stdout.trim() === "ok", output: keepTail(result.output.trim(), HELPER_TAIL_BYTES) };
+    const lastLine = result.stdout.trim().split("\n").at(-1);
+    return { ok: result.exitCode === 0 && lastLine === "ok", output: keepTail(result.output.trim(), HELPER_TAIL_BYTES) };
   }
 }
 
@@ -998,8 +1217,8 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add ops/steward-slot ops/slots-compose.yml ops/slots-init/01-databases.sql src/workspace/slots.ts src/workspace/setup.ts test/ops test/fakes/fakeSlotRunner.ts test/workspace/slots.test.ts
-git commit -m "feat(slots): steward-slot helper, slot compose file and the slot client
+git add ops/steward-slot ops/steward-slot.socket ops/steward-slot@.service ops/slots-compose.yml ops/slots-init/01-databases.sql src/workspace/slots.ts src/workspace/setup.ts test/ops test/fakes/fakeSlotRunner.ts test/workspace/slots.test.ts
+git commit -m "feat(slots): socket-activated steward-slot helper, slot compose file and the slot client
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1659,7 +1878,7 @@ describe("runJob on a slot", () => {
     await repo.cleanup();
   });
 
-  const slotsFor = (env: Record<string, string | null>) => ({ count: 2, helper: "/usr/local/sbin/steward-slot", appPortBase, upTimeoutSeconds: 180, env });
+  const slotsFor = (env: Record<string, string | null>) => ({ count: 2, socket: "/run/steward-slot.sock", appPortBase, upTimeoutSeconds: 180, env });
 
   const slotConfig = (env: Record<string, string | null>): StewardConfig => ({
     ...makeConfig({ port: undefined, portRewrite: { from: 3000 } }),
@@ -1740,7 +1959,7 @@ In `test/review/pipeline.test.ts` add the same two imports (`SlotClient`, `fakeS
     tracker.addIssue(issue(["Feature"]));
     const appPortBase = (await freeTcpPort()) - 1;
     const runner = fakeSlotRunner();
-    const slots = { count: 1, helper: "/usr/local/sbin/steward-slot", appPortBase, upTimeoutSeconds: 180, env: {} };
+    const slots = { count: 1, socket: "/run/steward-slot.sock", appPortBase, upTimeoutSeconds: 180, env: {} };
     const base = makeConfig();
     const brain = new FakeBrain({ result: reviewResult });
     const deps: PipelineDeps = {
@@ -1761,7 +1980,7 @@ In `test/implement/pipeline.test.ts` add the two imports and append inside `desc
   it("runs the brain and the steward's checks against the slot's app port", async () => {
     const appPortBase = (await freeTcpPort()) - 1;
     const runner = fakeSlotRunner();
-    const slots = { count: 1, helper: "/usr/local/sbin/steward-slot", appPortBase, upTimeoutSeconds: 180, env: {} };
+    const slots = { count: 1, socket: "/run/steward-slot.sock", appPortBase, upTimeoutSeconds: 180, env: {} };
     const base = makeConfig({ checks: [`test "$STEWARD_PORT" = "${appPortBase + 1}"`] });
     const brain = editingBrain(implemented);
     const ctx = claim();
@@ -1952,7 +2171,7 @@ In `test/worker/loop.test.ts`:
 Add after `const sleep = …`:
 
 ```ts
-const SLOTS = { count: 2, helper: "/usr/local/sbin/steward-slot", appPortBase: 4100, upTimeoutSeconds: 180, env: {} };
+const SLOTS = { count: 2, socket: "/run/steward-slot.sock", appPortBase: 4100, upTimeoutSeconds: 180, env: {} };
 
 const slotConfig = (count = 2): StewardConfig => {
   const base = makeConfig();
@@ -2443,8 +2662,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `appPortOf`, `SlotsConfig` (Task 1); `SlotClient`, `SlotRunner` (Task 2); `missingOverrideKeys` (Task 3); `fakeSlotRunner` (Task 2).
 - Produces:
-  - `CliFactories.slotRunner?: SlotRunner`
-  - Doctor lines with `slots` set (replacing the `port` line): `slot helper`, `slot sudo`, `slot <n> ports` for n = 1..count, `slot env keys`.
+  - `CliFactories.slotRunner?: SlotRunner` (stands in for the socket) and `CliFactories.slotHelperPath?: string` (stands in for `/usr/local/sbin/steward-slot`).
+  - `src/cli/doctor.ts`: `export const SLOT_HELPER_PATH = "/usr/local/sbin/steward-slot"`.
+  - Doctor lines with `slots` set (replacing the `port` line): `slot helper`, `slot socket`, `slot <n> ports` for n = 1..count, `slot env keys`.
   - `test/cli/helpers.ts` `ConfigPaths`: `port: number | null` (null omits the line) and `slots?: Record<string, unknown>`.
 
 - [ ] **Step 1: Extend the test config writer**
@@ -2472,7 +2692,7 @@ In `test/cli/doctor.test.ts` add imports:
 
 ```ts
 import { chmod } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer, type Server } from "node:net";
 import type { SlotPorts } from "../../src/workspace/slots.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 ```
@@ -2482,6 +2702,8 @@ and append:
 ```ts
 describe("slot checks", () => {
   let helper: string;
+  let socketPath: string;
+  let socketServer: Server;
   let appPortBase: number;
   let ports: Map<number, SlotPorts>;
 
@@ -2498,6 +2720,10 @@ describe("slot checks", () => {
     helper = join(dir, "steward-slot");
     await writeFile(helper, "#!/usr/bin/env bash\n");
     await chmod(helper, 0o755);
+    // A real socket file, so the existence and type checks see what systemd would create; requests go through the fake runner.
+    socketPath = join(dir, "slot.sock");
+    socketServer = createServer((connection) => connection.destroy());
+    await new Promise<void>((ready) => socketServer.listen(socketPath, () => ready()));
     await writeFile(join(repo.overlayDir, ".env"), "DB_PORT=5432\n");
     const [app, p1, r1, q1, p2, r2, q2] = await distinctFreePorts(7);
     appPortBase = (app ?? 0) - 1;
@@ -2507,31 +2733,38 @@ describe("slot checks", () => {
     ]);
   });
 
+  afterEach(async () => {
+    await new Promise<void>((done) => socketServer.close(() => done()));
+  });
+
   const slotRunner = (): FakeSlotRunner => fakeSlotRunner((n) => ports.get(n) ?? { postgres: 1, redis: 1, rabbitmq: 1 });
 
-  const slotLines = async (runner: FakeSlotRunner, env: Record<string, string | null>, port: number | null = null): Promise<{ lines: string[]; out: string }> => {
+  const slotLines = async (
+    runner: FakeSlotRunner,
+    options: { env?: Record<string, string | null>; port?: number | null; socket?: string } = {},
+  ): Promise<{ lines: string[]; out: string }> => {
     const configPath = await writeConfig(dir, {
       dataDir: repo.dataDir,
       overlayDir: repo.overlayDir,
       promptPath: repo.promptPath,
       fetchUrl: repo.repo,
-      port,
+      port: options.port ?? null,
       serverPort: await freeTcpPort(),
-      slots: { count: 2, helper, appPortBase, env },
+      slots: { count: 2, socket: options.socket ?? socketPath, appPortBase, env: options.env ?? {} },
     });
-    const { ctx, stdout } = makeContext({ factories: { codehostMcpSpec: fakeCodehostMcpSpec, slotRunner: runner.run } });
+    const { ctx, stdout } = makeContext({ factories: { codehostMcpSpec: fakeCodehostMcpSpec, slotRunner: runner.run, slotHelperPath: helper } });
     await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"]).catch(() => undefined);
     return { lines: stdout().split("\n").filter((line) => line.includes("] slot ")), out: stdout() };
   };
 
-  it.skipIf(process.getuid?.() === 0)("checks the helper, the sudo rule, every slot's ports and the env keys", async () => {
-    const { lines } = await slotLines(slotRunner(), { DB_PORT: "{{postgres}}", REDIS_URL: "redis://localhost:{{redis}}" });
+  it.skipIf(process.getuid?.() === 0)("checks the helper, the socket, every slot's ports and the env keys", async () => {
+    const { lines } = await slotLines(slotRunner(), { env: { DB_PORT: "{{postgres}}", REDIS_URL: "redis://localhost:{{redis}}" } });
 
     const p1 = ports.get(1);
     const p2 = ports.get(2);
     expect(lines).toEqual([
       `[fail] slot helper: ${helper} is not owned by root; chown root:root ${helper}`,
-      `[ok] slot sudo: sudo -n ${helper} check: ok`,
+      `[ok] slot socket: ${socketPath}: check ok`,
       `[ok] slot 1 ports: app ${appPortBase + 1}, postgres ${p1?.postgres}, redis ${p1?.redis}, rabbitmq ${p1?.rabbitmq} free`,
       `[ok] slot 2 ports: app ${appPortBase + 2}, postgres ${p2?.postgres}, redis ${p2?.redis}, rabbitmq ${p2?.rabbitmq} free`,
       "[fail] slot env keys: not in any overlay file: REDIS_URL; remove them from slots.env or sync the overlay",
@@ -2545,22 +2778,36 @@ describe("slot checks", () => {
     const postgres = ports.get(1)?.postgres ?? 0;
     await new Promise<void>((resolve) => held.listen(postgres, resolve));
     try {
-      const { lines } = await slotLines(runner, { DB_PORT: "{{postgres}}" });
-      expect(lines).toContain(`[fail] slot 1 ports: slot 1 is up (postgres ${postgres} in use); stop serve or run sudo -n ${helper} down 1`);
+      const { lines } = await slotLines(runner, { env: { DB_PORT: "{{postgres}}" } });
+      expect(lines).toContain(`[fail] slot 1 ports: slot 1 is up (postgres ${postgres} in use); stop serve or run ${helper} down 1 as root`);
     } finally {
       await new Promise<void>((resolve) => held.close(() => resolve()));
     }
   });
 
-  it("reports a failed sudo check with sudo's own words", async () => {
+  it("reports a missing socket with the unit to enable", async () => {
+    const missing = join(dir, "missing.sock");
+    const { lines } = await slotLines(slotRunner(), { socket: missing });
+    expect(lines).toContain(`[fail] slot socket: ${missing} does not exist; systemctl enable --now steward-slot.socket (docs/ops.md, "Worker slots")`);
+  });
+
+  it("reports a path that is not a socket", async () => {
+    const plain = join(dir, "plain-file");
+    await writeFile(plain, "");
+    const { lines } = await slotLines(slotRunner(), { socket: plain });
+    expect(lines).toContain(`[fail] slot socket: ${plain} is not a socket`);
+  });
+
+  it("reports a failed check over the socket in the runner's own words", async () => {
     const runner = slotRunner();
-    runner.respond("check", { exitCode: 1, stdout: "", output: "sudo: a password is required\n" });
-    const { lines } = await slotLines(runner, {});
-    expect(lines).toContain(`[fail] slot sudo: sudo -n ${helper} check failed: sudo: a password is required; see docs/ops.md, "Worker slots"`);
+    const reason = `cannot reach the slot helper at ${socketPath}: connect ECONNREFUSED ${socketPath}`;
+    runner.respond("check", { exitCode: 1, stdout: "", output: reason });
+    const { lines } = await slotLines(runner);
+    expect(lines).toContain(`[fail] slot socket: check over ${socketPath} failed: ${reason}; see docs/ops.md, "Worker slots"`);
   });
 
   it("reports workspace.port next to slots as a config failure", async () => {
-    const { out } = await slotLines(slotRunner(), {}, 4100);
+    const { out } = await slotLines(slotRunner(), { port: 4100 });
     expect(out.startsWith("[fail] config: ")).toBe(true);
     expect(out).toContain("workspace.port was replaced by slots.appPortBase (see docs/ops.md)");
   });
@@ -2577,8 +2824,10 @@ Expected: FAIL; no `slot …` lines are printed (doctor still prints the single 
 In `src/cli/context.ts` add `import type { SlotRunner } from "../workspace/slots.js";` and to `CliFactories`:
 
 ```ts
-  /** Stands in for `sudo -n <helper>`; tests never run sudo or Docker. */
+  /** Stands in for the slot helper's socket; tests never reach systemd or Docker. */
   slotRunner?: SlotRunner;
+  /** Stands in for /usr/local/sbin/steward-slot in the helper ownership check. */
+  slotHelperPath?: string;
 ```
 
 In `src/cli/doctor.ts` extend the imports:
@@ -2592,8 +2841,11 @@ import { SlotClient } from "../workspace/slots.js";
 (replacing the `appPortOf`-only import from Task 1), and add before `serviceChecks`:
 
 ```ts
+/** Where the install puts the helper; ops/steward-slot@.service runs it from here. */
+export const SLOT_HELPER_PATH = "/usr/local/sbin/steward-slot";
 const SLOTS_DOC = 'docs/ops.md, "Worker slots"';
 
+/** The helper runs as root: nobody but root may be able to change it. Doctor can read it (it is world-readable). */
 const slotHelperCheck = (helper: string): Check => ({
   name: "slot helper",
   run: async () => {
@@ -2605,8 +2857,19 @@ const slotHelperCheck = (helper: string): Check => ({
   },
 });
 
+/** The socket exists and the helper behind it answers `check` (compose file parses, images pulled). */
+const slotSocketCheck = (socketPath: string, client: SlotClient): Check => ({
+  name: "slot socket",
+  run: async () => {
+    if (!existsSync(socketPath)) return flunk(`${socketPath} does not exist; systemctl enable --now steward-slot.socket (${SLOTS_DOC})`);
+    if (!(await stat(socketPath)).isSocket()) return flunk(`${socketPath} is not a socket`);
+    const result = await client.check();
+    return result.ok ? ok(`${socketPath}: check ok`) : flunk(`check over ${socketPath} failed: ${result.output}; see ${SLOTS_DOC}`);
+  },
+});
+
 /** Doctor expects every slot down (serve stopped or idle), so a held service port usually means a slot left up. */
-const slotPortsCheck = (config: StewardConfig, slots: SlotsConfig, client: SlotClient, n: number): Check => ({
+const slotPortsCheck = (config: StewardConfig, helper: string, client: SlotClient, n: number): Check => ({
   name: `slot ${n} ports`,
   run: async () => {
     const ports = await client.ports(n);
@@ -2614,12 +2877,21 @@ const slotPortsCheck = (config: StewardConfig, slots: SlotsConfig, client: SlotC
     const busy: string[] = [];
     for (const [name, port] of named) if (!(await isPortFree(port))) busy.push(`${name} ${port}`);
     if (busy.length === 0) return ok(`${named.map(([name, port]) => `${name} ${port}`).join(", ")} free`);
-    if ((await client.status(n)) !== "") return flunk(`slot ${n} is up (${busy.join(", ")} in use); stop serve or run sudo -n ${slots.helper} down ${n}`);
+    if ((await client.status(n)) !== "") return flunk(`slot ${n} is up (${busy.join(", ")} in use); stop serve or run ${helper} down ${n} as root`);
     return flunk(`in use: ${busy.join(", ")}`);
   },
 });
 
-/** Without `slots`: workspace.port is free. With `slots`: the helper, the sudo rule, every slot's ports and the env keys. */
+const slotEnvCheck = (config: StewardConfig, slots: SlotsConfig): Check => ({
+  name: "slot env keys",
+  run: async () => {
+    const keys = Object.keys(slots.env);
+    const absent = await missingOverrideKeys(config.workspace.overlayDir, keys);
+    return absent.length === 0 ? ok(`${keys.length} key(s) found in the overlay`) : flunk(`not in any overlay file: ${absent.join(", ")}; remove them from slots.env or sync the overlay`);
+  },
+});
+
+/** Without `slots`: workspace.port is free. With `slots`: the helper, its socket, every slot's ports and the env keys. */
 const portChecks = ({ config }: LoadedConfig, ctx: CliContext): Check[] => {
   const slots = config.slots;
   if (slots === undefined) {
@@ -2634,24 +2906,12 @@ const portChecks = ({ config }: LoadedConfig, ctx: CliContext): Check[] => {
     ];
   }
   const client = new SlotClient(slots, ctx.factories?.slotRunner);
+  const helper = ctx.factories?.slotHelperPath ?? SLOT_HELPER_PATH;
   return [
-    slotHelperCheck(slots.helper),
-    {
-      name: "slot sudo",
-      run: async () => {
-        const result = await client.check();
-        return result.ok ? ok(`sudo -n ${slots.helper} check: ok`) : flunk(`sudo -n ${slots.helper} check failed: ${result.output}; see ${SLOTS_DOC}`);
-      },
-    },
-    ...Array.from({ length: slots.count }, (_, index) => slotPortsCheck(config, slots, client, index + 1)),
-    {
-      name: "slot env keys",
-      run: async () => {
-        const keys = Object.keys(slots.env);
-        const absent = await missingOverrideKeys(config.workspace.overlayDir, keys);
-        return absent.length === 0 ? ok(`${keys.length} key(s) found in the overlay`) : flunk(`not in any overlay file: ${absent.join(", ")}; remove them from slots.env or sync the overlay`);
-      },
-    },
+    slotHelperCheck(helper),
+    slotSocketCheck(slots.socket, client),
+    ...Array.from({ length: slots.count }, (_, index) => slotPortsCheck(config, helper, client, index + 1)),
+    slotEnvCheck(config, slots),
   ];
 };
 ```
@@ -2667,7 +2927,7 @@ Expected: PASS (the existing "reports every check" test still ends with `[ok] po
 
 ```bash
 git add src/cli/context.ts src/cli/doctor.ts test/cli/helpers.ts test/cli/doctor.test.ts
-git commit -m "feat(doctor): check the slot helper, sudo rule, slot ports and env keys
+git commit -m "feat(doctor): check the slot helper, its socket, slot ports and env keys
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -2678,7 +2938,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `src/cli/runtime.ts:42-65`, `src/cli/jobs.ts:1-61`
-- Modify: `docs/ops.md` (§1.5 line 148-149, §1.8 line 364, new §1.11 before `## 2. Why the overlay holds sandbox credentials`), `ops/ticket-steward.service`, `examples/kickoff/steward.config.ts`
+- Modify: `docs/ops.md` (§1.5 line 148-149, §1.8 line 364, new §1.11 before `## 2. Why the overlay holds sandbox credentials`), `examples/kickoff/steward.config.ts`
 - Test: `test/cli/enrich.test.ts`, `test/cli/jobs.test.ts`
 
 **Interfaces:**
@@ -2776,7 +3036,7 @@ and in the `jobs` list action, before `for (const job of rows) …`:
 Run: `npx vitest run test/cli && npm run -s typecheck && npm run -s lint`
 Expected: PASS.
 
-- [ ] **Step 5: Docs, unit note and example config**
+- [ ] **Step 5: Docs and example config**
 
 `docs/ops.md` §1.5, replace:
 
@@ -2796,9 +3056,9 @@ overrides keys in the job's copy (§1.11).
 `docs/ops.md` §1.8, replace the line `` `workspace.port` is free. `` with:
 
 ```
-`workspace.port` is free, or, with `slots` (§1.11): the helper is root-owned and not group- or
-world-writable, `sudo -n <helper> check` passes, every slot's app and service ports are free (a slot
-left up is named), and every `slots.env` key is defined in the overlay.
+`workspace.port` is free, or, with `slots` (§1.11): `/usr/local/sbin/steward-slot` is root-owned and not
+group- or world-writable, `slots.socket` exists, is a socket and answers `check`, every slot's app and
+service ports are free (a slot left up is named), and every `slots.env` key is defined in the overlay.
 ```
 
 `docs/ops.md`, insert immediately before `## 2. Why the overlay holds sandbox credentials`:
@@ -2814,11 +3074,15 @@ ends: Postgres 17 with TimescaleDB (databases `concentrate` and `concentrate_tg`
 never to Timescale Cloud, the dev Redis cluster, the dev RabbitMQ or a remote Postgres. Two jobs for the
 same ticket (or the same merge request) never run at once.
 
-**Why a root helper.** The agent runs as `steward`, and Docker access is root access, so `steward` stays
-out of the `docker` group. It may run exactly one root-owned script through sudo:
-`/usr/local/sbin/steward-slot up|down|status|ports <n>` and `check`, `n` 1–9, nothing else. The brain's
-policy also denies `sudo` and `docker`. The accepted risk: an agent that gets around the policy could
-`down` another slot; that slot's job then fails and is retried.
+**Why a socket-activated root helper.** The agent runs as `steward`, and Docker access is root access, so
+`steward` stays out of the `docker` group, and the steward unit keeps `NoNewPrivileges=yes` (no sudo, no
+setuid). Instead systemd listens on `/run/steward-slot.sock` (owner root, group `steward`, mode 0660) and,
+for each connection, starts one `steward-slot@.service` instance that runs
+`/usr/local/sbin/steward-slot --socket` as root. The helper reads one request line (`up|down|status|ports
+<n>` or `check`, `n` 1–9, at most 64 bytes), runs it, sends back the output and a last line `exit <code>`,
+and refuses anything else with `exit 2`. The brain's policy also denies `sudo` and `docker`. The accepted
+risk: the agent runs as `steward`, so it can connect to the socket and `down` another slot; that slot's
+job then fails and is retried.
 
 **Install** (as root, from a checkout of this repo):
 
@@ -2827,17 +3091,13 @@ install -o root -g root -m 0755 ops/steward-slot /usr/local/sbin/steward-slot
 install -d -o root -g root -m 0755 /etc/ticket-steward/slots /etc/ticket-steward/slots/init /etc/ticket-steward/slots/docker
 install -o root -g root -m 0644 ops/slots-compose.yml /etc/ticket-steward/slots/compose.yml
 install -o root -g root -m 0644 ops/slots-init/01-databases.sql /etc/ticket-steward/slots/init/01-databases.sql
-echo 'steward ALL=(root) NOPASSWD: /usr/local/sbin/steward-slot' > /etc/sudoers.d/ticket-steward-slots
-chmod 0440 /etc/sudoers.d/ticket-steward-slots
-visudo -cf /etc/sudoers.d/ticket-steward-slots
+install -o root -g root -m 0644 ops/steward-slot.socket ops/steward-slot@.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now steward-slot.socket
 docker pull timescale/timescaledb-ha:pg17-ts2.27-all
 docker pull redis:7-alpine
 docker pull rabbitmq:4.2.0-management
-# sudo cannot gain root under the unit's NoNewPrivileges=yes; lift it for this unit only
-mkdir -p /etc/systemd/system/ticket-steward.service.d
-printf '[Service]\nNoNewPrivileges=no\n' > /etc/systemd/system/ticket-steward.service.d/slots.conf
-systemctl daemon-reload
-sudo -u steward sudo -n /usr/local/sbin/steward-slot check   # prints ok
+printf 'check\n' | sudo -u steward socat - UNIX-CONNECT:/run/steward-slot.sock   # prints ok, then exit 0
 ```
 
 **Config.** Add `slots` and remove `workspace.port` (config load rejects it next to `slots`). Keep
@@ -2848,7 +3108,7 @@ that keeps the other origins of a `CORS_ORIGIN` list.
 slots: {
   count: 2,
   appPortBase: 4100,           // slot n's app port is 4100 + n
-  // helper: "/usr/local/sbin/steward-slot", upTimeoutSeconds: 180 (defaults)
+  // socket: "/run/steward-slot.sock", upTimeoutSeconds: 180 (defaults)
   env: {
     DB_HOST: "localhost",
     DB_PORT: "{{postgres}}",
@@ -2873,33 +3133,28 @@ Each `env` key is replaced in every copied overlay file that defines it (a `KEY=
 fails the job (not retried) and doctor, by name. Templates: `{{app}}`, `{{postgres}}`, `{{redis}}`,
 `{{rabbitmq}}`; any other `{{name}}` fails config load. The overlay directory itself never changes, so
 the redactor and the implement secret guard still know the remote credentials the overrides replaced.
-Host ports come from `steward-slot ports <n>`: Postgres `15032 + 100n`, Redis `16079 + 100n`, RabbitMQ
+Host ports come from the helper's `ports <n>`: Postgres `15032 + 100n`, Redis `16079 + 100n`, RabbitMQ
 `15072 + 100n`, all on 127.0.0.1. The slot credentials are throwaway, not secrets.
 
-Per job: free the app port, `down` then `up` the slot (killed after `upTimeoutSeconds`), create the
-worktree, copy the overlay with the overrides, run `workspace.setup` (`reset-dbs.sh` reads
-`e2e/user/.env`, which now holds the slot's values), run the brain with `STEWARD_PORT` set to the
-slot's app port, publish, and `down` the slot. A slot that does not come up fails the job as retryable
-with `setup failed: slot <n>: …` and the helper's output tail in the attempt's `setupTail`. `steward
-serve` brings every slot down when it starts and when it stops; retention sweeps only while no job
-runs. `steward enrich|implement KEY` without serve runs on slot 1.
+Per job: free the app port, `down` then `up` the slot (abandoned after `upTimeoutSeconds`; the helper
+instance itself is capped at 300 s), create the worktree, copy the overlay with the overrides, run
+`workspace.setup` (`reset-dbs.sh` reads `e2e/user/.env`, which now holds the slot's values), run the
+brain with `STEWARD_PORT` set to the slot's app port, publish, and `down` the slot. A slot that does not
+come up fails the job as retryable with `setup failed: slot <n>: …` and the helper's output tail in the
+attempt's `setupTail`. `steward serve` brings every slot down when it starts and when it stops;
+retention sweeps only while no job runs. `steward enrich|implement KEY` without serve runs on slot 1.
 
 **Troubleshooting.**
 
-- `sudo -n /usr/local/sbin/steward-slot status <n>` lists a slot's containers; `down <n>` removes them.
-- `sudo: a password is required`: the sudoers drop-in is missing or not valid (`visudo -cf`).
-- `sudo: The "no new privileges" flag is set`: the unit drop-in above is missing; `systemctl daemon-reload` and restart.
-- Doctor reports `slot <n> is up` while serve is stopped: a crashed run left it; `down <n>`.
+- `steward-slot status <n>` (as root) lists a slot's containers; `steward-slot down <n>` removes them.
+- `cannot reach the slot helper at /run/steward-slot.sock: connect ENOENT`: the socket unit is not running;
+  `systemctl enable --now steward-slot.socket`. `EACCES`: the steward user is not in group `steward`, or
+  `SocketGroup`/`SocketMode` were changed.
+- `helper closed without an exit status`: the helper instance died; `journalctl -u 'steward-slot@*'`.
+- Doctor reports `slot <n> is up` while serve is stopped: a crashed run left it; `steward-slot down <n>`.
 - A port in use that is not a slot: `ss -ltnp 'sport = :<port>'` names the holder; move `appPortBase` or stop it.
 - `steward jobs` prints `# running: slot 1 job 12, …` while serve runs; `/health` has the same list under `worker.running`.
 ````
-
-`ops/ticket-steward.service`: directly above `NoNewPrivileges=yes` add:
-
-```
-# With `slots` configured, sudo must gain root to run steward-slot; lift this in a drop-in
-# (/etc/systemd/system/ticket-steward.service.d/slots.conf: NoNewPrivileges=no), see docs/ops.md §1.11.
-```
 
 `examples/kickoff/steward.config.ts`: delete the line `    port: 4100,` from `workspace`, and before the closing `});` add:
 
@@ -2936,7 +3191,7 @@ Expected: PASS, every file green (live tests skip as today without credentials).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/cli/runtime.ts src/cli/jobs.ts test/cli/enrich.test.ts test/cli/jobs.test.ts docs/ops.md ops/ticket-steward.service examples/kickoff/steward.config.ts
+git add src/cli/runtime.ts src/cli/jobs.ts test/cli/enrich.test.ts test/cli/jobs.test.ts docs/ops.md examples/kickoff/steward.config.ts
 git commit -m "feat(cli): inline runs use slot 1, jobs shows running slots; docs for worker slots
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -2946,17 +3201,23 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ## Ops (controller only, not a subagent task)
 
-Run after the branch is merged and built on the host, as the controller, with sudo. Spec §10 steps 1–6.
+Run after the branch is merged and built on the host, as the controller, with sudo. Spec §10 steps 1–6. A one-request client, used below (needs no extra package; `socat - UNIX-CONNECT:/run/steward-slot.sock` works too):
 
-- [ ] **1. Install the helper, compose file and init script** (root-owned):
+```bash
+# slot-req <request line>: one request over the helper socket, prints the reply
+slot-req() { node -e 'const s=require("net").connect("/run/steward-slot.sock",()=>s.write(process.argv[1]+"\n"));s.pipe(process.stdout);s.on("error",e=>{console.error(e.message);process.exit(1)})' "$1"; }
+```
+
+- [ ] **1. Install the helper, compose file, init script and socket units** (root-owned):
   `install -o root -g root -m 0755 ops/steward-slot /usr/local/sbin/steward-slot`;
   `install -d -o root -g root -m 0755 /etc/ticket-steward/slots /etc/ticket-steward/slots/init /etc/ticket-steward/slots/docker`;
   `install -o root -g root -m 0644 ops/slots-compose.yml /etc/ticket-steward/slots/compose.yml`;
-  `install -o root -g root -m 0644 ops/slots-init/01-databases.sql /etc/ticket-steward/slots/init/01-databases.sql`.
-- [ ] **2. Sudoers drop-in:** write `steward ALL=(root) NOPASSWD: /usr/local/sbin/steward-slot` to `/etc/sudoers.d/ticket-steward-slots`, `chmod 0440`, `visudo -cf /etc/sudoers.d/ticket-steward-slots` must say `parsed OK`.
-- [ ] **2a. Unit drop-in** (not in the spec; required): `/etc/systemd/system/ticket-steward.service.d/slots.conf` with `[Service]` / `NoNewPrivileges=no`, then `systemctl daemon-reload`. Without it every `sudo -n` from serve fails with "no new privileges" while doctor (run from a shell) passes.
+  `install -o root -g root -m 0644 ops/slots-init/01-databases.sql /etc/ticket-steward/slots/init/01-databases.sql`;
+  `install -o root -g root -m 0644 ops/steward-slot.socket ops/steward-slot@.service /etc/systemd/system/`.
+- [ ] **2. Enable the socket:** `systemctl daemon-reload`; `systemctl enable --now steward-slot.socket`; `ls -l /run/steward-slot.sock` shows `srw-rw---- root steward`; `systemctl status steward-slot.socket` is `active (listening)`. Confirm the steward unit still has `NoNewPrivileges=yes` (no drop-in is needed).
 - [ ] **3. Pull images:** `docker pull timescale/timescaledb-ha:pg17-ts2.27-all`, `docker pull redis:7-alpine`, `docker pull rabbitmq:4.2.0-management`.
 - [ ] **3a. Verify the -ha image's data path:** `docker run --rm --entrypoint sh timescale/timescaledb-ha:pg17-ts2.27-all -c 'echo $PGDATA; id'` shows `/home/postgres/pgdata/data` and uid 1000; if it differs, fix `PGDATA`/tmpfs in `ops/slots-compose.yml` in a follow-up commit before step 4.
-- [ ] **4. Smoke the helper as steward:** `sudo -u steward sudo -n /usr/local/sbin/steward-slot check` prints `ok`; `time sudo -u steward sudo -n /usr/local/sbin/steward-slot up 1` (target under 30 s); `… status 1` shows three healthy containers; `psql "postgres://postgres:steward-slot@127.0.0.1:15132/concentrate_tg" -c '\dx timescaledb'` lists the extension; `… down 1`; `docker ps --filter label=com.docker.compose.project=steward-slot-1` is empty. Then the same `up 1`/`down 1` under the unit's sandbox: `systemd-run --uid=steward --gid=steward -p NoNewPrivileges=no -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes --wait --pipe sudo -n /usr/local/sbin/steward-slot up 1` (and `down 1`).
-- [ ] **5. Live config:** `cp /etc/ticket-steward/steward.config.ts /etc/ticket-steward/steward.config.ts.bak`; add the `slots` block (the owner's `env` map from spec §2), remove `workspace.port`, keep `workspace.portRewrite`; `sudo -u steward steward doctor` (from `/etc/ticket-steward`) shows `slot helper`, `slot sudo`, `slot 1 ports`, `slot 2 ports`, `slot env keys` all `[ok]`.
-- [ ] **6. Restart while idle and prove it:** confirm `curl -s localhost:3020/health` shows `"running":[]`, `systemctl restart ticket-steward`; label two different tickets `needs-triage`; during the run `docker ps` shows `steward-slot-1-*` and `steward-slot-2-*` and `steward jobs` prints `# running: slot 1 job …, slot 2 job …`; afterwards `docker ps --filter name=steward-slot` is empty and both jobs are `succeeded`.
+- [ ] **4. Smoke the helper as steward over the socket:** `sudo -u steward bash -c "$(declare -f slot-req); slot-req check"` prints `ok` then `exit 0`; `time` the same with `up 1` (target under 30 s, last line `exit 0`); `slot-req 'status 1'` shows three healthy containers; `psql "postgres://postgres:steward-slot@127.0.0.1:15132/concentrate_tg" -c '\dx timescaledb'` lists the extension; `slot-req 'down 1'`; `docker ps --filter label=com.docker.compose.project=steward-slot-1` is empty. Negative checks: `slot-req 'up 1;rm'` answers a usage line and `exit 2`; `sudo -u nobody bash -c "$(declare -f slot-req); slot-req check"` fails with `EACCES`.
+- [ ] **4a. Verify from inside the steward unit's sandbox (the thing to prove):** `systemd-run --uid=steward --gid=steward -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes --wait --pipe bash -c "$(declare -f slot-req); slot-req check"` prints `ok` / `exit 0`. `ProtectSystem=strict` makes `/` read-only, but `connect()` on an existing socket inode is expected to still work; if it fails with `EROFS` or `EACCES`, add a drop-in `/etc/systemd/system/ticket-steward.service.d/slots.conf` with `[Service]` / `ReadWritePaths=/run/steward-slot.sock`, `daemon-reload`, and repeat with `-p ReadWritePaths=/run/steward-slot.sock`.
+- [ ] **5. Live config:** `cp /etc/ticket-steward/steward.config.ts /etc/ticket-steward/steward.config.ts.bak`; add the `slots` block (the owner's `env` map from spec §2; `socket` left at its default), remove `workspace.port`, keep `workspace.portRewrite`; `sudo -u steward steward doctor` (from `/etc/ticket-steward`) shows `slot helper`, `slot socket`, `slot 1 ports`, `slot 2 ports`, `slot env keys` all `[ok]`.
+- [ ] **6. Restart while idle and prove it:** confirm `curl -s localhost:3020/health` shows `"running":[]`, `systemctl restart ticket-steward`; label two different tickets `needs-triage`; during the run `docker ps` shows `steward-slot-1-*` and `steward-slot-2-*` and `steward jobs` prints `# running: slot 1 job …, slot 2 job …`; afterwards `docker ps --filter name=steward-slot` is empty and both jobs are `succeeded`; `journalctl -u 'steward-slot@*' --since -1h` shows one short-lived instance per request and no failures.
