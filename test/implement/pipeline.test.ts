@@ -1,7 +1,7 @@
-import { chmod, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BrainInput, BrainRun } from "../../src/brain/types.js";
+import { INTERRUPTED_ERROR, type BrainInput, type BrainRun } from "../../src/brain/types.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { PipelineDeps } from "../../src/core/pipeline.js";
 import { Redactor } from "../../src/core/redact.js";
@@ -197,6 +197,75 @@ describe("runImplement", () => {
     const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value from the overlay" });
     expect(tracker.comments("issue-1")[0]).not.toContain("supersecretvalue123");
+  });
+
+  it("hands back when a pre-commit hook force-adds a gitignored overlay secret, pushing nothing", async () => {
+    await writeFile(join(repo.overlayDir, ".env"), "API_SECRET=supersecretvalue123\n");
+    const ctx = claim();
+    const brain = editingBrain(implemented, async (w) => {
+      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
+      await mkdir(join(w, ".husky"), { recursive: true });
+      await writeFile(join(w, ".husky/pre-commit"), "git add -f .env\n");
+    });
+
+    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change would commit files the steward copied in" });
+    expect(tracker.comments("issue-1")[0]).toContain(".env");
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
+    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
+    expect(stores.jobs.get(ctx.jobId)?.pushedAt ?? null).toBeNull();
+  });
+
+  it("hands back when a pre-commit hook stages a secret the steward guard passed", async () => {
+    await writeFile(join(repo.overlayDir, ".env"), "API_SECRET=supersecretvalue123\n");
+    const ctx = claim();
+    const brain = editingBrain(implemented, async (w) => {
+      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
+      await mkdir(join(w, ".husky"), { recursive: true });
+      await writeFile(join(w, ".husky/pre-commit"), "cp .env src/leak.txt\ngit add src/leak.txt\n");
+    });
+
+    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value from the overlay" });
+    expect(tracker.comments("issue-1")[0]).toContain("src/leak.txt");
+    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
+  });
+
+  it("hands back when the change contains one of the steward's own secrets", async () => {
+    const ctx = claim();
+    const brain = editingBrain(implemented, async (w) => writeFile(join(w, "src/adapter.ts"), 'export const k = "sk-ant-steward-brain-key";\n'));
+    const deps = { ...makeDeps(brain.runBrain), secrets: { GITLAB_PUSH_TOKEN: "glpat-push-token-value", ANTHROPIC_API_KEY: "sk-ant-steward-brain-key" } };
+
+    const outcome = await runImplement(ctx, deps);
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value from the overlay" });
+    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
+  });
+
+  it("treats a shutdown during the checks as an interruption, not a hand-back", async () => {
+    const abort = new AbortController();
+    const ctx = claim();
+    const brain = editingBrain(implemented, async (w) => {
+      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
+      setTimeout(() => abort.abort(), 300);
+    });
+    const deps = { ...makeDeps(brain.runBrain, makeConfig({ checks: ["sleep 10"] })), signal: abort.signal };
+
+    const outcome = await runImplement(ctx, deps);
+
+    expect(outcome).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+    expect(stores.jobs.get(ctx.jobId)?.implementResult ?? null).toBeNull();
+    expect(tracker.comments("issue-1")).toEqual([]);
+    expect(tracker.labelSwaps()).toEqual([]);
+  });
+
+  it("includes the hand-back detail in a dry run", async () => {
+    const ctx = { ...claim(), dryRun: true };
+    const outcome = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain, makeConfig({ checks: ["echo 'type error in adapter.ts'; exit 2"] })));
+    expect(outcome).toMatchObject({ status: "succeeded", warning: expect.stringMatching(/^dry run: would hand back: the steward's checks failed\n[\s\S]*type error in adapter\.ts/) });
+    expect(tracker.comments("issue-1")).toEqual([]);
   });
 
   it("refuses a Done ticket without running the brain", async () => {

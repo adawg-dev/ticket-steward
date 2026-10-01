@@ -18,7 +18,7 @@ import { runSetup } from "../workspace/setup.js";
 import type { Worktree } from "../workspace/worktree.js";
 import { branchName } from "./branch.js";
 import { extractAgentBrief } from "./brief.js";
-import { BranchExistsError, bundleBase, commitWithHooks, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "./git.js";
+import { BranchExistsError, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "./git.js";
 import { renderImplementPrompt } from "./prompt.js";
 import { branchUrl, publishImplement } from "./publish.js";
 import { validateImplementResult, type Handback, type StoredImplement } from "./result.js";
@@ -82,9 +82,11 @@ const commitMessage = (identifier: string, message: string): string => {
   return [`${identifier}: ${subject.trim()}`, ...body].join("\n");
 };
 
+const dryRunHandback = ({ reason, detail }: Handback): string => (detail === "" ? `dry run: would hand back: ${reason}` : `dry run: would hand back: ${reason}\n${detail}`);
+
 /** Stored, then published; dry runs stop before storing. */
 const finish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredImplement, branch: string | null): Promise<JobOutcome> => {
-  if (ctx.dryRun) return { status: "succeeded", warning: stored.handback === null ? `dry run: would push ${branch ?? "?"}` : `dry run: would hand back: ${stored.handback.reason}` };
+  if (ctx.dryRun) return { status: "succeeded", warning: stored.handback === null ? `dry run: would push ${branch ?? "?"}` : dryRunHandback(stored.handback) };
   deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
   return publishImplement({
     ctx,
@@ -97,9 +99,10 @@ const finish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredImpleme
   });
 };
 
-const overlaySecrets = async (overlayDir: string): Promise<{ files: string[]; secrets: string[] }> => {
+/** Overlay files (never to be committed) and every secret the change must not carry: the overlay's and the steward's own. */
+const guardSecrets = async (overlayDir: string, stewardSecrets: Record<string, string | undefined>): Promise<{ files: string[]; secrets: string[] }> => {
   const files = existsSync(overlayDir) ? await listFiles(overlayDir) : [];
-  return { files, secrets: collectSecretValues({}, files.map((file) => join(overlayDir, file))) };
+  return { files, secrets: collectSecretValues(stewardSecrets, files.map((file) => join(overlayDir, file))) };
 };
 
 const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
@@ -170,7 +173,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   if (result.outcome === "needs_info") return finish(ctx, deps, { result, handback: handback("needsInfo", "the ticket needs more information") }, null);
   if (result.outcome === "failed") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent could not finish") }, null);
 
-  const { files: overlayFiles, secrets } = await overlaySecrets(deps.config.workspace.overlayDir);
+  const { files: overlayFiles, secrets } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
   const guard = await stageAndGuard({ worktreePath: worktree.path, overlayFiles, skillsPrefix: SKILLS_PREFIX, secretValues: secrets });
   if (!guard.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", guard.reason, guard.detail) }, null);
 
@@ -181,6 +184,8 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     tailBytes: CHECK_TAIL_BYTES,
     ...(deps.signal === undefined ? {} : { signal: deps.signal }),
   });
+  // A shutdown kills the checks; that is an interruption to resume, not a failed check to hand back.
+  if (deps.signal?.aborted === true) return { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
   if (!checked.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", "the steward's checks failed", deps.redactor.redact(checked.tail)) }, null);
 
   const branch = branchName(result.branchType ?? "", ctx.identifier, bundle.title);
@@ -210,6 +215,9 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     env: workspaceEnv,
   });
   if (!committed.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", "kickoff's commit hooks rejected the change", deps.redactor.redact(committed.output)) }, null);
+  // The hooks ran agent-editable code after the staged guard; push only what passes the same guard as committed.
+  const verified = await guardCommit({ worktreePath: worktree.path, baseSha, sha: committed.sha, overlayFiles, skillsPrefix: SKILLS_PREFIX, secretValues: secrets });
+  if (!verified.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", verified.reason, verified.detail) }, null);
 
   await saveBundle(worktree.path, baseSha, join(paths.jobDir, BUNDLE_FILE));
   deps.stores.jobs.recordCommit(ctx.jobId, branch, committed.sha);
