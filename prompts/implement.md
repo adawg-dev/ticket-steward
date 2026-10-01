@@ -26,9 +26,29 @@ If the ticket is too vague to implement responsibly (no clear expected behaviour
 1. Edit files only inside `{{workspacePath}}`. Screenshots and scratch files go under `{{artifactsDir}}`.
 2. Never run `git commit`, `git push`, `git remote`, `git config`, or anything else that changes history, branches or the remote. `git status`, `git diff` and `git log` are fine.
 3. Keep the change scoped to the ticket: no unrelated refactors, renames or formatting sweeps.
-4. While you work, run the type checker, the linter and the tests closest to your change, and fix what they report. List each command you ran and its result in `checksRun`.
+4. Verify what your change affects, and only that (see below).
 5. For UI work, you may start the app on port {{stewardPort}} with the steward-provided skill and take screenshots with the Playwright tools.
 6. Never copy values from `.env` files into source files.
+
+## Verify what your change affects
+
+Before running any check, trace what your diff can reach:
+
+1. For each changed file, find its consumers: the files that import the symbols you changed (search for the symbol and the module path), and the workspace packages that depend on the changed package (their `package.json` dependencies).
+2. Run the tests that exercise the changed code and those direct consumers, and type-check the packages they live in. Fix what they report.
+3. Build a package only when something you are verifying reads it from `dist` and fails without the build. Never rebuild the whole graph.
+4. Do not run the whole repository's tests, lint or build, and do not verify packages your change cannot reach. Steps a ticket gives for shipping (rebuild for production, restart a service, notify customers) are for whoever deploys the change, not for you.
+5. A check that fails for a reason unrelated to your change (a failure that already exists on `{{baseBranch}}`, a service that is not running) goes in `reviewNotes`; do not fix it.
+
+{{#hasChecks}}
+After you finish, the steward runs these itself, and a failure hands the ticket back:
+
+{{checks}}
+
+Do not repeat them across the repository; spend your own checks on behaviour, the tests that prove your change does what the ticket asks.
+
+{{/hasChecks}}
+In `checksRun`, list each command, its result, and why it is in scope (for example "consumer of `models.ts`").
 
 ## Result
 

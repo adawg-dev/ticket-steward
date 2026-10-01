@@ -16,6 +16,8 @@ const vars: ImplementPromptVars = {
   hasBrief: false,
   brief: "",
   branchTypes: "feature, fix, chore, refactor",
+  hasChecks: false,
+  checks: "",
 };
 
 describe("implement prompt", () => {
@@ -24,6 +26,17 @@ describe("implement prompt", () => {
     expect(prompt).toContain("Investigate first");
     expect(prompt).not.toContain("## Agent brief");
     expect(prompt).toContain("feature, fix, chore, refactor");
+  });
+
+  it("asks the agent to verify only what its change affects", () => {
+    const prompt = renderImplementPrompt(template, vars);
+    expect(prompt).toContain("## Verify what your change affects");
+    expect(prompt).not.toContain("the steward runs these itself");
+  });
+
+  it("lists the steward's own checks when there are some", () => {
+    const prompt = renderImplementPrompt(template, { ...vars, hasChecks: true, checks: "- `pnpm turbo check-types lint --filter='...[abc]'`" });
+    expect(prompt).toContain("the steward runs these itself, and a failure hands the ticket back:\n\n- `pnpm turbo check-types lint --filter='...[abc]'`");
   });
 
   it("uses the brief as the spec when there is one", () => {

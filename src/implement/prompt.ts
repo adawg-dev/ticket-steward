@@ -16,6 +16,10 @@ export interface ImplementPromptVars {
   brief: string;
   /** Comma-separated implement.branchTypes. */
   branchTypes: string;
+  /** True when implement.checks is non-empty. */
+  hasChecks: boolean;
+  /** implement.checks with `{{baseSha}}` filled in, one per line as a Markdown list. */
+  checks: string;
 }
 
 const verbatim = (value: string): string => value;

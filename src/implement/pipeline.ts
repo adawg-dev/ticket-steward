@@ -30,6 +30,8 @@ const PUSH_REPO = "push.git";
 const LS_REMOTE_DIR = "ls-remote";
 const SKILLS_PREFIX = ".claude/skills/";
 
+const stewardChecks = (checks: string[], baseSha: string): string[] => checks.map((command) => command.replaceAll("{{baseSha}}", baseSha));
+
 /** The worktree paths the steward copied in: overlay files at their own paths, its skills under `.claude/skills/`. */
 const stewardCopies = async (skillsDir: string | undefined, overlayFiles: string[]): Promise<string[]> => {
   const skills = skillsDir !== undefined && existsSync(skillsDir) ? await listFiles(skillsDir) : [];
@@ -154,6 +156,8 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
       hasBrief: brief !== null,
       brief: brief ?? "",
       branchTypes: settings.branchTypes.join(", "),
+      hasChecks: settings.checks.length > 0,
+      checks: stewardChecks(settings.checks, baseSha).map((command) => `- \`${command}\``).join("\n"),
     });
   } catch (err) {
     return { status: "failed", error: deps.signal?.aborted === true ? INTERRUPTED_ERROR : errorMessage(err), retryable: true };
@@ -185,7 +189,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   if (!guard.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", guard.reason, guard.detail) }, null);
 
   const workspaceEnv = buildWorkspaceEnv(deps.config.workspace.port);
-  const checks = settings.checks.map((command) => command.replaceAll("{{baseSha}}", baseSha));
+  const checks = stewardChecks(settings.checks, baseSha);
   const checked = await runSetup(checks, worktree.path, workspaceEnv, {
     timeoutMs: settings.checksTimeoutMinutes * MINUTE_MS,
     tailBytes: CHECK_TAIL_BYTES,
