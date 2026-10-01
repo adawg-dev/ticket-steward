@@ -32,6 +32,13 @@ export const jobLine = (job: Job): string =>
 
 /** What a retry will do, matching the worker's dispatch. */
 const retryMode = (job: Job): string => {
+  if (job.kind === "implement") {
+    const stored = job.implementResult;
+    if (stored === null) return `job ${job.id}: full run`;
+    if (stored.handback !== null) return `job ${job.id}: publish-only (hand-back stored; comment and labels, nothing to push)`;
+    if (job.pushedAt === null) return `job ${job.id}: publish-only (push ${job.branch ?? "?"} from the bundle, then comment and labels)`;
+    return `job ${job.id}: publish-only (${job.branch ?? "?"} already pushed; comment and labels only)`;
+  }
   if (job.kind === "review") return job.reviewResult === null ? `job ${job.id}: full run` : `job ${job.id}: publish-only (review stored)`;
   return job.result === null ? `job ${job.id}: full run` : `job ${job.id}: publish-only (result stored at ${job.resultSha})`;
 };

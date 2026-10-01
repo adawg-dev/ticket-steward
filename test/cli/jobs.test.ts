@@ -173,6 +173,52 @@ describe("steward jobs", () => {
     expect(stores.jobs.get(id)?.attempts).toBe(2);
   });
 
+  describe("retry of an implement job", () => {
+    const implementEvent: TriggerEvent = { ...createdEvent, kind: "issue.labeled", action: "implement" };
+    const result = { outcome: "implemented" as const, branchType: "fix", commitMessage: "Keep the last chunk", summary: "s", reviewNotes: [], checksRun: [], questions: [], failureDetail: null };
+    const retryLine = async (setup: (id: number) => void): Promise<string> => {
+      const id = stores.jobs.enqueue(implementEvent);
+      stores.jobs.claimById(id);
+      setup(id);
+      stores.jobs.finish(id, { status: "publish_failed", error: "push: 502" });
+      const { stdout, done } = run(["jobs", "retry", String(id)], serveIsUp);
+      await waitFor(() => stdout().includes(`job ${id} queued\n`));
+      stores.jobs.claimById(id);
+      stores.jobs.finish(id, { status: "succeeded" });
+      await done;
+      return stdout().split("\n")[0]?.replace(`job ${id}: `, "") ?? "";
+    };
+
+    it("is a full run without a stored result", async () => {
+      expect(await retryLine(() => undefined)).toBe("full run");
+    });
+
+    it("pushes from the bundle when the push never landed", async () => {
+      expect(
+        await retryLine((id) => {
+          stores.jobs.recordCommit(id, "fix/API-1-keep", "d".repeat(40));
+          stores.jobs.saveImplementResult(id, { result, handback: null });
+        }),
+      ).toBe("publish-only (push fix/API-1-keep from the bundle, then comment and labels)");
+    });
+
+    it("only publishes once the push landed", async () => {
+      expect(
+        await retryLine((id) => {
+          stores.jobs.recordCommit(id, "fix/API-1-keep", "d".repeat(40));
+          stores.jobs.saveImplementResult(id, { result, handback: null });
+          stores.jobs.markPushed(id);
+        }),
+      ).toBe("publish-only (fix/API-1-keep already pushed; comment and labels only)");
+    });
+
+    it("only publishes a stored hand-back", async () => {
+      expect(await retryLine((id) => stores.jobs.saveImplementResult(id, { result: null, handback: { label: "readyForHuman", reason: "the steward's checks failed", detail: "" } }))).toBe(
+        "publish-only (hand-back stored; comment and labels, nothing to push)",
+      );
+    });
+  });
+
   it("retry exits 1 when the job is running under the worker", async () => {
     const id = stores.jobs.enqueue(createdEvent);
     stores.jobs.claimById(id);
