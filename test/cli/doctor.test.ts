@@ -230,4 +230,24 @@ describe("steward doctor", () => {
       expect(output).not.toContain("gitlab webhook secret");
     });
   });
+
+  it("fails when a workflow label is missing in Linear", async () => {
+    const port = await freeTcpPort();
+    const serverPort = await freeTcpPort();
+    const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, promptPath: repo.promptPath, fetchUrl: repo.repo, port, serverPort, implement: { prompt: repo.promptPath } });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (String(input) === LINEAR_GRAPHQL_URL && body.includes("issueLabels")) {
+        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [{ name: "needs-triage" }] } } }), { status: 200 });
+      }
+      if (String(input) === LINEAR_GRAPHQL_URL) return new Response(JSON.stringify({ data: { viewer: { id: "u", name: "Bot" } } }), { status: 200 });
+      return new Response("{}", { status: 200 });
+    };
+    const { ctx, stdout } = makeContext({ fetchImpl, factories: { codehostMcpSpec: fakeCodehostMcpSpec } });
+
+    await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toBeInstanceOf(ExitSignal);
+
+    expect(stdout()).toContain("[fail] linear labels: missing in Linear: ready-for-agent, needs-info, ready-for-human, agent-implemented");
+    expect(stdout()).toContain("[ok] push token: GITLAB_PUSH_TOKEN reaches");
+  });
 });

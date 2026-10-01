@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -8,9 +8,12 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { Command } from "commander";
 import { z } from "zod";
 import { createGitLabReview } from "../codehost/gitlabReview.js";
+import { listProtectedBranches, protectionProblems } from "../codehost/gitlabProtection.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { LoadedConfig } from "../config/load.js";
 import { listFiles } from "../workspace/files.js";
+import { git, scrubCredentials } from "../workspace/git.js";
+import { injectToken, splitCredentials } from "../workspace/mirror.js";
 import { isPortFree } from "../workspace/retention.js";
 import { errorMessage, exitWith, loadFromProgram, println, type CliContext } from "./context.js";
 import { binPath } from "./paths.js";
@@ -36,6 +39,7 @@ const playwrightBrowsersPath = (): string => process.env.PLAYWRIGHT_BROWSERS_PAT
 const SENSITIVE_HOME_DIRS = [".ssh", ".kube"];
 
 const ViewerResponse = z.object({ data: z.object({ viewer: z.object({ id: z.string(), name: z.string() }) }) });
+const LabelsResponse = z.object({ data: z.object({ issueLabels: z.object({ nodes: z.array(z.object({ name: z.string() })) }) }) });
 const GraphqlErrors = z.object({ errors: z.array(z.object({ extensions: z.object({ code: z.string().optional() }).optional() })) });
 
 const ok = (message: string): CheckResult => ({ level: "ok", message });
@@ -179,6 +183,66 @@ const reviewChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   ];
 };
 
+/** A fresh empty steward-owned dir for token-carrying ls-remote; the ceiling keeps git from discovering any repo config above it. */
+const lsRemoteSite = async (dataDir: string): Promise<{ cwd: string; ceiling: string }> => {
+  const ceiling = join(dataDir, "doctor");
+  const cwd = join(ceiling, "ls-remote");
+  await rm(cwd, { recursive: true, force: true });
+  await mkdir(cwd, { recursive: true, mode: 0o700 });
+  return { cwd, ceiling };
+};
+
+const implementChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
+  const { config, secrets } = loaded;
+  const labels = config.tracker.labels;
+  const checks: Check[] = [];
+  if (labels !== undefined) {
+    checks.push({
+      name: "linear labels",
+      run: async () => {
+        const apiKey = secrets.LINEAR_API_KEY ?? "";
+        const names = [labels.triage, labels.implement, labels.needsInfo, labels.readyForHuman, labels.implemented];
+        const response = await ctx.fetchImpl(LINEAR_GRAPHQL_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: apiKey },
+          body: JSON.stringify({ query: "query($names: [String!]) { issueLabels(first: 250, filter: { name: { in: $names } }) { nodes { name } } }", variables: { names } }),
+          signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+        });
+        if (!response.ok) return flunk(`issueLabels answered ${response.status}`);
+        const found = new Set(LabelsResponse.parse(await response.json()).data.issueLabels.nodes.map((node) => node.name.toLowerCase()));
+        const absent = names.filter((name) => !found.has(name.toLowerCase()));
+        return absent.length === 0 ? ok(names.join(", ")) : flunk(`missing in Linear: ${absent.join(", ")}`);
+      },
+    });
+  }
+  const settings = config.implement;
+  if (settings === undefined) return checks;
+  checks.push({
+    name: "push token",
+    run: async () => {
+      const token = secrets.GITLAB_PUSH_TOKEN ?? "";
+      if (token === "") return flunk("GITLAB_PUSH_TOKEN is missing");
+      const remote = splitCredentials(injectToken(config.workspace.fetchUrl, token));
+      const site = await lsRemoteSite(config.dataDir);
+      const result = await git(["ls-remote", "--heads", remote.url, config.workspace.baseBranch], site.cwd, { ...remote.env, GIT_CEILING_DIRECTORIES: site.ceiling });
+      return result.exitCode === 0 ? ok(`GITLAB_PUSH_TOKEN reaches ${remote.url}`) : flunk(`ls-remote failed: ${scrubCredentials(result.stderr)}`);
+    },
+  });
+  if (config.codehost.kind === "gitlab") {
+    const { baseUrl, project } = config.codehost;
+    checks.push({
+      name: "branch protection",
+      run: async () => {
+        const token = secrets.GITLAB_TOKEN ?? "";
+        if (token === "") return warn("GITLAB_TOKEN is missing; cannot read branch protection");
+        const problems = protectionProblems(await listProtectedBranches({ baseUrl, project, token, fetchImpl: ctx.fetchImpl }), settings.protectedBranches);
+        return problems.length === 0 ? ok(`${settings.protectedBranches.join(", ")} closed to Developer-role bots`) : flunk(problems.join("; "));
+      },
+    });
+  }
+  return checks;
+};
+
 const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   const { config, configPath } = loaded;
   const healthUrl = `${config.server.publicUrl}/health`;
@@ -241,6 +305,7 @@ const configChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => [
   ...workspaceChecks(loaded),
   ...linearChecks(loaded, ctx),
   ...reviewChecks(loaded, ctx),
+  ...implementChecks(loaded, ctx),
   ...serviceChecks(loaded, ctx),
 ];
 
