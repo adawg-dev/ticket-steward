@@ -174,6 +174,9 @@ export class JobStore {
   private readonly requeueRunning;
   private readonly failRunning;
   private readonly closeRunningAttempts;
+  private readonly requeueOneRunning;
+  private readonly failOneRunning;
+  private readonly closeJobAttempts;
 
   constructor(private readonly db: Database) {
     this.insert = db.prepare<[string, string, string, string, string, JobKind, string | null]>(
@@ -195,8 +198,18 @@ export class JobStore {
          review_result = NULL, attempts = 0, not_before = NULL, error = NULL
        WHERE id = ? AND status = 'queued'`,
     );
+    // The oldest due job whose ticket (enrich, implement: same issue_id) or merge request (review: same subject) has no
+    // running job. One statement, and better-sqlite3 is synchronous, so two loops can never claim the same job.
     this.claimOldest = db.prepare<[string, string], JobRow>(
-      `${CLAIM} WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND (not_before IS NULL OR not_before <= ?) ORDER BY id LIMIT 1) RETURNING *`,
+      `${CLAIM} WHERE id = (
+         SELECT q.id FROM jobs q
+         WHERE q.status = 'queued' AND (q.not_before IS NULL OR q.not_before <= ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM jobs r WHERE r.status = 'running' AND (
+               (q.kind <> 'review' AND r.kind <> 'review' AND r.issue_id = q.issue_id)
+               OR (q.subject IS NOT NULL AND r.subject = q.subject)))
+         ORDER BY q.id LIMIT 1)
+       RETURNING *`,
     );
     this.claimOne = db.prepare<[string, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
     this.storeResult = db.prepare<[string, string, number]>("UPDATE jobs SET result = ?, result_sha = ? WHERE id = ?");
@@ -230,6 +243,15 @@ export class JobStore {
     this.closeRunningAttempts = db.prepare<[string]>(
       `UPDATE attempts SET finished_at = ?, error = 'interrupted'
        WHERE finished_at IS NULL AND job_id IN (SELECT id FROM jobs WHERE status = 'running')`,
+    );
+    this.requeueOneRunning = db.prepare<[number, number]>(
+      "UPDATE jobs SET status = 'queued' WHERE id = ? AND status = 'running' AND attempts < ?",
+    );
+    this.failOneRunning = db.prepare<[string, number]>(
+      "UPDATE jobs SET status = 'failed', error = 'interrupted', finished_at = ? WHERE id = ? AND status = 'running'",
+    );
+    this.closeJobAttempts = db.prepare<[string, number]>(
+      "UPDATE attempts SET finished_at = ?, error = 'interrupted' WHERE finished_at IS NULL AND job_id = ?",
     );
   }
 
@@ -340,6 +362,16 @@ export class JobStore {
       const requeued = this.requeueRunning.run(maxAttempts).changes;
       const failed = this.failRunning.run(now).changes;
       return { requeued, failed };
+    })();
+  }
+
+  /** `requeueInterrupted` for one job: other loops' running jobs and their attempts stay as they are. */
+  requeueInterruptedJob(id: number, maxAttempts: number): void {
+    this.db.transaction(() => {
+      const now = nowIso();
+      this.closeJobAttempts.run(now, id);
+      this.requeueOneRunning.run(id, maxAttempts);
+      this.failOneRunning.run(now, id);
     })();
   }
 }

@@ -357,3 +357,73 @@ describe("implement jobs", () => {
     expect(job?.pushedAt).not.toBeNull();
   });
 });
+
+describe("claimNext with running jobs", () => {
+  const implementIssue1: TriggerEvent = {
+    kind: "issue.labeled",
+    action: "implement",
+    issueId: "issue-1",
+    identifier: "API-1",
+    teamKey: "API",
+    deliveryId: "delivery-3",
+    description: "A bug report",
+    stateType: null,
+  };
+
+  it("skips a job whose ticket has a running job, takes the next one, and takes the skipped one once the ticket is free", () => {
+    const enrich = stores.jobs.enqueue(createdEvent);
+    expect(stores.jobs.claimNext()?.id).toBe(enrich);
+    const implement = stores.jobs.enqueue(implementIssue1);
+    const other = stores.jobs.enqueue(secondEvent);
+
+    expect(stores.jobs.claimNext()?.id).toBe(other);
+    expect(stores.jobs.claimNext()).toBeNull();
+
+    stores.jobs.finish(enrich, { status: "succeeded" });
+    expect(stores.jobs.claimNext()?.id).toBe(implement);
+  });
+
+  it("skips a review whose merge request has a running review, but not an issue job of the same key", () => {
+    const first = stores.jobs.enqueue(review("a".repeat(40)));
+    expect(stores.jobs.claimNext()?.id).toBe(first);
+    const second = stores.jobs.enqueue(review("b".repeat(40)));
+    const issueJob = stores.jobs.enqueue({ kind: "cli", issueId: "API-1", identifier: "API-1", teamKey: "API" });
+
+    expect(stores.jobs.claimNext()?.id).toBe(issueJob);
+    expect(stores.jobs.claimNext()).toBeNull();
+
+    stores.jobs.finish(first, { status: "succeeded" });
+    expect(stores.jobs.claimNext()?.id).toBe(second);
+  });
+
+  it("requeueInterruptedJob requeues only that job and closes only its attempt", () => {
+    const interrupted = stores.jobs.enqueue(createdEvent);
+    const running = stores.jobs.enqueue(secondEvent);
+    stores.jobs.claimNext();
+    stores.attempts.start(interrupted);
+    stores.jobs.claimNext();
+    stores.attempts.start(running);
+
+    stores.jobs.requeueInterruptedJob(interrupted, 3);
+
+    expect(stores.jobs.get(interrupted)?.status).toBe("queued");
+    expect(stores.attempts.forJob(interrupted)[0]?.error).toBe(INTERRUPTED_ERROR);
+    expect(stores.attempts.forJob(interrupted)[0]?.finishedAt).toEqual(expect.any(String));
+    expect(stores.jobs.get(running)?.status).toBe("running");
+    expect(stores.attempts.forJob(running)[0]?.finishedAt).toBeNull();
+  });
+
+  it("requeueInterruptedJob fails a job that has used its last attempt", () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimById(id);
+    stores.jobs.finish(id, { status: "publish_failed", error: "e" });
+    stores.jobs.claimById(id);
+    stores.jobs.finish(id, { status: "publish_failed", error: "e" });
+    stores.jobs.claimById(id);
+
+    stores.jobs.requeueInterruptedJob(id, 3);
+
+    expect(stores.jobs.get(id)?.status).toBe("failed");
+    expect(stores.jobs.get(id)?.error).toBe(INTERRUPTED_ERROR);
+  });
+});
