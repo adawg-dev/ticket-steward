@@ -4,7 +4,7 @@ export default defineConfig({
   dataDir: "/var/lib/ticket-steward",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
   // brain: { kind: "openai-agents", model: "gpt-6-luna", reasoningEffort: "high", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear", teams: ["API", "RSPNS", "MSGS", "CC", "USRAPP", "STFAPP", "APP", "OPS", "PLAT"], gatewayIssues: "enrich", bugLabels: ["Bug"], triggerLabel: "steward" }, // gatewayIssues "skip" only if ticket-gateway enriches through the steward itself; triggerLabel makes enrichment opt-in
+  tracker: { kind: "linear", teams: ["API", "RSPNS", "MSGS", "CC", "USRAPP", "STFAPP", "APP", "OPS", "PLAT"], gatewayIssues: "enrich", bugLabels: ["Bug"], labels: {} }, // gatewayIssues "skip" only if ticket-gateway enriches through the steward itself; labels: {} turns on label workflows with the default names (needs-triage, ready-for-agent, ...), so tickets are enriched only when labeled
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "concentrateai/kickoff" },
   // codehost: { kind: "github", owner: "concentrateai", repo: "kickoff" },
   workspace: {
@@ -24,4 +24,11 @@ export default defineConfig({
   server: { port: 3020, publicUrl: "https://steward.example.com" },
   // Review merge requests that add the steward's GitLab user as a reviewer (docs/ops.md §1.10).
   // review: { botUsername: "ticket-steward", prompt: "./prompts/review.md" },
+  // Label-driven implementation (ready-for-agent). Requires GITLAB_PUSH_TOKEN in .env: a project access token, Developer role, write_repository only.
+  // Copy <ticket-steward>/prompts/implement.md to /etc/ticket-steward/prompts/implement.md (steward init does not write it).
+  implement: {
+    prompt: "./prompts/implement.md",
+    checks: ["pnpm turbo check-types lint --filter='...[{{baseSha}}]'"],
+    commitAuthor: { name: "Ticket Steward", email: "steward@concentrate.ai" },
+  },
 });

@@ -11,7 +11,7 @@ bug against the app started from its checkout. Adding the steward's GitLab user 
 reviewer on a merge request replays that recipe on the MR head and leaves inline comments
 on the diff.
 
-It does not triage, relabel, write code or open branches. The brain never holds tracker
+By default it only enriches. With `tracker.labels`, people opt tickets in with Linear labels: triage, and an agent that pushes a branch (it never opens a merge request). The brain never holds tracker
 credentials; the steward validates a structured result and does every write itself.
 
 - Design: `docs/superpowers/specs/2026-09-11-ticket-steward-design.md`
@@ -70,6 +70,7 @@ steward enrich KEY-123 --dry-run
 | `steward overlay sync --from <path> [--allow-pattern <re>]` | Copy gitignored `.env*` files from a checkout into the overlay; refuses prod-looking values unless allowed. |
 | `steward serve` | Webhook server and worker; takes `run.lock`. |
 | `steward enrich <KEY\|UUID> [--dry-run]` | Enrich one ticket: enqueue if `serve` is up, else run inline. `--dry-run` prints the section and recorded writes. |
+| `steward implement <KEY\|UUID> [--dry-run]` | Implement one ticket on a new branch (needs `implement` config); never swaps labels. `--dry-run` runs up to the checks and prints the would-be commit. |
 | `steward jobs [--status s] [--limit n]` | List jobs. |
 | `steward jobs show <id>` | Job row, attempts, transcript path, artifacts listing, stored result. |
 | `steward jobs retry <id>` | Runs the job again: requeues it for `serve` when that is running, otherwise runs it inline under the run lock (publish-only when a result is stored). |
@@ -120,6 +121,15 @@ ticket-gateway files Slack tickets into Linear Triage. The steward enriches them
 
 Any other combination either enriches gateway tickets twice or never enriches them. The allowlist in `tracker.teams` must include every team the gateway routes to (API, RSPNS, CC, MSGS, USRAPP, STFAPP, PLAT, OPS). `steward enrich <KEY>` always runs, whatever `gatewayIssues` says.
 
+## Label workflows
+
+With `tracker.labels` set, two Linear labels drive the steward, both added by a person:
+
+- `needs-triage` runs the enrichment plus a triage verdict: `needs-info` (questions commented) or `ready-for-human` (with an agent brief).
+- `ready-for-agent` runs an agent against a fresh checkout. The steward verifies the change (secret guard, checks, hooks), commits it and pushes a new `<type>/<KEY>-<slug>` branch; the pipeline opens the merge request. The ticket ends as `agent-implemented`, or is handed back as `ready-for-human` or `needs-info`.
+
+Setup (labels, `GITLAB_PUSH_TOKEN`, branch protection, the `implement` block) and the flows are in `docs/ops.md` §1.7a.
+
 ## Security posture
 
 - **Dedicated user.** Runs as the `steward` system user with its own HOME, no ssh keys,
@@ -137,6 +147,10 @@ Any other combination either enriches gateway tickets twice or never enriches th
 - **Sandbox credentials.** The overlay must hold credentials created for the steward
   (own DB role, test-mode Stripe keys, capped provider keys). `overlay sync` enforces
   0600/0700 modes and refuses prod-looking values by default. `docs/ops.md` §2 says why.
+- **Push token.** Only with `implement` configured: `GITLAB_PUSH_TOKEN` (project access
+  token, Developer, `write_repository`) is used for `ls-remote` and a create-only push from
+  a scratch repo with hooks disabled, never forces or touches an existing branch, and
+  `main`/`staging`/`dev` stay protected server-side. `steward doctor` checks the protection.
 - **Redaction.** Every `.env` value (the Linear API key included) and every
   credential-looking overlay value are redacted from transcripts, setup output and
   anything written to the ticket, along with `sk-`, `glpat-`, `ghp_`, `lin_api_`,

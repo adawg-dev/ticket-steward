@@ -202,8 +202,8 @@ comment and upload appears as the user who owns the key, so give it a user of it
 4. As a workspace admin, open Settings → API → Webhooks and create a webhook with the URL
    `https://steward.example.com/webhooks/linear` (`<server.publicUrl>/webhooks/linear`).
    Select only the **Issues** data-change event, and scope it to the allowlisted teams or
-   to all public teams. The steward acts on issue creation (or, with `tracker.triggerLabel`,
-   on the label being added) and ignores every other delivery.
+   to all public teams. The steward acts on issue creation (or, with `tracker.labels`, on a
+   workflow label being added, §1.7a) and ignores every other delivery.
 5. Copy the webhook's signing secret into `.env` as `LINEAR_WEBHOOK_SECRET`.
 
 There is no authorization step: the key is read from `.env` when the process starts.
@@ -218,15 +218,114 @@ future sidecar mode, where the gateway enriches through the steward itself (`aut
 Any other combination either enriches gateway tickets twice or never enriches them.
 `steward enrich <KEY>` always runs, whatever `gatewayIssues` says.
 
-Config reference: `tracker.triggerLabel` (unset by default) makes enrichment opt-in. When it
-is set, e.g. `triggerLabel: "steward"`, the steward enriches only a ticket created with that
-label or the first time the label is added; every other ticket is ignored. The label name is
-matched case-insensitively and must exist in Linear. Removing and re-adding the label does not
-re-enrich a ticket that already has an Enrichment section; use `steward enrich <KEY>` for that.
+### 1.7a Label workflows
 
-Whatever the trigger, the steward never enriches a Done or Canceled ticket. A job checks the
-state when it starts and again just before it writes, and fails without retry if the ticket
-is closed. This applies to `steward enrich` too.
+Setting `tracker.labels` (use `labels: {}` for the default names) switches the steward from
+"enrich every new ticket" to label-driven work: it acts only on a ticket created with, or
+first given, one of two labels. Two decisions stay with people: **whether a ticket is
+triaged** (add `needs-triage`) and **whether an agent implements it** (add
+`ready-for-agent`). The steward never applies either label, never opens a merge request, and
+its git work stops at pushing one new branch; the kickoff pipeline opens the MR.
+
+Create five labels in Linear at the workspace level (names match case-insensitively; override
+any of them under `tracker.labels`: `triage`, `implement`, `needsInfo`, `readyForHuman`,
+`implemented`):
+
+| Label | Applied by | Meaning |
+| --- | --- | --- |
+| `needs-triage` | person | Triage this ticket. |
+| `needs-info` | steward | Something only a person can supply is missing; the questions are in a comment. |
+| `ready-for-human` | steward | Specified enough to build (triage), or an agent tried and handed back (implement). |
+| `ready-for-agent` | person | Implement this ticket. |
+| `agent-implemented` | steward | An agent pushed a branch for this ticket. |
+
+```
+needs-triage ──triage job──▶ needs-info       (questions commented)
+                        └──▶ ready-for-human  (enrichment + agent brief)
+                                   │ person adds ready-for-agent
+ready-for-agent ──implement job──▶ agent-implemented  (branch pushed)
+   ▲ (also directly, skipping triage)  ├──▶ ready-for-human  (tried, failed; nothing pushed)
+                                       └──▶ needs-info       (too vague; nothing changed)
+```
+
+A label counts only when it is first added (or present when the ticket is created); removing
+and re-adding it does not re-run a ticket that already has an Enrichment section (triage) or a
+succeeded implement job. If one update adds both labels, implement wins and triage does not
+also run. Triage is the enrich job plus a verdict. Labels change last in every publish, so a
+failure earlier leaves the trigger label on the ticket and the job `publish_failed`
+(`steward jobs retry <id>` re-publishes without re-running the brain or pushing again).
+`steward enrich KEY` and `steward implement KEY` never swap labels.
+
+**Push token.** Implementation needs `GITLAB_PUSH_TOKEN` in `.env`: a GitLab **project access
+token** with the **Developer** role and only the **`write_repository`** scope. Never give it
+`api`: `api` plus Developer can also merge into unprotected branches, approve and create MRs,
+delete branches and run pipelines. The token is used only for `ls-remote` and `push`, passed
+to each git process as an HTTP header; it is never written to git config, never in the brain's
+environment and redacted from all output. `MIRROR_TOKEN` stays read-only.
+
+**Branch protection.** Keep `main`, `staging` and `dev` protected in GitLab with named-user
+push and merge allowlists, and never add the token's bot user (`project_<id>_bot_…`) or the
+Developer role to them. GitLab then rejects any push or merge to those branches whatever the
+steward does. GitLab cannot enforce "only branches cut from dev"; the steward's own pre-push
+checks do. The list doctor expects to be protected is `implement.protectedBranches`
+(default `["main", "staging", "dev"]`).
+
+**`implement` config.** Absent means `ready-for-agent` is ignored (skipped at intake with
+"implement is not configured"). It requires `tracker.labels` and `GITLAB_PUSH_TOKEN`; config
+load fails otherwise.
+
+```ts
+implement: {
+  prompt: "./prompts/implement.md",   // copy <ticket-steward>/prompts/implement.md; `steward init` does not write it
+  checks: ["pnpm turbo check-types lint --filter='...[{{baseSha}}]'"], // default []; run by the steward after the brain
+  commitAuthor: { name: "Ticket Steward", email: "steward@concentrate.ai" },
+  // defaults:
+  // branchTypes: ["feature", "fix", "chore", "refactor"],
+  // checksTimeoutMinutes: 20,
+  // timeoutMinutes: 60,              // brain timeout for implement jobs (triage keeps brain.timeoutMinutes)
+  // maxTurns: 150,                   // brain turns for implement jobs
+  // protectedBranches: ["main", "staging", "dev"],
+}
+```
+
+**What an implement job does.** Fresh worktree at the latest `dev`, as for every job; the
+agent edits files only. The steward then, stopping at the first failure: requires a non-empty
+diff; stages everything and refuses if any staged path is an overlay file or under the skills
+dir, or if a staged diff (read as text, binary and `-diff` files included) contains the value
+of a secret-looking overlay variable (the comment names paths, never values); runs
+`implement.checks` (`{{baseSha}}` is the job's base commit); commits as `commitAuthor` with
+kickoff's Husky hooks enabled for that one commit; keeps a copy of the commit as a bundle
+file in the job dir (not a ref, which the mirror's `--prune` fetch would delete); and pushes
+branch `<type>/<IDENTIFIER>-<slug>` (type chosen by the agent from `branchTypes`).
+Before pushing it refuses unless the target matches the branch pattern, no remote branch
+already carries the ticket (any type), and the commit has exactly one parent, the base `dev`
+commit. Every push runs from a fresh scratch bare repo in the job dir with hooks disabled, as
+a create-only push (`--force-with-lease=<ref>:`), so it can never update or force an existing
+branch. The token-carrying `ls-remote` runs from an empty steward-owned directory.
+
+**Hand-backs are successes.** An empty diff, a guard hit, failing checks or hooks, an
+existing branch, or the agent reporting `failed` or `needs_info` end the job `succeeded` with
+the warning `handed back: <reason>` (see it in `steward jobs show`). The ticket gets a comment
+and `ready-for-human` or `needs-info`; they are the answer, not an error. Only a push or
+Linear write failure is `publish_failed`.
+
+**`steward implement KEY [--dry-run]`.** Enqueues when `serve` is running, otherwise runs
+inline under `run.lock`. It never swaps labels and re-runs even after a prior success; the
+existing-branch check still prevents a second push. `--dry-run` runs up to and including the
+checks, prints the diff stat and the would-be commit message, and never commits, pushes or
+writes to Linear. The `tracker.gatewayIssues` rule does not apply to implement.
+
+One implement job can hold the worker for about 90 minutes (setup, up to 60 of brain,
+checks); triage jobs queue behind it.
+
+To smoke-test, label a throwaway ticket `ready-for-agent` and watch for the pushed branch,
+the comment and the swap to `agent-implemented`. The first real push is also what proves the
+token's Developer access: doctor's `push token` line only runs `ls-remote`.
+
+Whatever the trigger, the steward never works on a Done or Canceled ticket. The state is
+checked at intake, when a job starts, after the agent finishes and before every Linear write
+or push; a closed ticket fails the job without retry. This applies to `steward enrich` and
+`steward implement` too.
 
 ### 1.8 Doctor, then start the service
 
@@ -242,7 +341,10 @@ and fetches; the overlay has at least one file; the skills dir exists; `LINEAR_A
 and answers a `viewer { id name }` query (the line names the user every write will appear
 as); `publicUrl/health` answers; the
 codehost MCP server starts and answers `tools/list`; with `review` configured, a GitLab
-webhook secret is set and `GITLAB_TOKEN` has the `api` scope and acts as `review.botUsername` (§1.10); Playwright's Chromium is installed;
+webhook secret is set and `GITLAB_TOKEN` has the `api` scope and acts as `review.botUsername` (§1.10); with `tracker.labels`
+set, all five labels exist in Linear; with `implement` configured, `GITLAB_PUSH_TOKEN` can `ls-remote` the repo (a read, so it
+cannot prove Developer access; the first real push does) and, for GitLab, `implement.protectedBranches` are protected with
+no Developer-role or project-bot push or merge grant (read with `GITLAB_TOKEN`); Playwright's Chromium is installed;
 `workspace.port` is free.
 
 ```bash
@@ -354,6 +456,7 @@ sudo systemctl restart ticket-steward
 | `LINEAR_API_KEY` | Signed in as the steward's Linear user, create a new personal API key with the same permissions and team restriction (§1.7), update `.env`, restart. Confirm with `steward doctor` (the `linear api key` line), then revoke the old key. A revoked or invalid key pauses the worker (§5). |
 | `LINEAR_WEBHOOK_SECRET` | Regenerate in the webhook's settings (Settings → API → Webhooks), update `.env`, restart. Deliveries signed with the old secret are rejected with 401 and Linear retries them (1 min, 1 h, 6 h), so do both steps within a minute. |
 | `MIRROR_TOKEN` | Create the new read-only deploy token, update `.env`, restart. `Mirror.fetch()` re-sets the remote URL from the token on every fetch, so the next job picks it up; no `mirror init` needed. Confirm with `steward mirror fetch`, then revoke the old token. |
+| `GITLAB_PUSH_TOKEN` | Create a new token, update `.env`, restart; `steward doctor` confirms it reaches the repo; revoke the old one. |
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` | Create the new token, update `.env`, restart. Confirm with `steward doctor` (the codehost MCP check). Revoke the old one. |
 | `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` / `OPENAI_API_KEY` | Update `.env`, restart. A job that is mid-run keeps the old value in its child environment until it finishes. |
 | Overlay credentials | Change them in the sandbox checkout and rerun `steward overlay sync --from <checkout>`. The next job copies the new files; running jobs keep the old ones. |
