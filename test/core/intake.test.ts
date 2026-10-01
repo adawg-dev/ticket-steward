@@ -1,4 +1,4 @@
-import { shouldEnqueue, STEWARD_BEGIN, STEWARD_END } from "../../src/core/intake.js";
+import { closedReason, jobKindFor, shouldEnqueue, STEWARD_BEGIN, STEWARD_END } from "../../src/core/intake.js";
 import type { TriggerEvent } from "../../src/tracker/types.js";
 
 const created: TriggerEvent = {
@@ -107,5 +107,33 @@ describe("shouldEnqueue", () => {
 
   it("never skips a cli run", () => {
     expect(shouldEnqueue({ ...base, gatewayIssues: "skip", event: cli })).toEqual({ action: "enqueue" });
+  });
+});
+
+describe("implement intake", () => {
+  const implementEvent: TriggerEvent = { ...created, kind: "issue.labeled", action: "implement" };
+
+  it("maps action implement to the implement job kind", () => {
+    expect(jobKindFor(implementEvent)).toBe("implement");
+    expect(jobKindFor(created)).toBe("enrich");
+    expect(jobKindFor({ ...cli, action: "implement" })).toBe("implement");
+  });
+
+  it("enqueues an implement event on an already-enriched ticket", () => {
+    const description = `Body\n\n${STEWARD_BEGIN}\n## Enrichment\n${STEWARD_END}`;
+    expect(shouldEnqueue({ ...base, event: { ...implementEvent, description } })).toEqual({ action: "enqueue" });
+  });
+
+  it("skips an implement event when a prior implement job succeeded", () => {
+    expect(shouldEnqueue({ ...base, event: implementEvent, priorSuccess: true })).toEqual({ action: "skip", reason: "API-1 was already implemented" });
+  });
+
+  it("skips an implement event for a closed ticket", () => {
+    expect(shouldEnqueue({ ...base, event: { ...implementEvent, stateType: "completed" } }).action).toBe("skip");
+  });
+
+  it("names a closed state", () => {
+    expect(closedReason("API-1", { name: "Done", type: "completed" })).toBe("API-1 is Done; Ticket Steward does not work on Done or Canceled tickets");
+    expect(closedReason("API-1", { name: "Todo", type: "unstarted" })).toBeNull();
   });
 });

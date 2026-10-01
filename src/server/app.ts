@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
 import { parseMergeRequestEvent, verifyGitlabWebhook } from "../codehost/gitlabWebhook.js";
-import { shouldEnqueue, type IntakeDecision } from "../core/intake.js";
+import { jobKindFor, shouldEnqueue, type IntakeDecision } from "../core/intake.js";
 import { logger } from "../log.js";
 import { transaction, type Job, type Stores } from "../store/index.js";
 import { reviewSubject } from "../store/jobs.js";
@@ -45,12 +45,16 @@ const intake = (deps: ServerDeps, event: WebhookEvent): Intake =>
   transaction(deps.stores.db, () => {
     const { jobs, deliveries } = deps.stores;
     if (!deliveries.markSeen(event.deliveryId)) return { action: "duplicate" };
+    const kind = jobKindFor(event);
+    if (kind === "implement" && deps.config.implement === undefined) {
+      return { action: "skip", reason: "implement is not configured" };
+    }
     const decision = shouldEnqueue({
       event,
       allowlist: deps.config.tracker.teams,
       gatewayIssues: deps.config.tracker.gatewayIssues,
-      priorSuccess: jobs.hasSucceeded(event.issueId),
-      hasQueuedJob: jobs.findQueued(event.issueId) !== null,
+      priorSuccess: jobs.hasSucceeded(event.issueId, kind),
+      hasQueuedJob: jobs.findQueued(event.issueId, kind) !== null,
     });
     if (decision.action === "enqueue") jobs.enqueue(event);
     return decision;

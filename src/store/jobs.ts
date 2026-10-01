@@ -1,10 +1,12 @@
+import { jobKindFor, type IssueJobKind } from "../core/intake.js";
 import type { BrainResult } from "../core/result.js";
 import type { JobOutcome } from "../core/types.js";
+import { StoredImplementSchema, type StoredImplement } from "../implement/result.js";
 import { StoredReviewSchema, type StoredReview } from "../review/result.js";
 import type { ReviewTrigger, TriggerEvent } from "../tracker/types.js";
 import { nowIso, type Database } from "./db.js";
 
-export type JobKind = "enrich" | "review";
+export type JobKind = "enrich" | "review" | "implement";
 
 export const reviewSubject = (projectId: number, mrIid: number): string => `mr:${projectId}!${mrIid}`;
 
@@ -23,6 +25,10 @@ export interface Job {
   result: BrainResult | null;
   resultSha: string | null;
   reviewResult: StoredReview | null;
+  implementResult: StoredImplement | null;
+  branch: string | null;
+  commitSha: string | null;
+  pushedAt: string | null;
   error: string | null;
   createdAt: string;
   startedAt: string | null;
@@ -43,6 +49,10 @@ interface JobRow {
   result: string | null;
   result_sha: string | null;
   review_result: string | null;
+  implement_result: string | null;
+  branch: string | null;
+  commit_sha: string | null;
+  pushed_at: string | null;
   error: string | null;
   created_at: string;
   started_at: string | null;
@@ -63,6 +73,10 @@ const toJob = (row: JobRow): Job => ({
   result: row.result === null ? null : (JSON.parse(row.result) as BrainResult),
   resultSha: row.result_sha,
   reviewResult: row.review_result === null ? null : StoredReviewSchema.parse(JSON.parse(row.review_result)),
+  implementResult: row.implement_result === null ? null : StoredImplementSchema.parse(JSON.parse(row.implement_result)),
+  branch: row.branch,
+  commitSha: row.commit_sha,
+  pushedAt: row.pushed_at,
   error: row.error,
   createdAt: row.created_at,
   startedAt: row.started_at,
@@ -82,7 +96,7 @@ interface JobColumns {
 const jobColumns = (event: TriggerEvent): JobColumns =>
   event.kind === "mr.review"
     ? { issueId: event.linearKey, identifier: event.linearKey, teamKey: event.teamKey, kind: "review", subject: reviewSubject(event.projectId, event.mrIid) }
-    : { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, kind: "enrich", subject: null };
+    : { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, kind: jobKindFor(event), subject: null };
 
 const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?";
 
@@ -96,6 +110,9 @@ export class JobStore {
   private readonly claimOne;
   private readonly storeResult;
   private readonly storeReview;
+  private readonly storeImplement;
+  private readonly storeCommit;
+  private readonly storePushed;
   private readonly complete;
   private readonly deferRetry;
   private readonly unclaim;
@@ -112,11 +129,11 @@ export class JobStore {
       `INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at, kind, subject)
        VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
     );
-    this.selectQueued = db.prepare<[string], JobRow>(
-      "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' AND kind = 'enrich' ORDER BY id LIMIT 1",
+    this.selectQueued = db.prepare<[string, IssueJobKind], JobRow>(
+      "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' AND kind = ? ORDER BY id LIMIT 1",
     );
-    this.existsSucceeded = db.prepare<[string], { found: number }>(
-      "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded' AND kind = 'enrich') AS found",
+    this.existsSucceeded = db.prepare<[string, IssueJobKind], { found: number }>(
+      "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded' AND kind = ?) AS found",
     );
     this.selectQueuedBySubject = db.prepare<[string], JobRow>(
       "SELECT * FROM jobs WHERE subject = ? AND status = 'queued' ORDER BY id LIMIT 1",
@@ -132,6 +149,9 @@ export class JobStore {
     this.claimOne = db.prepare<[string, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
     this.storeResult = db.prepare<[string, string, number]>("UPDATE jobs SET result = ?, result_sha = ? WHERE id = ?");
     this.storeReview = db.prepare<[string, number]>("UPDATE jobs SET review_result = ? WHERE id = ?");
+    this.storeImplement = db.prepare<[string, number]>("UPDATE jobs SET implement_result = ? WHERE id = ?");
+    this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ? WHERE id = ?");
+    this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
     this.complete = db.prepare<[JobStatus, string | null, string, number]>(
       "UPDATE jobs SET status = ?, error = ?, finished_at = ?, not_before = NULL WHERE id = ?",
     );
@@ -190,13 +210,25 @@ export class JobStore {
     return this.swapTrigger.run(JSON.stringify(trigger), columns.issueId, columns.identifier, columns.teamKey, id).changes === 1;
   }
 
-  findQueued(issueId: string): Job | null {
-    const row = this.selectQueued.get(issueId);
+  findQueued(issueId: string, kind: IssueJobKind = "enrich"): Job | null {
+    const row = this.selectQueued.get(issueId, kind);
     return row === undefined ? null : toJob(row);
   }
 
-  hasSucceeded(issueId: string): boolean {
-    return this.existsSucceeded.get(issueId)?.found === 1;
+  hasSucceeded(issueId: string, kind: IssueJobKind = "enrich"): boolean {
+    return this.existsSucceeded.get(issueId, kind)?.found === 1;
+  }
+
+  saveImplementResult(id: number, stored: StoredImplement): void {
+    this.storeImplement.run(JSON.stringify(stored), id);
+  }
+
+  recordCommit(id: number, branch: string, sha: string): void {
+    this.storeCommit.run(branch, sha, id);
+  }
+
+  markPushed(id: number): void {
+    this.storePushed.run(nowIso(), id);
   }
 
   claimNext(): Job | null {

@@ -1,7 +1,7 @@
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import { reviewSubject } from "../../src/store/jobs.js";
-import type { ReviewTrigger } from "../../src/tracker/types.js";
+import type { ReviewTrigger, TriggerEvent } from "../../src/tracker/types.js";
 import { brainResult, createdEvent, freshDataDir, secondEvent } from "./helpers.js";
 
 let stores: Stores;
@@ -278,5 +278,45 @@ describe("review jobs", () => {
     stores.jobs.saveReviewResult(id, stored);
     expect(stores.jobs.get(id)?.reviewResult).toEqual(stored);
     expect(stores.jobs.get(id)?.result).toBeNull();
+  });
+});
+
+describe("implement jobs", () => {
+  const implementEvent: TriggerEvent = {
+    kind: "issue.labeled",
+    action: "implement",
+    issueId: "issue-1",
+    identifier: "API-1",
+    teamKey: "API",
+    deliveryId: "delivery-1",
+    description: "A bug report",
+    stateType: null,
+  };
+
+  it("stores an implement trigger as kind implement", () => {
+    const id = stores.jobs.enqueue(implementEvent);
+    expect(stores.jobs.get(id)?.kind).toBe("implement");
+  });
+
+  it("scopes findQueued and hasSucceeded by kind", () => {
+    const id = stores.jobs.enqueue(implementEvent);
+    expect(stores.jobs.findQueued("issue-1")).toBeNull();
+    expect(stores.jobs.findQueued("issue-1", "implement")?.id).toBe(id);
+    stores.jobs.claimById(id);
+    stores.jobs.finish(id, { status: "succeeded" });
+    expect(stores.jobs.hasSucceeded("issue-1")).toBe(false);
+    expect(stores.jobs.hasSucceeded("issue-1", "implement")).toBe(true);
+  });
+
+  it("records the stored result, commit and push", () => {
+    const id = stores.jobs.enqueue(implementEvent);
+    stores.jobs.saveImplementResult(id, { result: null, handback: { label: "readyForHuman", reason: "branch exists", detail: "fix/API-1-x" } });
+    stores.jobs.recordCommit(id, "fix/API-1-x", "a".repeat(40));
+    stores.jobs.markPushed(id);
+    const job = stores.jobs.get(id);
+    expect(job?.implementResult?.handback?.reason).toBe("branch exists");
+    expect(job?.branch).toBe("fix/API-1-x");
+    expect(job?.commitSha).toBe("a".repeat(40));
+    expect(job?.pushedAt).not.toBeNull();
   });
 });
