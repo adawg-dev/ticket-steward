@@ -35,70 +35,97 @@ describe("stageAndGuard", () => {
   it("stages the change and returns the paths", async () => {
     await writeFile(join(worktree.path, ".env"), "TOKEN=abc123abc123\n");
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    expect(await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [".env"], skillsPrefix: ".claude/skills/", secretValues: [] })).toEqual({ ok: true, paths: ["src/a.ts"] });
+    expect(await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [".env"], secretValues: [] })).toEqual({ ok: true, paths: ["src/a.ts"] });
   });
 
   it("refuses an empty change", async () => {
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: [] });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
     expect(result).toMatchObject({ ok: false, reason: "the agent reported the work as implemented but changed nothing" });
   });
 
-  it("refuses an overlay file that is not gitignored and names it", async () => {
+  it("leaves out an overlay file that is not gitignored", async () => {
     await mkdir(join(worktree.path, "apps/web"), { recursive: true });
     await writeFile(join(worktree.path, "apps/web/.env.local"), "DB_PASSWORD=hunter2hunter2\n");
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: ["apps/web/.env.local"], skillsPrefix: ".claude/skills/", secretValues: [] });
-    expect(result).toEqual({ ok: false, reason: "the change would commit files the steward copied in", detail: "apps/web/.env.local" });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: ["apps/web/.env.local"], secretValues: [] });
+    expect(result).toEqual({ ok: true, paths: ["src/a.ts"] });
   });
 
-  it("refuses copied skills", async () => {
+  it("leaves out copied skills the repo does not gitignore", async () => {
     await mkdir(join(worktree.path, ".claude/skills/verify"), { recursive: true });
     await writeFile(join(worktree.path, ".claude/skills/verify/SKILL.md"), "x\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: [] });
-    expect(result).toMatchObject({ ok: false, detail: ".claude/skills/verify/SKILL.md" });
+    await writeFile(join(worktree.path, ".claude/skills/README.md"), "x\n");
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [".claude/skills/verify/SKILL.md", ".claude/skills/README.md"], secretValues: [] });
+    expect(result).toEqual({ ok: true, paths: ["src/a.ts"] });
+  });
+
+  it("keeps a tracked file's HEAD content when a steward copy overwrote it", async () => {
+    const head = await commitFile(source, ".claude/skills/README.md", "repo readme\n");
+    await mirror.fetch();
+    const tracked = await createWorktree(mirror, join(root, "work"), "1-2", head);
+    await writeFile(join(tracked.path, ".claude/skills/README.md"), "steward readme\n");
+    await writeFile(join(tracked.path, "src/a.ts"), "export const a = 2;\n");
+    const result = await stageAndGuard({ worktreePath: tracked.path, stewardFiles: [".claude/skills/README.md"], secretValues: [] });
+    expect(result).toEqual({ ok: true, paths: ["src/a.ts"] });
+  });
+
+  it("stages the agent's edit to a skill the repo itself tracks", async () => {
+    const head = await commitFile(source, ".claude/skills/own/SKILL.md", "v1\n");
+    await mirror.fetch();
+    const tracked = await createWorktree(mirror, join(root, "work"), "1-3", head);
+    await writeFile(join(tracked.path, ".claude/skills/own/SKILL.md"), "v2\n");
+    const result = await stageAndGuard({ worktreePath: tracked.path, stewardFiles: [".claude/skills/README.md"], secretValues: [] });
+    expect(result).toEqual({ ok: true, paths: [".claude/skills/own/SKILL.md"] });
+  });
+
+  it("refuses when only steward copies changed", async () => {
+    await writeFile(join(worktree.path, "notes.md"), "x\n");
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: ["notes.md"], secretValues: [] });
+    expect(result).toMatchObject({ ok: false, reason: "the agent reported the work as implemented but changed nothing" });
   });
 
   it("finds a secret in a binary file", async () => {
     await writeFile(join(worktree.path, "blob.bin"), Buffer.from("\0sk-live-abcdef123456\0"));
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "blob.bin" });
   });
 
   it("finds a secret when .gitattributes marks the file -diff", async () => {
     await writeFile(join(worktree.path, ".gitattributes"), "*.ts -diff\n");
     await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
   });
 
   it("refuses a diff containing a secret value and names the file, not the value", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
   });
 
   it("finds a secret on an added line that starts with ++", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 1;\n++sk-live-abcdef123456\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
   });
 
   it("finds a secret in a file whose name is pathspec magic and names the file", async () => {
     await writeFile(join(worktree.path, ":(glob)zz"), "sk-live-abcdef123456\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: ":(glob)zz" });
   });
 
   it("names a file with a quoted name", async () => {
     await writeFile(join(worktree.path, 'tab\t"q"\u00e9.txt'), "sk-live-abcdef123456\n");
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: 'tab\t"q"\u00e9.txt' });
   });
 
   it("hands back a change too large to scan instead of scanning a truncated diff", async () => {
     await writeFile(join(worktree.path, "src/big.txt"), `${"x".repeat(80)}\n`.repeat(100) + "sk-live-abcdef123456\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"], maxDiffBytes: 1024 });
+    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"], maxDiffBytes: 1024 });
     expect(result).toEqual({ ok: false, reason: "the change is too large to scan for secrets", detail: "src/big.txt" });
   });
 });
@@ -108,7 +135,7 @@ describe("commitWithHooks", () => {
 
   it("commits with the configured author on top of the base", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: [] });
+    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
     const hooksDir = join(root, "hooks");
     await installHookWrappers(worktree.path, hooksDir);
     const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir, messagePath: join(root, "MSG"), message, author: AUTHOR, env: env() });
@@ -121,7 +148,7 @@ describe("commitWithHooks", () => {
     await mkdir(join(worktree.path, ".husky"), { recursive: true });
     await writeFile(join(worktree.path, ".husky/pre-commit"), 'echo "lint failed: no-unused-vars"\nexit 1\n');
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: [] });
+    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
     const hooksDir = join(root, "hooks");
     expect(await installHookWrappers(worktree.path, hooksDir)).toEqual(["pre-commit"]);
     const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir, messagePath: join(root, "MSG"), message, author: AUTHOR, env: env() });
@@ -131,7 +158,7 @@ describe("commitWithHooks", () => {
 
   it("does not change the shared git config", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: [] });
+    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
     const before = await readFile(join(mirror.path, "config"), "utf8");
     await installHookWrappers(worktree.path, join(root, "hooks"));
     await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message, author: AUTHOR, env: env() });
@@ -140,7 +167,7 @@ describe("commitWithHooks", () => {
 });
 
 describe("guardCommit", () => {
-  const guard = { overlayFiles: [".env"], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] };
+  const guard = { stewardFiles: [".env"], secretValues: ["sk-live-abcdef123456"] };
   const commitAll = async (): Promise<string> => {
     await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--no-gpg-sign", "-m", "c"]);
     return git(worktree.path, ["rev-parse", "HEAD"]);
@@ -212,7 +239,7 @@ describe("installHookWrappers", () => {
 describe("push", () => {
   const commitChange = async (): Promise<string> => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: [] });
+    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
     await installHookWrappers(worktree.path, join(root, "hooks"));
     const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message: "API-1: x", author: AUTHOR, env: env() });
     if (!result.ok) throw new Error(result.output);
@@ -287,7 +314,7 @@ describe("push", () => {
 describe("bundleBase", () => {
   it("reads the single prerequisite from a bundle made by saveBundle", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: [] });
+    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
     await installHookWrappers(worktree.path, join(root, "hooks"));
     const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message: "API-1: x", author: AUTHOR, env: env() });
     if (!result.ok) throw new Error(result.output);

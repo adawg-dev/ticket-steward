@@ -144,6 +144,22 @@ describe("runImplement", () => {
     expect(brain.calls[0]?.timeoutMs).toBe(60_000);
   });
 
+  it("pushes the agent's change without the steward's skills when the repo does not gitignore them", async () => {
+    const skillsDir = join(repo.root, "skills");
+    await mkdir(join(skillsDir, "verify"), { recursive: true });
+    await writeFile(join(skillsDir, "README.md"), "steward skills\n");
+    await writeFile(join(skillsDir, "verify/SKILL.md"), "verify\n");
+    const config = makeConfig();
+    const ctx = claim();
+
+    const outcome = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain, { ...config, workspace: { ...config.workspace, skillsDir } }));
+
+    expect(outcome).toEqual({ status: "succeeded" });
+    const sha = stores.jobs.get(ctx.jobId)?.commitSha ?? "";
+    expect(await git(repo.repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha])).toBe("src/adapter.ts");
+    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
+  });
+
   it("hands back to needs-info without touching git", async () => {
     const ctx = claim();
     const outcome = await runImplement(ctx, makeDeps(editingBrain({ ...implemented, outcome: "needs_info", branchType: null, questions: ["Which stream?"] }, async () => undefined).runBrain));

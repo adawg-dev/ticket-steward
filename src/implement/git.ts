@@ -14,8 +14,12 @@ export type GuardResult = { ok: true; paths: string[] } | { ok: false; reason: s
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
-/** `maxDiffBytes` caps one file's scanned diff (default `MAX_DIFF_BYTES`); a larger one is refused, never truncated. */
-export type GuardInput = { overlayFiles: string[]; skillsPrefix: string; secretValues: string[]; maxDiffBytes?: number };
+/**
+ * `stewardFiles` are the worktree-relative paths the steward copied in (overlay env files, its own skills): never staged,
+ * and refused if a hook stages one anyway. `maxDiffBytes` caps one file's scanned diff (default `MAX_DIFF_BYTES`); a
+ * larger one is refused, never truncated.
+ */
+export type GuardInput = { stewardFiles: string[]; secretValues: string[]; maxDiffBytes?: number };
 
 const MAX_DIFF_BYTES = 64 * 1024 * 1024;
 
@@ -57,8 +61,8 @@ const scanDiff = async (cwd: string, args: string[], env: Record<string, string>
 const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: Record<string, string> = {}): Promise<GuardResult> => {
   const paths = (await gitOrThrow(["diff", "--name-only", "-z", ...range], cwd, env)).split("\0").filter((path) => path !== "");
   if (paths.length === 0) return { ok: false, reason: "the agent reported the work as implemented but changed nothing", detail: "" };
-  const overlay = new Set(input.overlayFiles);
-  const copied = paths.filter((path) => overlay.has(path) || path.startsWith(input.skillsPrefix));
+  const steward = new Set(input.stewardFiles);
+  const copied = paths.filter((path) => steward.has(path));
   if (copied.length > 0) return { ok: false, reason: "the change would commit files the steward copied in", detail: copied.join("\n") };
   const secrets = usableSecrets(input.secretValues);
   if (secrets.length > 0) {
@@ -73,9 +77,14 @@ const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: R
   return { ok: true, paths };
 };
 
-/** Stages everything and refuses (nothing committed) if the change is empty, includes steward-copied files, or leaks a secret. */
+/**
+ * Stages everything except the steward's own copies and refuses (nothing committed) if the change is empty or leaks a
+ * secret. The copies are left out rather than refused: the target repo need not gitignore them.
+ */
 export const stageAndGuard = async (input: GuardInput & { worktreePath: string }): Promise<GuardResult> => {
   await gitOrThrow(["add", "-A"], input.worktreePath);
+  // Unstaging restores a tracked path to HEAD in the index and drops an untracked one; a path that is absent is a no-op.
+  if (input.stewardFiles.length > 0) await gitOrThrow(["reset", "-q", "--", ...input.stewardFiles], input.worktreePath, LITERAL_PATHSPECS);
   return guardDiff(input.worktreePath, ["--cached"], input);
 };
 

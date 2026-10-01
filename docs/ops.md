@@ -294,8 +294,9 @@ implement: {
 
 **What an implement job does.** Fresh worktree at the latest `dev`, as for every job; the
 agent edits files only. The steward then, stopping at the first failure: requires a non-empty
-diff; stages everything and refuses if any staged path is an overlay file or under the skills
-dir, or if a staged diff (read as text, binary and `-diff` files included) adds a line containing
+diff; stages everything except the files the steward copied in (overlay files and its own
+`.claude/skills/` copies, left out whether or not the repo gitignores them; the repo's own
+tracked skills can still be edited), and refuses if a staged diff (read as text, binary and `-diff` files included) adds a line containing
 the value of a secret-looking overlay variable or one of the steward's own secrets (hand-back
 "the change contains a secret value"; the comment names paths, never values); runs
 `implement.checks` (`{{baseSha}}` is the job's base commit); commits as `commitAuthor` with

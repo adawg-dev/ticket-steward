@@ -30,6 +30,12 @@ const PUSH_REPO = "push.git";
 const LS_REMOTE_DIR = "ls-remote";
 const SKILLS_PREFIX = ".claude/skills/";
 
+/** The worktree paths the steward copied in: overlay files at their own paths, its skills under `.claude/skills/`. */
+const stewardCopies = async (skillsDir: string | undefined, overlayFiles: string[]): Promise<string[]> => {
+  const skills = skillsDir !== undefined && existsSync(skillsDir) ? await listFiles(skillsDir) : [];
+  return [...overlayFiles, ...skills.map((file) => `${SKILLS_PREFIX}${file}`)];
+};
+
 const notConfigured: JobOutcome = { status: "failed", error: "implement is not configured (implement block and GITLAB_PUSH_TOKEN)", retryable: false };
 
 type Settings = { settings: ImplementConfig; remote: RemoteCredentials };
@@ -174,7 +180,8 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   if (result.outcome === "failed") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent could not finish") }, null);
 
   const { files: overlayFiles, secrets } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
-  const guard = await stageAndGuard({ worktreePath: worktree.path, overlayFiles, skillsPrefix: SKILLS_PREFIX, secretValues: secrets });
+  const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
+  const guard = await stageAndGuard({ worktreePath: worktree.path, stewardFiles, secretValues: secrets });
   if (!guard.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", guard.reason, guard.detail) }, null);
 
   const workspaceEnv = buildWorkspaceEnv(deps.config.workspace.port);
@@ -216,7 +223,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   });
   if (!committed.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", "kickoff's commit hooks rejected the change", deps.redactor.redact(committed.output)) }, null);
   // The hooks ran agent-editable code after the staged guard; push only what passes the same guard as committed.
-  const verified = await guardCommit({ worktreePath: worktree.path, baseSha, sha: committed.sha, overlayFiles, skillsPrefix: SKILLS_PREFIX, secretValues: secrets });
+  const verified = await guardCommit({ worktreePath: worktree.path, baseSha, sha: committed.sha, stewardFiles, secretValues: secrets });
   if (!verified.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", verified.reason, verified.detail) }, null);
 
   await saveBundle(worktree.path, baseSha, join(paths.jobDir, BUNDLE_FILE));
