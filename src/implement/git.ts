@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { git, gitOrThrow, scrubCredentials } from "../workspace/git.js";
 import type { RemoteCredentials } from "../workspace/mirror.js";
@@ -79,6 +79,32 @@ export const commitWithHooks = async (input: {
 /** Keeps the commit on disk after the worktree is gone, so a failed push can be retried. */
 export const saveBundle = async (worktreePath: string, baseSha: string, bundlePath: string): Promise<void> => {
   await gitOrThrow(["bundle", "create", "--quiet", bundlePath, `${baseSha}..HEAD`], worktreePath);
+};
+
+const BUNDLE_SIGNATURES = new Set(["# v2 git bundle", "# v3 git bundle"]);
+const BUNDLE_HEADER_MAX_BYTES = 64 * 1024;
+
+/** The bundle's single prerequisite commit (the job's base), read from its text header without running git. */
+export const bundleBase = async (bundlePath: string): Promise<string> => {
+  const handle = await open(bundlePath, "r");
+  let header: string;
+  try {
+    const buffer = Buffer.alloc(BUNDLE_HEADER_MAX_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, BUNDLE_HEADER_MAX_BYTES, 0);
+    header = buffer.subarray(0, bytesRead).toString("latin1");
+  } finally {
+    await handle.close();
+  }
+  const end = header.indexOf("\n\n");
+  if (end === -1) throw new Error(`${bundlePath} has no complete bundle header`);
+  const [signature = "", ...lines] = header.slice(0, end).split("\n");
+  if (!BUNDLE_SIGNATURES.has(signature)) throw new Error(`${bundlePath} is not a v2/v3 git bundle`);
+  const prerequisites = lines.filter((line) => line.startsWith("-")).map((line) => line.slice(1).split(" ")[0] ?? "");
+  const [base] = prerequisites;
+  if (prerequisites.length !== 1 || base === undefined || !/^[0-9a-f]{40}$/.test(base)) {
+    throw new Error(`${bundlePath} must have exactly one prerequisite commit, found ${prerequisites.length}`);
+  }
+  return base;
 };
 
 export const restoreFromBundle = async (repoPath: string, bundlePath: string, sha: string): Promise<void> => {

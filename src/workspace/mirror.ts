@@ -77,7 +77,13 @@ export class Mirror {
 /** `username` overrides the host default; GitLab deploy tokens only authenticate with their own username. */
 export const injectToken = (url: string, token: string | undefined, username?: string): string => {
   if (token === undefined || token === "") return url;
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // A local path (or scp-style address) has no URL credentials to carry.
+    return url;
+  }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return url;
   parsed.username = username !== undefined && username !== "" ? username : parsed.hostname === "github.com" ? "x-access-token" : "oauth2";
   parsed.password = token;

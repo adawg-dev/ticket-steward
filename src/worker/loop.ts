@@ -3,6 +3,7 @@ import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { acquireRunLock } from "../core/lock.js";
 import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
+import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
 import { publishReviewOnly, runReview } from "../review/pipeline.js";
 import type { Attempt, AttemptPatch, Job } from "../store/index.js";
@@ -17,6 +18,8 @@ export interface WorkerOptions {
   publishOnly?: typeof publishOnly;
   runReview?: typeof runReview;
   publishReviewOnly?: typeof publishReviewOnly;
+  runImplement?: typeof runImplement;
+  publishImplementOnly?: typeof publishImplementOnly;
 }
 
 export type WorkerDeps = PipelineDeps & WorkerOptions;
@@ -67,6 +70,8 @@ class Worker {
   private readonly republish: typeof publishOnly;
   private readonly review: typeof runReview;
   private readonly republishReview: typeof publishReviewOnly;
+  private readonly implement: typeof runImplement;
+  private readonly republishImplement: typeof publishImplementOnly;
   private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly loopDone: Promise<void>;
@@ -87,6 +92,8 @@ class Worker {
     this.republish = deps.publishOnly ?? publishOnly;
     this.review = deps.runReview ?? runReview;
     this.republishReview = deps.publishReviewOnly ?? publishReviewOnly;
+    this.implement = deps.runImplement ?? runImplement;
+    this.republishImplement = deps.publishImplementOnly ?? publishImplementOnly;
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
     logger.info({ requeued, failed }, "worker started");
     this.sweepTimer = setInterval(() => void this.sweep(), deps.sweepMs ?? DEFAULT_SWEEP_MS).unref();
@@ -171,6 +178,7 @@ class Worker {
   private async run(job: Job, ctx: RunContext): Promise<JobOutcome> {
     const deps: PipelineDeps = { ...this.deps, signal: this.abort.signal };
     try {
+      if (job.kind === "implement") return job.implementResult === null ? await this.implement(ctx, deps) : await this.republishImplement(ctx, deps);
       if (job.kind === "review") return job.reviewResult === null ? await this.review(ctx, deps) : await this.republishReview(ctx, deps);
       return job.result === null ? await this.execute(ctx, deps) : await this.republish(ctx, deps);
     } catch (err) {

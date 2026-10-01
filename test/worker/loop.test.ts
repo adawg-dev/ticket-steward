@@ -135,6 +135,15 @@ describe("startWorker", () => {
     await rm(dataDir, { recursive: true, force: true });
   });
 
+  it("dispatches implement jobs to runImplement and republish to publishImplementOnly", async () => {
+    const runImplement = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const handle = start({ runImplement });
+    const jobId = stores.jobs.enqueue({ ...createdTrigger, action: "implement" });
+    await waitForStatus(jobId, "succeeded");
+    expect(runImplement).toHaveBeenCalledTimes(1);
+    await handle.stop();
+  });
+
   it("claims a queued job, runs it with an attempt row and finishes it succeeded", async () => {
     const jobId = stores.jobs.enqueue(createdTrigger);
     const handle = start();

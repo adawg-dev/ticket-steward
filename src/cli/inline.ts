@@ -1,6 +1,7 @@
 import { acquireRunLock } from "../core/lock.js";
 import { publishOnly, redactOutcome, runJob } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
+import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { publishReviewOnly, runReview } from "../review/pipeline.js";
 import type { AttemptPatch, Job, JobStatus, Stores } from "../store/index.js";
 import { errorMessage, fail, println, type CliContext } from "./context.js";
@@ -15,8 +16,9 @@ const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
   return { error: outcome.error };
 };
 
-/** Dispatches the way the worker does: review jobs go to the review pipeline, a stored result means publish-only. */
+/** Dispatches the way the worker does: implement and review jobs go to their pipelines, a stored result means publish-only. */
 const dispatch = (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutcome> => {
+  if (job.kind === "implement") return job.implementResult === null ? runImplement(ctx, runtime.deps) : publishImplementOnly(ctx, runtime.deps);
   if (job.kind === "review") return job.reviewResult === null ? runReview(ctx, runtime.deps) : publishReviewOnly(ctx, runtime.deps);
   return job.result === null ? runJob(ctx, runtime.deps) : publishOnly(ctx, runtime.deps);
 };

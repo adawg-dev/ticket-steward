@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BranchExistsError, commitWithHooks, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
+import { BranchExistsError, bundleBase, commitWithHooks, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
 import { gitEnvRecord } from "../../src/workspace/git.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
@@ -186,5 +186,38 @@ describe("push", () => {
     await git(mirror.path, ["config", "core.hooksPath", evilDir]);
     await push(sha, { env: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: "Authorization: Basic c2VjcmV0" } });
     expect(existsSync(leak)).toBe(false);
+  });
+});
+
+describe("bundleBase", () => {
+  it("reads the single prerequisite from a bundle made by saveBundle", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: [] });
+    await installHookWrappers(worktree.path, join(root, "hooks"));
+    const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message: "API-1: x", author: AUTHOR, env: env() });
+    if (!result.ok) throw new Error(result.output);
+    await saveBundle(worktree.path, base, join(root, "implement.bundle"));
+    expect(await bundleBase(join(root, "implement.bundle"))).toBe(base);
+  });
+
+  it("parses a v3 header with capabilities", async () => {
+    const path = join(root, "v3.bundle");
+    await writeFile(path, `# v3 git bundle\n@object-format=sha1\n-${"a".repeat(40)} base commit\n${"b".repeat(40)} HEAD\n\nPACK`);
+    expect(await bundleBase(path)).toBe("a".repeat(40));
+  });
+
+  it("throws without exactly one prerequisite", async () => {
+    const none = join(root, "none.bundle");
+    await writeFile(none, `# v2 git bundle\n${"b".repeat(40)} HEAD\n\nPACK`);
+    await expect(bundleBase(none)).rejects.toThrow();
+    const two = join(root, "two.bundle");
+    await writeFile(two, `# v2 git bundle\n-${"a".repeat(40)}\n-${"c".repeat(40)} x\n${"b".repeat(40)} HEAD\n\nPACK`);
+    await expect(bundleBase(two)).rejects.toThrow();
+  });
+
+  it("throws on a file that is not a bundle", async () => {
+    const path = join(root, "junk.bundle");
+    await writeFile(path, "hello\n");
+    await expect(bundleBase(path)).rejects.toThrow();
   });
 });

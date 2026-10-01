@@ -123,4 +123,8 @@ describe("injectToken", () => {
   it("returns the url unchanged without a token", () => {
     expect(injectToken("https://gitlab.com/group/repo.git", undefined)).toBe("https://gitlab.com/group/repo.git");
   });
+
+  it("returns a local path unchanged", () => {
+    expect(injectToken("/srv/git/repo.git", "glpat-abc")).toBe("/srv/git/repo.git");
+  });
 });
