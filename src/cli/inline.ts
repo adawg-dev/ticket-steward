@@ -3,7 +3,7 @@ import { publishOnly, redactOutcome, runJob } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { publishReviewOnly, runReview } from "../review/pipeline.js";
-import type { AttemptPatch, Job, JobStatus, Stores } from "../store/index.js";
+import { unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
 import { errorMessage, fail, println, type CliContext } from "./context.js";
 import { sleep } from "./probe.js";
 import type { Runtime } from "./runtime.js";
@@ -18,6 +18,8 @@ const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
 
 /** Dispatches the way the worker does: implement and review jobs go to their pipelines, a stored result means publish-only. */
 const dispatch = (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutcome> => {
+  const unreadable = unreadableOutcome(job);
+  if (unreadable !== null) return Promise.resolve(unreadable);
   if (job.kind === "implement") return job.implementResult === null ? runImplement(ctx, runtime.deps) : publishImplementOnly(ctx, runtime.deps);
   if (job.kind === "review") return job.reviewResult === null ? runReview(ctx, runtime.deps) : publishReviewOnly(ctx, runtime.deps);
   return job.result === null ? runJob(ctx, runtime.deps) : publishOnly(ctx, runtime.deps);

@@ -6,7 +6,7 @@ import type { JobOutcome, RunContext } from "../core/types.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
 import { publishReviewOnly, runReview } from "../review/pipeline.js";
-import type { Attempt, AttemptPatch, Job } from "../store/index.js";
+import { unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 
 export interface WorkerOptions {
@@ -128,7 +128,14 @@ class Worker {
 
   private async loop(): Promise<void> {
     while (!this.stopped) {
-      const job = this.claim();
+      let job: Job | null;
+      try {
+        job = this.claim();
+      } catch (err) {
+        // A store error while claiming must not end the loop; wait out the poll interval and try again.
+        logger.error({ err: errorMessage(err) }, "job claim failed");
+        job = null;
+      }
       if (job === null) {
         await this.idle();
         continue;
@@ -177,6 +184,9 @@ class Worker {
 
   private async run(job: Job, ctx: RunContext): Promise<JobOutcome> {
     const deps: PipelineDeps = { ...this.deps, signal: this.abort.signal };
+    // An unreadable stored result fails the job here, before any dispatch could re-run the brain or push again.
+    const unreadable = unreadableOutcome(job);
+    if (unreadable !== null) return unreadable;
     try {
       if (job.kind === "implement") return job.implementResult === null ? await this.implement(ctx, deps) : await this.republishImplement(ctx, deps);
       if (job.kind === "review") return job.reviewResult === null ? await this.review(ctx, deps) : await this.republishReview(ctx, deps);

@@ -34,7 +34,11 @@ export interface Job {
   startedAt: string | null;
   finishedAt: string | null;
   notBefore: string | null;
+  /** Stored-result columns holding JSON the schemas reject; the matching field is null. Such a job must fail, not run. */
+  unreadable: StoredColumn[];
 }
+
+export type StoredColumn = "result" | "review_result" | "implement_result";
 
 interface JobRow {
   id: number;
@@ -60,29 +64,57 @@ interface JobRow {
   not_before: string | null;
 }
 
-const toJob = (row: JobRow): Job => ({
-  id: row.id,
-  issueId: row.issue_id,
-  identifier: row.identifier,
-  teamKey: row.team_key,
-  kind: row.kind,
-  subject: row.subject,
-  trigger: JSON.parse(row.trigger) as TriggerEvent,
-  status: row.status,
-  attempts: row.attempts,
-  result: row.result === null ? null : StoredBrainResultSchema.parse(JSON.parse(row.result)),
-  resultSha: row.result_sha,
-  reviewResult: row.review_result === null ? null : StoredReviewSchema.parse(JSON.parse(row.review_result)),
-  implementResult: row.implement_result === null ? null : StoredImplementSchema.parse(JSON.parse(row.implement_result)),
-  branch: row.branch,
-  commitSha: row.commit_sha,
-  pushedAt: row.pushed_at,
-  error: row.error,
-  createdAt: row.created_at,
-  startedAt: row.started_at,
-  finishedAt: row.finished_at,
-  notBefore: row.not_before,
-});
+type StoredSchema<T> = { safeParse: (value: unknown) => { success: true; data: T } | { success: false } };
+
+/** One stored-result column: JSON the schema rejects is noted in `unreadable` and read as null instead of thrown. */
+const readStored = <T>(raw: string | null, column: StoredColumn, schema: StoredSchema<T>, unreadable: StoredColumn[]): T | null => {
+  if (raw === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    unreadable.push(column);
+    return null;
+  }
+  const parsed = schema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  unreadable.push(column);
+  return null;
+};
+
+const toJob = (row: JobRow): Job => {
+  const unreadable: StoredColumn[] = [];
+  return {
+    id: row.id,
+    issueId: row.issue_id,
+    identifier: row.identifier,
+    teamKey: row.team_key,
+    kind: row.kind,
+    subject: row.subject,
+    trigger: JSON.parse(row.trigger) as TriggerEvent,
+    status: row.status,
+    attempts: row.attempts,
+    result: readStored(row.result, "result", StoredBrainResultSchema, unreadable),
+    resultSha: row.result_sha,
+    reviewResult: readStored(row.review_result, "review_result", StoredReviewSchema, unreadable),
+    implementResult: readStored(row.implement_result, "implement_result", StoredImplementSchema, unreadable),
+    branch: row.branch,
+    commitSha: row.commit_sha,
+    pushedAt: row.pushed_at,
+    error: row.error,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    notBefore: row.not_before,
+    unreadable,
+  };
+};
+
+/** A job whose stored result cannot be read fails for good: running it again could repeat the brain run or a push. */
+export const unreadableOutcome = (job: Job): JobOutcome | null =>
+  job.unreadable.length === 0
+    ? null
+    : { status: "failed", error: `stored ${job.unreadable.join(", ")} is unreadable; fix or clear the column before retrying`, retryable: false };
 
 interface JobColumns {
   issueId: string;

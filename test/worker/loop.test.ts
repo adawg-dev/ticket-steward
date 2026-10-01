@@ -261,6 +261,36 @@ describe("startWorker", () => {
     expect(handle.state()).toEqual({ running: null });
   });
 
+  it("fails a job with an unreadable stored implement_result without re-running it, and keeps processing", async () => {
+    const runImplement = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const publishImplementOnly = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const badId = stores.jobs.enqueue({ ...createdTrigger, action: "implement" });
+    stores.db.prepare("UPDATE jobs SET implement_result = ? WHERE id = ?").run('{"handback":"x"}', badId);
+    const laterId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    const handle = start({ runImplement, publishImplementOnly });
+
+    await waitForStatus(laterId, "succeeded");
+    const bad = stores.jobs.get(badId);
+    expect(bad?.status).toBe("failed");
+    expect(bad?.error).toContain("implement_result");
+    expect(bad?.attempts).toBe(1);
+    expect(runImplement).not.toHaveBeenCalled();
+    expect(publishImplementOnly).not.toHaveBeenCalled();
+    await handle.stop();
+  });
+
+  it("keeps the loop alive when claiming a job throws", async () => {
+    const claimSpy = vi.spyOn(stores.jobs, "claimNext").mockImplementationOnce(() => {
+      throw new Error("Intended Test Error");
+    });
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    const handle = start();
+
+    await waitForStatus(jobId, "succeeded");
+    expect(claimSpy.mock.calls.length).toBeGreaterThan(1);
+    await handle.stop();
+  });
+
   it("SIGTERM aborts the in-flight job, marks the attempt interrupted and leaves the job queued", async () => {
     runJobMock.mockImplementationOnce(
       (_ctx, deps) =>

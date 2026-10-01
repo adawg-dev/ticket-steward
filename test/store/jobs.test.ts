@@ -16,6 +16,21 @@ afterEach(() => {
 });
 
 describe("JobStore", () => {
+  it("loads a job whose stored results are unreadable, nulls them and names the columns, and still lists every job", () => {
+    const good = stores.jobs.enqueue(createdEvent);
+    const bad = stores.jobs.enqueue(secondEvent);
+    stores.db.prepare("UPDATE jobs SET result = ?, implement_result = ? WHERE id = ?").run('{"summary":1}', "not json", bad);
+
+    expect(stores.jobs.list({ limit: 10 }).map((job) => job.id)).toEqual([bad, good]);
+    const job = stores.jobs.get(bad);
+    expect(job?.result).toBeNull();
+    expect(job?.implementResult).toBeNull();
+    expect(job?.unreadable).toEqual(["result", "implement_result"]);
+    expect(stores.jobs.get(good)?.unreadable).toEqual([]);
+    expect(stores.jobs.claimNext()?.id).toBe(good);
+    expect(stores.jobs.claimNext()?.unreadable).toEqual(["result", "implement_result"]);
+  });
+
   it("enqueue then get returns a queued job carrying the trigger", () => {
     const id = stores.jobs.enqueue(createdEvent);
 
