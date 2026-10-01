@@ -16,6 +16,38 @@ const LabelsSchema = z.object({
 
 const BRANCH_TYPE = /^[a-z][a-z0-9-]*$/;
 
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Placeholders a `slots.env` value may use; each is rendered per job from the slot's ports. */
+export const SLOT_TEMPLATES = ["app", "postgres", "redis", "rabbitmq"] as const;
+export type SlotTemplate = (typeof SLOT_TEMPLATES)[number];
+/** `{{name}}`, optionally with spaces inside the braces. Global: use with matchAll or replace only. */
+export const SLOT_TEMPLATE_PATTERN = /\{\{\s*([^{}]*?)\s*\}\}/g;
+export const isSlotTemplate = (name: string): name is SlotTemplate => SLOT_TEMPLATES.some((template) => template === name);
+
+const SlotsSchema = z
+  .object({
+    count: z.number().int().min(1).max(9),
+    /** The slot helper's socket (ops/steward-slot.socket); systemd runs the root helper per connection. */
+    socket: z.string().min(1).default("/run/steward-slot.sock"),
+    /** Slot n's app port is appPortBase + n. */
+    appPortBase: z.number().int().positive().max(65_526),
+    /** Kills a hung `up`. */
+    upTimeoutSeconds: z.number().positive().default(180),
+    /** Applied to every copied overlay file that defines the key; null deletes the line. */
+    env: z.record(z.string().regex(ENV_KEY), z.string().nullable()).default({}),
+  })
+  .superRefine((slots, ctx) => {
+    for (const [key, value] of Object.entries(slots.env)) {
+      if (value === null) continue;
+      for (const [, name = ""] of value.matchAll(SLOT_TEMPLATE_PATTERN)) {
+        if (!isSlotTemplate(name)) {
+          ctx.addIssue({ code: "custom", path: ["env", key], message: `unknown template {{${name}}}; use {{app}}, {{postgres}}, {{redis}} or {{rabbitmq}}` });
+        }
+      }
+    }
+  });
+
 const ImplementSchema = z.object({
   prompt: z.string(),
   branchTypes: z.array(z.string().regex(BRANCH_TYPE)).min(1).default(["feature", "fix", "chore", "refactor"]),
@@ -62,7 +94,8 @@ export const StewardConfigSchema = z.object({
     setup: z.array(z.string()),
     setupTimeoutMinutes: z.number().positive().default(15),
     portRewrite: z.object({ from: z.number().int().positive() }).optional(),
-    port: z.number().int().positive(),
+    /** The app port without `slots`; with `slots` each slot has its own (slots.appPortBase + n). */
+    port: z.number().int().positive().optional(),
     keepOnFailure: z.boolean().default(true),
   }),
   retention: z
@@ -85,12 +118,20 @@ export const StewardConfigSchema = z.object({
     })
     .optional(),
   implement: ImplementSchema.optional(),
+  /** Parallel jobs on fresh per-job containers; unset keeps one job at a time on workspace.port. */
+  slots: SlotsSchema.optional(),
 }).superRefine((config, ctx) => {
   if (config.review !== undefined && config.codehost.kind !== "gitlab") {
     ctx.addIssue({ code: "custom", path: ["review"], message: 'review requires codehost.kind "gitlab"' });
   }
   if (config.implement !== undefined && config.tracker.labels === undefined) {
     ctx.addIssue({ code: "custom", path: ["implement"], message: "implement requires tracker.labels" });
+  }
+  if (config.slots !== undefined && config.workspace.port !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["workspace", "port"], message: "workspace.port was replaced by slots.appPortBase (see docs/ops.md)" });
+  }
+  if (config.slots === undefined && config.workspace.port === undefined) {
+    ctx.addIssue({ code: "custom", path: ["workspace", "port"], message: "workspace.port is required unless slots is set" });
   }
 });
 
@@ -101,3 +142,11 @@ export type BrainConfig = StewardConfig["brain"];
 export type CodeHostConfig = StewardConfig["codehost"];
 export type LabelsConfig = NonNullable<StewardConfig["tracker"]["labels"]>;
 export type ImplementConfig = NonNullable<StewardConfig["implement"]>;
+export type SlotsConfig = NonNullable<StewardConfig["slots"]>;
+
+/** Slot n's app port with `slots`, otherwise `workspace.port`; config load guarantees one of them. */
+export const appPortOf = (config: Pick<StewardConfig, "slots" | "workspace">, n: number): number => {
+  if (config.slots !== undefined) return config.slots.appPortBase + n;
+  if (config.workspace.port === undefined) throw new Error("workspace.port is required unless slots is set");
+  return config.workspace.port;
+};

@@ -17,6 +17,7 @@ import { captureReproFiles, isBugTicket, normalizeRepro, reproFilesDir } from ".
 import { validateResult, type Repro, type StoredBrainResult } from "./result.js";
 import type { JobOutcome, RunContext } from "./types.js";
 import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, patchAttempt, prepareWorkspace, redactOutcome, type JobPaths } from "./workspace.js";
+import { appPortOf } from "../config/schema.js";
 
 export type { PipelineDeps } from "./deps.js";
 export { redactOutcome } from "./workspace.js";
@@ -79,7 +80,7 @@ const prepare = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, env
     artifactsDir: paths.artifactsDir,
     teamKey: ctx.teamKey,
     teamName: bundle.team.name,
-    stewardPort: config.workspace.port,
+    stewardPort: appPortOf(config, 1),
     gateway: isGatewayIssue(bundle.description) ? (gatewayRoute(bundle.description) ?? { className: "unknown", teamKey: "unknown" }) : null,
     isBug,
   });
@@ -151,7 +152,7 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainR
 const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
   const { config, secrets } = deps;
   const paths = jobPaths(ctx, deps);
-  const env = buildBrainEnv(secrets, config.brain, config.workspace.port);
+  const env = buildBrainEnv(secrets, config.brain, appPortOf(config, 1));
   let prepared: Prepared;
   try {
     prepared = await prepare(ctx, deps, paths, env, onWorktree);

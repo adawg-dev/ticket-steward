@@ -3,7 +3,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { buildBrainEnv, buildWorkspaceEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
 import type { BrainRun } from "../brain/types.js";
-import type { ImplementConfig } from "../config/schema.js";
+import { appPortOf, type ImplementConfig } from "../config/schema.js";
 import { renderTicketMarkdown } from "../core/context.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
@@ -137,7 +137,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) }, null);
   }
 
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, deps.config.workspace.port);
+  const env = buildBrainEnv(deps.secrets, deps.config.brain, appPortOf(deps.config, 1));
   let worktree: Worktree;
   let prompt: string;
   try {
@@ -152,7 +152,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
       baseBranch: deps.config.workspace.baseBranch,
       sha: baseSha,
       artifactsDir: paths.artifactsDir,
-      stewardPort: deps.config.workspace.port,
+      stewardPort: appPortOf(deps.config, 1),
       hasBrief: brief !== null,
       brief: brief ?? "",
       branchTypes: settings.branchTypes.join(", "),
@@ -188,7 +188,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   const guard = await stageAndGuard({ worktreePath: worktree.path, stewardFiles, secretValues: secrets });
   if (!guard.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", guard.reason, guard.detail) }, null);
 
-  const workspaceEnv = buildWorkspaceEnv(deps.config.workspace.port);
+  const workspaceEnv = buildWorkspaceEnv(appPortOf(deps.config, 1));
   const checks = stewardChecks(settings.checks, baseSha);
   const checked = await runSetup(checks, worktree.path, workspaceEnv, {
     timeoutMs: settings.checksTimeoutMinutes * MINUTE_MS,

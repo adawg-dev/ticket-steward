@@ -19,6 +19,7 @@ import { errorMessage, exitWith, loadFromProgram, println, type CliContext } fro
 import { binPath } from "./paths.js";
 import { withTimeout } from "./probe.js";
 import { openMirror } from "./runtime.js";
+import { appPortOf } from "../config/schema.js";
 
 type Level = "ok" | "fail" | "warn";
 
@@ -284,7 +285,10 @@ const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
     },
     {
       name: "port",
-      run: async () => ((await isPortFree(config.workspace.port)) ? ok(`${config.workspace.port} is free`) : flunk(`${config.workspace.port} is in use`)),
+      run: async () => {
+        const port = appPortOf(config, 1);
+        return (await isPortFree(port)) ? ok(`${port} is free`) : flunk(`${port} is in use`);
+      },
     },
   ];
 };

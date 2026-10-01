@@ -17,6 +17,7 @@ import { createWorktree, type Worktree } from "../workspace/worktree.js";
 import type { PipelineDeps } from "./deps.js";
 import type { Redactor } from "./redact.js";
 import type { JobOutcome, RunContext } from "./types.js";
+import { appPortOf } from "../config/schema.js";
 
 export interface JobPaths {
   worktreeName: string;
@@ -82,7 +83,7 @@ export const prepareWorkspace = async (
   const worktree = await createWorktree(mirror, paths.workRoot, paths.worktreeName, sha);
   onWorktree(worktree);
   await mkdir(paths.artifactsDir, { recursive: true, mode: 0o700 });
-  const portRewrite = config.workspace.portRewrite === undefined ? {} : { portRewrite: { from: config.workspace.portRewrite.from, to: config.workspace.port } };
+  const portRewrite = config.workspace.portRewrite === undefined ? {} : { portRewrite: { from: config.workspace.portRewrite.from, to: appPortOf(config, 1) } };
   await copyOverlay(config.workspace.overlayDir, worktree.path, portRewrite);
   await copySkills(config.workspace.skillsDir, worktree.path);
   const setup = await runSetup(config.workspace.setup, worktree.path, env, {
@@ -130,7 +131,8 @@ export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktr
 };
 
 export const cleanupWorkspace = async (deps: PipelineDeps, worktree: Worktree | null, outcome: JobOutcome): Promise<void> => {
-  const { port, keepOnFailure } = deps.config.workspace;
+  const { keepOnFailure } = deps.config.workspace;
+  const port = appPortOf(deps.config, 1);
   try {
     if (!(await isPortFree(port))) await freePort(port);
     if (worktree === null || (outcome.status !== "succeeded" && keepOnFailure)) return;

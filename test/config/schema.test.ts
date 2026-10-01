@@ -1,4 +1,4 @@
-import { StewardConfigSchema, defineConfig } from "../../src/config/schema.js";
+import { StewardConfigSchema, appPortOf, defineConfig } from "../../src/config/schema.js";
 import type { StewardConfigInput } from "../../src/config/schema.js";
 
 const minimalInput: StewardConfigInput = {
@@ -151,5 +151,66 @@ describe("tracker.labels and implement", () => {
   it("rejects a branch type that is not lowercase kebab", () => {
     const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement: { ...implement, branchTypes: ["Fix"] } });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("slots config", () => {
+  const slotsInput = { count: 2, appPortBase: 4100 };
+  const withSlots = (slots: Record<string, unknown>, workspace: Record<string, unknown> = {}): unknown => ({
+    ...minimalInput,
+    workspace: { ...minimalInput.workspace, port: undefined, ...workspace },
+    slots,
+  });
+
+  it("parses slots with defaults", () => {
+    const parsed = StewardConfigSchema.parse(withSlots(slotsInput));
+    expect(parsed.slots).toEqual({ count: 2, socket: "/run/steward-slot.sock", appPortBase: 4100, upTimeoutSeconds: 180, env: {} });
+    expect(parsed.workspace.port).toBeUndefined();
+  });
+
+  it("accepts every template, spaces inside the braces, and null values", () => {
+    const env = {
+      DB_PORT: "{{postgres}}",
+      REDIS_URL: "redis://localhost:{{ redis }}",
+      RABBITMQ_URL: "amqp://steward:steward-slot@localhost:{{rabbitmq}}",
+      BASE_URL: "http://localhost:{{app}}",
+      REDIS_CLUSTER_NODES: null,
+    };
+    expect(StewardConfigSchema.parse(withSlots({ ...slotsInput, env })).slots?.env).toEqual(env);
+  });
+
+  it("rejects an unknown template, naming the key", () => {
+    const parsed = StewardConfigSchema.safeParse(withSlots({ ...slotsInput, env: { DB_PORT: "{{pg}}" } }));
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toEqual([
+      expect.objectContaining({ path: ["slots", "env", "DB_PORT"], message: "unknown template {{pg}}; use {{app}}, {{postgres}}, {{redis}} or {{rabbitmq}}" }),
+    ]);
+  });
+
+  it("rejects workspace.port next to slots with a pointer to slots.appPortBase", () => {
+    const parsed = StewardConfigSchema.safeParse(withSlots(slotsInput, { port: 4100 }));
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toEqual([
+      expect.objectContaining({ path: ["workspace", "port"], message: "workspace.port was replaced by slots.appPortBase (see docs/ops.md)" }),
+    ]);
+  });
+
+  it("still requires workspace.port without slots", () => {
+    const parsed = StewardConfigSchema.safeParse({ ...minimalInput, workspace: { ...minimalInput.workspace, port: undefined } });
+    expect(parsed.error?.issues).toEqual([expect.objectContaining({ path: ["workspace", "port"], message: "workspace.port is required unless slots is set" })]);
+  });
+
+  it("rejects a slot count outside 1-9", () => {
+    expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, count: 0 })).success).toBe(false);
+    expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, count: 10 })).success).toBe(false);
+  });
+
+  it("keeps portRewrite next to slots", () => {
+    expect(StewardConfigSchema.parse(withSlots(slotsInput, { portRewrite: { from: 3000 } })).workspace.portRewrite).toEqual({ from: 3000 });
+  });
+
+  it("appPortOf is appPortBase + n with slots and workspace.port without", () => {
+    expect(appPortOf(StewardConfigSchema.parse(withSlots(slotsInput)), 2)).toBe(4102);
+    expect(appPortOf(StewardConfigSchema.parse(minimalInput), 2)).toBe(4100);
   });
 });

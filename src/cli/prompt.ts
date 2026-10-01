@@ -7,6 +7,7 @@ import { isBugTicket } from "../core/repro.js";
 import { loadFromProgram, type CliContext } from "./context.js";
 import { artifactsDir } from "./paths.js";
 import { openMirror, openTracker } from "./runtime.js";
+import { appPortOf } from "../config/schema.js";
 
 const WORKSPACE_PLACEHOLDER = "<worktree>";
 const JOB_PLACEHOLDER = "<jobId>";
@@ -46,7 +47,7 @@ export const registerPrompt = (program: Command, ctx: CliContext): void => {
           artifactsDir: artifactsDir(config.dataDir, JOB_PLACEHOLDER),
           teamKey,
           teamName: bundle.team.name,
-          stewardPort: config.workspace.port,
+          stewardPort: appPortOf(config, 1),
           gateway: isGatewayIssue(bundle.description) ? (gatewayRoute(bundle.description) ?? { className: "unknown", teamKey: "unknown" }) : null,
           isBug: isBugTicket(bundle.labels, config.tracker.bugLabels),
         }),

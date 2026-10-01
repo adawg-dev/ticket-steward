@@ -15,6 +15,7 @@ import type { Worktree } from "../workspace/worktree.js";
 import { renderReviewPrompt } from "./prompt.js";
 import { postUnverifiable, publishReview } from "./publish.js";
 import { normalizeReviewResult, validateReviewResult, type StoredReview } from "./result.js";
+import { appPortOf } from "../config/schema.js";
 
 const DIFF_FILE = "mr.diff";
 
@@ -74,7 +75,7 @@ const executeReview = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (w
   }
 
   const paths = jobPaths(ctx, deps);
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, deps.config.workspace.port);
+  const env = buildBrainEnv(deps.secrets, deps.config.brain, appPortOf(deps.config, 1));
   let worktree: Worktree;
   let diff: string;
   let prompt: string;
@@ -100,7 +101,7 @@ const executeReview = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (w
       diffPath,
       workspacePath: worktree.path,
       artifactsDir: paths.artifactsDir,
-      stewardPort: deps.config.workspace.port,
+      stewardPort: appPortOf(deps.config, 1),
       ticket,
       hasRecipe: repro !== null,
       recipe: repro === null ? "" : renderReproMarkdown(repro.recipe),
