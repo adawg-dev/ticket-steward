@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { git, gitOrThrow, scrubCredentials } from "../workspace/git.js";
 import type { RemoteCredentials } from "../workspace/mirror.js";
@@ -9,6 +9,8 @@ const MIN_SECRET_LENGTH = 8;
 const GIT_HOOKS = new Set(["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"]);
 
 export type GuardResult = { ok: true; paths: string[] } | { ok: false; reason: string; detail: string };
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
 const stagedPaths = async (worktreePath: string): Promise<string[]> => {
   const out = await gitOrThrow(["diff", "--cached", "--name-only", "-z"], worktreePath);
@@ -27,7 +29,7 @@ export const stageAndGuard = async (input: { worktreePath: string; overlayFiles:
   if (secrets.length > 0) {
     const leaking: string[] = [];
     for (const path of paths) {
-      const diff = await git(["diff", "--cached", "--no-color", "--unified=0", "--", path], input.worktreePath);
+      const diff = await git(["diff", "--cached", "--no-color", "--unified=0", "--text", "--no-ext-diff", "--no-textconv", "--", path], input.worktreePath);
       const added = diff.stdout.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++"));
       if (added.some((line) => secrets.some((secret) => line.includes(secret)))) leaking.push(path);
     }
@@ -48,7 +50,7 @@ export const installHookWrappers = async (worktreePath: string, hooksDir: string
   for (const name of (await readdir(huskyDir)).sort()) {
     if (!GIT_HOOKS.has(name) || !(await stat(join(huskyDir, name))).isFile()) continue;
     const wrapper = join(hooksDir, name);
-    await writeFile(wrapper, `#!/bin/sh\nexec sh ${JSON.stringify(join(huskyDir, name))} "$@"\n`);
+    await writeFile(wrapper, `#!/bin/sh\nexec sh ${shellQuote(join(huskyDir, name))} "$@"\n`);
     await chmod(wrapper, 0o755);
     installed.push(name);
   }
@@ -103,14 +105,38 @@ export class BranchExistsError extends Error {
   }
 }
 
-/** Pushes `sha` to a new branch after checking the ref pattern, the ancestry, and that no branch carries the ticket. Never forces. */
-export const pushCommit = async (input: { cwd: string; remote: RemoteCredentials; sha: string; baseSha: string; branch: string; identifier: string; branchTypes: string[] }): Promise<void> => {
+/**
+ * Pushes `sha` to a new branch after checking the ref pattern, the ancestry, and that no branch carries the ticket. Never forces.
+ * Runs in a fresh scratch repo (never the worktree or mirror, whose config the agent may have set) with hooks disabled, so the
+ * push credentials only reach git itself. Objects come from the bundle plus the mirror's objects (via alternates) for the base.
+ */
+export const pushCommit = async (input: {
+  scratchDir: string;
+  objectsDir: string;
+  bundlePath: string;
+  remote: RemoteCredentials;
+  sha: string;
+  baseSha: string;
+  branch: string;
+  identifier: string;
+  branchTypes: string[];
+}): Promise<void> => {
   const ref = `refs/heads/${input.branch}`;
   if (!branchRefPattern(input.branchTypes, input.identifier).test(ref)) throw new Error(`refusing to push to ${ref}: not a ${input.branchTypes.join("|")}/${input.identifier}-<slug> branch`);
-  const parents = (await gitOrThrow(["rev-list", "--parents", "-n", "1", input.sha], input.cwd)).split(" ").slice(1);
+  await rm(input.scratchDir, { recursive: true, force: true });
+  await gitOrThrow(["init", "--bare", "--quiet", input.scratchDir]);
+  await mkdir(join(input.scratchDir, "objects", "info"), { recursive: true });
+  await writeFile(join(input.scratchDir, "objects", "info", "alternates"), `${input.objectsDir}\n`);
+  await restoreFromBundle(input.scratchDir, input.bundlePath, input.sha);
+  const parents = (await gitOrThrow(["rev-list", "--parents", "-n", "1", input.sha], input.scratchDir)).split(" ").slice(1);
   if (parents.length !== 1 || parents[0] !== input.baseSha) throw new Error(`refusing to push: ${input.sha.slice(0, 7)} is not a single commit on top of ${input.baseSha.slice(0, 7)}`);
-  const existing = await remoteTicketBranches(input.remote, input.cwd, input.identifier);
+  const existing = await remoteTicketBranches(input.remote, input.scratchDir, input.identifier);
   if (existing[0] !== undefined) throw new BranchExistsError(existing[0].ref);
-  const pushed = await git(["push", "--quiet", "--porcelain", input.remote.url, `${input.sha}:${ref}`], input.cwd, input.remote.env);
+  // Create-only: the empty expected value makes git refuse if the ref exists by push time (never a force).
+  const pushed = await git(
+    ["-c", "core.hooksPath=/dev/null", "push", "--quiet", "--porcelain", `--force-with-lease=${ref}:`, input.remote.url, `${input.sha}:${ref}`],
+    input.scratchDir,
+    input.remote.env,
+  );
   if (pushed.exitCode !== 0) throw new Error(`git push exited ${pushed.exitCode}: ${scrubCredentials(pushed.stderr)}`);
 };
