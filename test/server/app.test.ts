@@ -10,7 +10,7 @@ import { mrPayload } from "../fakes/gitlabPayload.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 
 const WEBHOOK_SECRET = "webhook-secret-value";
-const WORKER_IDLE = { running: null };
+const WORKER_IDLE = { running: [] };
 
 let dataDir: string;
 let stores: Stores;
@@ -367,7 +367,7 @@ describe("buildServer", () => {
       expect(response.json()).toEqual({
         ok: true,
         apiKeyRejected: false,
-        worker: { running: null },
+        worker: { running: [] },
         counts: { queued: 1, failedLast24h: 0 },
         lastSuccessAt: null,
       });
@@ -395,6 +395,14 @@ describe("buildServer", () => {
       expect(response.statusCode).toBe(503);
       expect(response.json().ok).toBe(false);
       expect(response.json().apiKeyRejected).toBe(true);
+    });
+
+    it("lists every running slot", async () => {
+      await app.close();
+      const running = { running: [{ slot: 1, jobId: 12 }, { slot: 2, jobId: 14 }] };
+      app = buildServer({ config: makeConfig(), secrets: {}, stores, tracker, workerState: () => running });
+
+      expect((await app.inject({ method: "GET", url: "/health" })).json().worker).toEqual(running);
     });
   });
 

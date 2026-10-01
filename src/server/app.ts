@@ -8,19 +8,20 @@ import { transaction, type Job, type Stores } from "../store/index.js";
 import { reviewSubject } from "../store/jobs.js";
 import { parseEvent, verifySignature } from "../tracker/linear/webhook.js";
 import type { ReviewTrigger, Tracker, TriggerEvent } from "../tracker/types.js";
+import type { WorkerState } from "../worker/index.js";
 
 export interface ServerDeps {
   config: StewardConfig;
   secrets: Secrets;
   stores: Stores;
   tracker: Tracker;
-  workerState: () => { running: number | null };
+  workerState: () => WorkerState;
 }
 
 export interface HealthReport {
   ok: boolean;
   apiKeyRejected: boolean;
-  worker: { running: number | null };
+  worker: WorkerState;
   counts: { queued: number; failedLast24h: number };
   lastSuccessAt: string | null;
 }

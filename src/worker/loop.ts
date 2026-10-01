@@ -24,14 +24,26 @@ export interface WorkerOptions {
 
 export type WorkerDeps = PipelineDeps & WorkerOptions;
 
+/** The jobs running right now, one entry per busy slot (slot 1 when `slots` is not configured). */
+export interface WorkerState {
+  running: Array<{ slot: number; jobId: number }>;
+}
+
 export interface WorkerHandle {
-  state: () => { running: number | null };
+  state: () => WorkerState;
   stop: () => Promise<void>;
 }
 
 interface InFlight {
   job: Job;
   attempt: Attempt;
+}
+
+/** One worker loop; it owns its slot for its whole life. */
+interface Lane {
+  slot: number;
+  inFlight: InFlight | null;
+  wake: (() => void) | null;
 }
 
 const DEFAULT_POLL_MS = 2_000;
@@ -74,12 +86,13 @@ class Worker {
   private readonly republishImplement: typeof publishImplementOnly;
   private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
-  private readonly loopDone: Promise<void>;
+  private readonly lanes: Lane[];
+  private readonly loopsDone: Promise<void>;
   private readonly onSigterm = (): void => void this.stop();
-  private inFlight: InFlight | null = null;
   private stopped = false;
   private stopping: Promise<void> | null = null;
-  private wake: (() => void) | null = null;
+  /** True while retention runs; claims wait, so no job starts while worktree directories are being removed. */
+  private sweeping = false;
 
   constructor(
     private readonly deps: WorkerDeps,
@@ -94,17 +107,21 @@ class Worker {
     this.republishReview = deps.publishReviewOnly ?? publishReviewOnly;
     this.implement = deps.runImplement ?? runImplement;
     this.republishImplement = deps.publishImplementOnly ?? publishImplementOnly;
+    this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
-    logger.info({ requeued, failed }, "worker started");
-    this.sweepTimer = setInterval(() => void this.sweep(), deps.sweepMs ?? DEFAULT_SWEEP_MS).unref();
+    logger.info({ requeued, failed, slots: this.lanes.length }, "worker started");
+    this.sweepTimer = setInterval(() => void this.sweepWhenIdle(), deps.sweepMs ?? DEFAULT_SWEEP_MS).unref();
     process.once("SIGTERM", this.onSigterm);
-    this.loopDone = this.sweep()
-      .then(() => this.loop())
-      .catch((err: unknown) => logger.error({ err: errorMessage(err) }, "worker loop crashed"));
+    // A crash can leave a slot's containers behind: every slot goes down before any loop claims.
+    this.loopsDone = this.downAll()
+      .then(() => this.sweep())
+      .then(() => Promise.all(this.lanes.map((lane) => this.loop(lane).catch((err: unknown) => logger.error({ slot: lane.slot, err: errorMessage(err) }, "worker loop crashed")))))
+      .then(() => undefined)
+      .catch((err: unknown) => logger.error({ err: errorMessage(err) }, "worker crashed"));
   }
 
-  state(): { running: number | null } {
-    return { running: this.inFlight?.job.id ?? null };
+  state(): WorkerState {
+    return { running: this.lanes.flatMap((lane) => (lane.inFlight === null ? [] : [{ slot: lane.slot, jobId: lane.inFlight.job.id }])) };
   }
 
   stop(): Promise<void> {
@@ -117,73 +134,83 @@ class Worker {
     process.removeListener("SIGTERM", this.onSigterm);
     clearInterval(this.sweepTimer);
     this.abort.abort();
-    this.wake?.();
+    for (const lane of this.lanes) lane.wake?.();
     try {
-      await this.loopDone;
+      await this.loopsDone;
+      await this.downAll();
     } finally {
       this.lock.release();
     }
     logger.info("worker stopped");
   }
 
-  private async loop(): Promise<void> {
+  /** Brings every slot down; without `slots` there are no containers. */
+  private async downAll(): Promise<void> {
+    const ref = this.deps.slot;
+    if (ref === undefined) return;
+    await Promise.all(this.lanes.map((lane) => ref.client.down(lane.slot)));
+  }
+
+  private async loop(lane: Lane): Promise<void> {
     while (!this.stopped) {
       let job: Job | null;
       try {
         job = this.claim();
       } catch (err) {
         // A store error while claiming must not end the loop; wait out the poll interval and try again.
-        logger.error({ err: errorMessage(err) }, "job claim failed");
+        logger.error({ slot: lane.slot, err: errorMessage(err) }, "job claim failed");
         job = null;
       }
       if (job === null) {
-        await this.idle();
+        await this.idle(lane);
         continue;
       }
-      await this.process(job);
+      await this.process(lane, job);
     }
   }
 
   /** A rejected Linear API key pauses the queue: jobs stay queued until the steward restarts with a working key. */
   private claim(): Job | null {
-    return this.deps.tracker.apiKeyRejected() ? null : this.deps.stores.jobs.claimNext();
+    if (this.sweeping || this.deps.tracker.apiKeyRejected()) return null;
+    return this.deps.stores.jobs.claimNext();
   }
 
-  private idle(): Promise<void> {
+  private idle(lane: Lane): Promise<void> {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        this.wake = null;
+        lane.wake = null;
         resolve();
       }, this.pollMs);
-      this.wake = () => {
+      lane.wake = () => {
         clearTimeout(timer);
-        this.wake = null;
+        lane.wake = null;
         resolve();
       };
     });
   }
 
-  private async process(job: Job): Promise<void> {
+  private async process(lane: Lane, job: Job): Promise<void> {
     const { stores, redactor } = this.deps;
     try {
       const attempt = stores.attempts.start(job.id);
-      this.inFlight = { job, attempt };
-      const outcome = redactOutcome(await this.run(job, runContext(job, attempt)), redactor);
+      lane.inFlight = { job, attempt };
+      const outcome = redactOutcome(await this.run(lane, job, runContext(job, attempt)), redactor);
       await this.record(job, attempt, outcome);
       const detail = outcome.status === "succeeded" ? (outcome.warning === undefined ? {} : { warning: outcome.warning }) : { error: outcome.error };
-      const fields = { jobId: job.id, kind: job.kind, identifier: job.identifier, attempt: attempt.number, status: outcome.status, ...detail };
+      const fields = { jobId: job.id, slot: lane.slot, kind: job.kind, identifier: job.identifier, attempt: attempt.number, status: outcome.status, ...detail };
       if (outcome.status === "succeeded") logger.info(fields, "job finished");
       else logger.warn(fields, "job finished");
     } catch (err) {
       logger.error({ jobId: job.id, err: errorMessage(err) }, "job bookkeeping failed");
       this.failBestEffort(job, errorMessage(err));
     } finally {
-      this.inFlight = null;
+      lane.inFlight = null;
     }
   }
 
-  private async run(job: Job, ctx: RunContext): Promise<JobOutcome> {
-    const deps: PipelineDeps = { ...this.deps, signal: this.abort.signal };
+  private async run(lane: Lane, job: Job, ctx: RunContext): Promise<JobOutcome> {
+    const slot = this.deps.slot === undefined ? {} : { slot: { n: lane.slot, client: this.deps.slot.client } };
+    const deps: PipelineDeps = { ...this.deps, signal: this.abort.signal, ...slot };
     // An unreadable stored result fails the job here, before any dispatch could re-run the brain or push again.
     const unreadable = unreadableOutcome(job);
     if (unreadable !== null) return unreadable;
@@ -200,7 +227,8 @@ class Worker {
   private async record(job: Job, attempt: Attempt, outcome: JobOutcome): Promise<void> {
     const { jobs, attempts } = this.deps.stores;
     if (isInterrupted(outcome)) {
-      jobs.requeueInterrupted(this.maxAttempts);
+      // This job only: another slot's job may still be running.
+      jobs.requeueInterruptedJob(job.id, this.maxAttempts);
       return;
     }
     attempts.finish(attempt.id, attemptPatch(outcome));
@@ -226,27 +254,35 @@ class Worker {
     }
   }
 
+  /** The timer's sweep: skipped while any job runs (the next interval tries again), so it never removes a worktree in use. */
+  private async sweepWhenIdle(): Promise<void> {
+    if (this.stopped || this.sweeping || this.lanes.some((lane) => lane.inFlight !== null)) return;
+    await this.sweep();
+  }
+
   private async sweep(): Promise<void> {
     const { config, stores } = this.deps;
-    const workRoot = join(config.dataDir, "work");
-    const current = this.inFlight;
+    this.sweeping = true;
     try {
       const removed = await sweep({
-        workRoot,
+        workRoot: join(config.dataDir, "work"),
         jobsDir: join(config.dataDir, "jobs"),
         keptWorktrees: config.retention.keptWorktrees,
         days: config.retention.days,
-        protect: current === null ? [] : [join(workRoot, `${current.job.id}-${current.attempt.number}`)],
+        protect: [],
       });
       const deliveries = stores.deliveries.prune(DELIVERY_RETENTION_DAYS);
       logger.info({ ...removed, deliveries }, "retention sweep complete");
     } catch (err) {
       logger.warn({ err: errorMessage(err) }, "retention sweep failed");
+    } finally {
+      this.sweeping = false;
     }
   }
 }
 
 export const startWorker = (deps: WorkerDeps): WorkerHandle => {
+  if (deps.config.slots !== undefined && deps.slot === undefined) throw new Error("slots is configured but the worker was given no slot client");
   const lock = acquireRunLock(deps.config.dataDir);
   if (lock === null) throw new Error(`another steward process holds ${join(deps.config.dataDir, "run.lock")}`);
   const worker = new Worker(deps, lock);

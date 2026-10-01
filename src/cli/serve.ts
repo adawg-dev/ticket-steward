@@ -22,7 +22,7 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       println(ctx, `listening on http://localhost:${config.server.port} (public ${config.server.publicUrl})`);
 
       const shutdown = async (): Promise<void> => {
-        println(ctx, "shutting down: waiting for the in-flight job");
+        println(ctx, "shutting down: waiting for in-flight jobs");
         await worker.stop();
         await app.close();
         exitWith(ctx, 0);

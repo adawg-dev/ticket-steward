@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,7 +6,7 @@ import type { Mock } from "vitest";
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { acquireRunLock } from "../../src/core/lock.js";
-import type { publishOnly, runJob } from "../../src/core/pipeline.js";
+import type { PipelineDeps, publishOnly, runJob } from "../../src/core/pipeline.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { BrainResult } from "../../src/core/result.js";
 import type { JobOutcome, RunContext } from "../../src/core/types.js";
@@ -13,9 +14,11 @@ import type { StoredReview } from "../../src/review/result.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { ReviewTrigger, TriggerEvent } from "../../src/tracker/types.js";
 import { Mirror } from "../../src/workspace/mirror.js";
+import { SlotClient } from "../../src/workspace/slots.js";
 import { startWorker, type WorkerDeps, type WorkerHandle } from "../../src/worker/loop.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
+import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 
 const NOW = new Date("2026-09-11T14:02:30.000Z");
@@ -118,6 +121,33 @@ const waitForStatus = (jobId: number, status: string): Promise<void> =>
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+const SLOTS = { count: 2, socket: "/run/steward-slot.sock", appPortBase: 4100, upTimeoutSeconds: 180, env: {} };
+
+const slotConfig = (count = 2): StewardConfig => {
+  const base = makeConfig();
+  return { ...base, workspace: { ...base.workspace, port: undefined }, slots: { ...SLOTS, count } };
+};
+
+const onSlots = (runner: FakeSlotRunner, config: StewardConfig = slotConfig()): Partial<WorkerDeps> => ({
+  config,
+  slot: { n: 1, client: new SlotClient(SLOTS, runner.run) },
+});
+
+/** A runJob that holds each job until `release(jobId)`, or answers INTERRUPTED when the worker aborts. */
+const heldRuns = () => {
+  const releases = new Map<number, (outcome: JobOutcome) => void>();
+  const slots = new Map<number, number | undefined>();
+  const impl = (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> =>
+    new Promise<JobOutcome>((resolve) => {
+      releases.set(ctx.jobId, resolve);
+      slots.set(ctx.jobId, deps.slot?.n);
+      deps.signal?.addEventListener("abort", () => resolve(INTERRUPTED), { once: true });
+    });
+  return { impl, slots, release: (jobId: number) => releases.get(jobId)?.(SUCCEEDED) };
+};
+
+const issue2 = { ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" };
+
 describe("startWorker", () => {
   beforeEach(async () => {
     vi.restoreAllMocks();
@@ -180,7 +210,7 @@ describe("startWorker", () => {
     expect(attempts[0]?.number).toBe(1);
     expect(attempts[0]?.finishedAt).toEqual(expect.any(String));
     expect(attempts[0]?.error).toBeNull();
-    expect(handle.state()).toEqual({ running: null });
+    expect(handle.state()).toEqual({ running: [] });
   });
 
   it("records a success warning on the attempt row", async () => {
@@ -258,7 +288,7 @@ describe("startWorker", () => {
     await waitForStatus(laterJobId, "succeeded");
 
     expect(finishSpy).toHaveBeenCalledTimes(3);
-    expect(handle.state()).toEqual({ running: null });
+    expect(handle.state()).toEqual({ running: [] });
   });
 
   it("fails a job with an unreadable stored implement_result without re-running it, and keeps processing", async () => {
@@ -314,7 +344,7 @@ describe("startWorker", () => {
     const jobId = stores.jobs.enqueue(createdTrigger);
     const handle = start();
     await vi.waitFor(() => {
-      expect(handle.state()).toEqual({ running: jobId });
+      expect(handle.state()).toEqual({ running: [{ slot: 1, jobId }] });
     });
     const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
 
@@ -331,7 +361,7 @@ describe("startWorker", () => {
     expect(stores.jobs.get(jobId)?.notBefore).toBeNull();
     expect(stores.jobs.get(laterJobId)?.status).toBe("queued");
     expect(runJobMock).toHaveBeenCalledTimes(1);
-    expect(handle.state()).toEqual({ running: null });
+    expect(handle.state()).toEqual({ running: [] });
   });
 
   it("fails an interrupted job that has used its last attempt", async () => {
@@ -407,7 +437,7 @@ describe("startWorker", () => {
     const jobId = stores.jobs.enqueue(createdTrigger);
     const handle = start();
     await vi.waitFor(() => {
-      expect(handle.state()).toEqual({ running: jobId });
+      expect(handle.state()).toEqual({ running: [{ slot: 1, jobId }] });
     });
 
     const stopping = handle.stop();
@@ -416,7 +446,7 @@ describe("startWorker", () => {
     await stopping;
 
     expect(stores.jobs.get(jobId)?.status).toBe("succeeded");
-    expect(handle.state()).toEqual({ running: null });
+    expect(handle.state()).toEqual({ running: [] });
     await sleep(20);
     expect(stores.jobs.get(laterJobId)?.status).toBe("queued");
     const lock = acquireRunLock(dataDir);
@@ -566,5 +596,111 @@ describe("startWorker", () => {
     await vi.waitFor(async () => {
       expect((await readdir(workRoot)).length).toBe(1);
     });
+  });
+
+  it("runs jobs for two tickets at once, one per slot", async () => {
+    const held = heldRuns();
+    runJobMock.mockImplementation(held.impl);
+    const first = stores.jobs.enqueue(createdTrigger);
+    const second = stores.jobs.enqueue(issue2);
+    const handle = start(onSlots(fakeSlotRunner()));
+
+    await vi.waitFor(() => expect(handle.state().running).toHaveLength(2));
+    expect(new Set(handle.state().running.map((entry) => entry.slot))).toEqual(new Set([1, 2]));
+    expect(new Set(handle.state().running.map((entry) => entry.jobId))).toEqual(new Set([first, second]));
+    expect(new Set([held.slots.get(first), held.slots.get(second)])).toEqual(new Set([1, 2]));
+
+    held.release(first);
+    held.release(second);
+    await waitForStatus(first, "succeeded");
+    await waitForStatus(second, "succeeded");
+    await vi.waitFor(() => expect(handle.state()).toEqual({ running: [] }));
+  });
+
+  it("runs two jobs for the same ticket one after the other", async () => {
+    const held = heldRuns();
+    runJobMock.mockImplementation(held.impl);
+    const runImplement = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const first = stores.jobs.enqueue(createdTrigger);
+    const second = stores.jobs.enqueue({ ...createdTrigger, action: "implement", deliveryId: "delivery-2" });
+    const handle = start({ ...onSlots(fakeSlotRunner()), runImplement });
+
+    await vi.waitFor(() => expect(handle.state().running.map((entry) => entry.jobId)).toEqual([first]));
+    await sleep(30);
+    expect(runImplement).not.toHaveBeenCalled();
+    expect(stores.jobs.get(second)?.status).toBe("queued");
+
+    held.release(first);
+    await waitForStatus(second, "succeeded");
+    expect(runImplement).toHaveBeenCalledTimes(1);
+  });
+
+  it("brings every slot down at startup before claiming", async () => {
+    const runner = fakeSlotRunner();
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    start(onSlots(runner, slotConfig(3)));
+
+    await waitForStatus(jobId, "succeeded");
+    expect(runner.calls).toEqual([["down", "1"], ["down", "2"], ["down", "3"]]);
+  });
+
+  it("stop aborts every running job, waits for all of them, brings every slot down, then releases the lock", async () => {
+    const held = heldRuns();
+    runJobMock.mockImplementation(held.impl);
+    const runner = fakeSlotRunner();
+    const first = stores.jobs.enqueue(createdTrigger);
+    const second = stores.jobs.enqueue(issue2);
+    const handle = start(onSlots(runner));
+    await vi.waitFor(() => expect(handle.state().running).toHaveLength(2));
+
+    await handle.stop();
+
+    expect(stores.jobs.get(first)?.status).toBe("queued");
+    expect(stores.jobs.get(second)?.status).toBe("queued");
+    expect(handle.state()).toEqual({ running: [] });
+    expect(runner.calls).toEqual([["down", "1"], ["down", "2"], ["down", "1"], ["down", "2"]]);
+    const lock = acquireRunLock(dataDir);
+    expect(lock).not.toBeNull();
+    lock?.release();
+  });
+
+  it("an interrupted job leaves the job on the other slot running", async () => {
+    const held = heldRuns();
+    const other = stores.jobs.enqueue(issue2);
+    const interrupted = stores.jobs.enqueue(createdTrigger);
+    let interruptedRuns = 0;
+    runJobMock.mockImplementation((ctx, deps) => {
+      if (ctx.jobId !== interrupted) return held.impl(ctx, deps);
+      interruptedRuns += 1;
+      return Promise.resolve(interruptedRuns === 1 ? INTERRUPTED : SUCCEEDED);
+    });
+    start(onSlots(fakeSlotRunner()));
+
+    await waitForStatus(interrupted, "succeeded");
+    expect(stores.jobs.get(other)?.status).toBe("running");
+    expect(stores.attempts.forJob(other)[0]?.finishedAt).toBeNull();
+
+    held.release(other);
+    await waitForStatus(other, "succeeded");
+  });
+
+  it("skips the timer's sweep while a job runs and sweeps once the worker is idle", async () => {
+    const held = heldRuns();
+    runJobMock.mockImplementation(held.impl);
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    const handle = start({ ...onSlots(fakeSlotRunner(), { ...slotConfig(), retention: { keptWorktrees: 0, days: 30 } }), sweepMs: 10 });
+    await vi.waitFor(() => expect(handle.state().running).toHaveLength(1));
+    const stale = join(dataDir, "work", "old-1");
+    await mkdir(stale, { recursive: true });
+
+    await sleep(60);
+    expect(existsSync(stale)).toBe(true);
+
+    held.release(jobId);
+    await vi.waitFor(() => expect(existsSync(stale)).toBe(false));
+  });
+
+  it("refuses to start with slots configured but no slot client", () => {
+    expect(() => startWorker(makeDeps({ config: slotConfig() }))).toThrow("slots is configured but the worker was given no slot client");
   });
 });
