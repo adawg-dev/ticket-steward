@@ -107,4 +107,24 @@ describe("evaluateTool", () => {
   it("denies Grep scoped to a denied path", () => {
     expect(evaluate("Grep", { pattern: "token", path: "/data/repo.git" }).allow).toBe(false);
   });
+
+  it.each([
+    { name: "Bash", input: { command: "sudo -n /usr/local/sbin/steward-slot down 2" } },
+    { name: "Bash", input: { command: "pnpm test && sudo true" } },
+    { name: "Bash", input: { command: "echo $(sudo id)" } },
+    { name: "Bash", input: { command: "/usr/bin/sudo -n /usr/local/sbin/steward-slot up 1" } },
+    { name: "Bash", input: { command: "docker ps" } },
+    { name: "Bash", input: { command: "docker compose -p steward-slot-2 down" } },
+    { name: "Bash", input: { command: "docker-compose up -d" } },
+    { name: "run_shell", input: { command: "sudo -n /usr/local/sbin/steward-slot down 1" } },
+    { name: "run_shell", input: { command: "docker compose ls" } },
+    { name: "start_process", input: { name: "x", command: "docker", args: ["compose", "up"] } },
+    { name: "start_process", input: { name: "x", command: "sudo", args: ["-n", "/usr/local/sbin/steward-slot", "down", "2"] } },
+  ])("denies $name $input.command", ({ name, input }) => {
+    expect(evaluate(name, input)).toEqual({ allow: false, reason: expect.stringMatching(/^command matches denied pattern /) });
+  });
+
+  it.each(["pnpm --filter user-app exec next dev", "cat docker/Dockerfile", "grep -rn pseudo src", "ls dockerfiles"])("still allows %s", (command) => {
+    expect(evaluate("Bash", { command })).toEqual({ allow: true });
+  });
 });

@@ -16,6 +16,9 @@ const DENIED_COMMANDS: RegExp[] = [
   /git\s+update-ref/,
   /git\s+config/,
   /curl[^\n]*api\.linear\.app/,
+  // Containers are the steward's job, through its root helper; never the agent's. A path prefix (/usr/bin/sudo) counts too.
+  /(^|[\s;&|(`/])sudo(\s|$)/,
+  /(^|[\s;&|(`/])docker(-compose)?(\s|$)/,
 ];
 
 /** Whitespace, shell operators and quotes; parentheses are kept so `$(pwd)/..` stays one unresolvable token. */
