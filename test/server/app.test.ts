@@ -259,11 +259,34 @@ describe("buildServer", () => {
         expect(stores.jobs.list({ limit: 10 })[0]?.kind).toBe("implement");
       });
 
-      it("skips ready-for-agent when implement is not configured", async () => {
+      it("ignores ready-for-agent when implement is not configured", async () => {
         const response = await post("Issue", "delivery-9", readyForAgentUpdate());
 
-        expect(response.json()).toEqual({ ok: true, action: "skip" });
+        expect(response.json()).toEqual({ ok: true, action: "ignored" });
         expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+      });
+
+      it("triages a ticket created with both labels when implement is not configured", async () => {
+        const body = JSON.stringify({
+          action: "create",
+          type: "Issue",
+          data: {
+            id: "issue-1",
+            identifier: "API-1",
+            description: "The adapter loses the final chunk.",
+            team: { key: "API" },
+            state: { name: "Todo", type: "unstarted" },
+            labels: [
+              { id: "label-triage", name: "needs-triage" },
+              { id: "label-agent", name: "ready-for-agent" },
+            ],
+          },
+        });
+
+        const response = await post("Issue", "delivery-10", body);
+
+        expect(response.json()).toEqual({ ok: true, action: "enqueue" });
+        expect(stores.jobs.list({ limit: 10 })[0]).toMatchObject({ kind: "enrich", trigger: { kind: "issue.created", action: "triage" } });
       });
 
       it("ignores an update to a ticket that already had the label", async () => {

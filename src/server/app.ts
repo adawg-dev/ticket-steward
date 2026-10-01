@@ -90,9 +90,10 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
     const body = parseJson(request.body);
     if (body === undefined) return reply.code(400).send({ ok: false });
 
-    const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body, {
-      labels: deps.config.tracker.labels,
-    });
+    const labels = deps.config.tracker.labels;
+    // ready-for-agent triggers only with an implement block; intake's "implement is not configured" skip stays as a backstop.
+    const triggers = labels === undefined ? undefined : { triage: labels.triage, ...(deps.config.implement === undefined ? {} : { implement: labels.implement }) };
+    const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body, { labels: triggers });
     if (event === null || event.kind === "cli" || event.kind === "mr.review") return { ok: true, action: "ignored" };
 
     const decision = intake(deps, event);

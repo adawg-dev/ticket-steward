@@ -26,7 +26,8 @@ type IssuePayload = z.infer<typeof IssueSchema>;
 
 export interface TriggerLabels {
   triage: string;
-  implement: string;
+  /** Absent when implement is not configured: the label is then not a trigger, so a ticket created with both labels triages. */
+  implement?: string;
 }
 
 /** True when the payload carries `name` and it is new: present on a create, or absent from updatedFrom.labelIds on an update. */
@@ -41,7 +42,7 @@ const newlyAdded = (payload: IssuePayload, name: string): boolean => {
 
 /** Implement wins when both labels arrive together: the direct path skips triage. */
 const labelAction = (payload: IssuePayload, labels: TriggerLabels): LabelAction | null => {
-  if (newlyAdded(payload, labels.implement)) return "implement";
+  if (labels.implement !== undefined && newlyAdded(payload, labels.implement)) return "implement";
   if (newlyAdded(payload, labels.triage)) return "triage";
   return null;
 };

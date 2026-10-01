@@ -128,6 +128,11 @@ describe("parseEvent", () => {
       expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([TRIAGE, AGENT]), opts))).toBe("implement");
     });
 
+    it("triages a create carrying both labels when no implement label is given", () => {
+      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([TRIAGE, AGENT]), { labels: { triage: "needs-triage" } }))).toBe("triage");
+      expect(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([AGENT]), { labels: { triage: "needs-triage" } })).toBeNull();
+    });
+
     it("matches label names case-insensitively", () => {
       expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([{ id: "x", name: "Needs-Triage" }]), opts))).toBe("triage");
     });
