@@ -120,6 +120,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   stores.db.close();
   await repo.cleanup();
 });
@@ -173,10 +174,10 @@ describe("runImplement", () => {
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 
-  it("hands back when the agent picks a branch type outside the list", async () => {
+  it.each(["hotfix", "Fix"])("hands back when the agent picks a branch type outside the list (%s)", async (branchType) => {
     const ctx = claim();
-    const outcome = await runImplement(ctx, makeDeps(editingBrain({ ...implemented, branchType: "hotfix" }).runBrain));
-    expect(outcome).toMatchObject({ status: "succeeded", warning: expect.stringContaining("handed back:") });
+    const outcome = await runImplement(ctx, makeDeps(editingBrain({ ...implemented, branchType }).runBrain));
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent's result was invalid" });
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });
@@ -245,6 +246,16 @@ describe("runImplement", () => {
   });
 });
 
+/** Makes the source repo reject pushes until the returned function is called. */
+const rejectPushes = async (): Promise<() => Promise<void>> => {
+  const marker = join(repo.root, "reject-push");
+  const hook = join(repo.repo, ".git", "hooks", "pre-receive");
+  await writeFile(hook, `#!/bin/sh\nif [ -e '${marker}' ]; then echo rejected >&2; exit 1; fi\n`);
+  await chmod(hook, 0o755);
+  await writeFile(marker, "");
+  return () => rm(marker);
+};
+
 describe("publishImplementOnly", () => {
   it("re-publishes after a failed comment without pushing again", async () => {
     const ctx = claim();
@@ -261,11 +272,7 @@ describe("publishImplementOnly", () => {
   });
 
   it("pushes from the bundle on retry after the first push was rejected", async () => {
-    const marker = join(repo.root, "reject-push");
-    const hook = join(repo.repo, ".git", "hooks", "pre-receive");
-    await writeFile(hook, `#!/bin/sh\nif [ -e '${marker}' ]; then echo rejected >&2; exit 1; fi\n`);
-    await chmod(hook, 0o755);
-    await writeFile(marker, "");
+    const allowPushes = await rejectPushes();
     const ctx = claim();
 
     const first = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
@@ -274,7 +281,7 @@ describe("publishImplementOnly", () => {
     expect(tracker.comments("issue-1")).toEqual([]);
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-agent"]);
 
-    await rm(marker);
+    await allowPushes();
     const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
 
     expect(retry).toEqual({ status: "succeeded" });
@@ -295,6 +302,58 @@ describe("publishImplementOnly", () => {
     expect(retry).toEqual({ status: "succeeded" });
     expect(stores.jobs.get(ctx.jobId)?.pushedAt).not.toBeNull();
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
+  });
+
+  it("does not push on retry when the ticket was canceled after a failed push", async () => {
+    const allowPushes = await rejectPushes();
+    const ctx = claim();
+    expect((await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain))).status).toBe("publish_failed");
+    tracker.addIssue({ ...issue, state: { name: "Canceled", type: "canceled" } });
+    await allowPushes();
+
+    const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
+
+    expect(retry).toEqual({ status: "failed", error: "API-1 is Canceled; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
+    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
+    expect(tracker.comments("issue-1")).toEqual([]);
+    expect(tracker.labelSwaps()).toEqual([]);
+  });
+
+  it("routes a crash right after the push to the retry path, which publishes without pushing again", async () => {
+    const ctx = claim();
+    vi.spyOn(stores.jobs, "markPushed").mockImplementationOnce(() => {
+      throw new Error("crashed after push");
+    });
+    expect((await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain))).status).toBe("failed");
+    const job = stores.jobs.get(ctx.jobId);
+    expect(job?.implementResult).not.toBeNull();
+    expect(job?.pushedAt ?? null).toBeNull();
+    expect(tracker.comments("issue-1")).toEqual([]);
+    const pushed = await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"]);
+    expect(pushed).toBe(job?.commitSha);
+
+    const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
+
+    expect(retry).toEqual({ status: "succeeded" });
+    expect(stores.jobs.get(ctx.jobId)?.pushedAt).not.toBeNull();
+    expect(await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe(pushed);
+    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
+  });
+
+  it("hands back on retry when someone else's branch now carries the ticket", async () => {
+    const allowPushes = await rejectPushes();
+    const ctx = claim();
+    expect((await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain))).status).toBe("publish_failed");
+    await git(repo.repo, ["branch", "feature/API-1-by-hand"]);
+    await allowPushes();
+
+    const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
+
+    expect(retry).toEqual({ status: "succeeded", warning: "handed back: a branch for API-1 already exists" });
+    expect(await git(repo.repo, ["branch", "--list", "fix/API-1-*"])).toBe("");
+    expect(tracker.comments("issue-1")[0]).toContain("feature/API-1-by-hand");
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toMatchObject({ reason: "a branch for API-1 already exists", detail: "feature/API-1-by-hand" });
   });
 
   it("does not record a push when the remote is unreachable", async () => {

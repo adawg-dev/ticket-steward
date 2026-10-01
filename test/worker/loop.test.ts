@@ -144,6 +144,18 @@ describe("startWorker", () => {
     await handle.stop();
   });
 
+  it("dispatches an implement job with a saved result to publishImplementOnly, not runImplement", async () => {
+    const runImplement = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const publishImplementOnly = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const jobId = stores.jobs.enqueue({ ...createdTrigger, action: "implement" });
+    stores.jobs.saveImplementResult(jobId, { result: null, handback: { label: "readyForHuman", reason: "a branch for API-1 already exists", detail: "feature/API-1-x" } });
+    const handle = start({ runImplement, publishImplementOnly });
+    await waitForStatus(jobId, "succeeded");
+    expect(publishImplementOnly).toHaveBeenCalledTimes(1);
+    expect(runImplement).not.toHaveBeenCalled();
+    await handle.stop();
+  });
+
   it("claims a queued job, runs it with an attempt row and finishes it succeeded", async () => {
     const jobId = stores.jobs.enqueue(createdTrigger);
     const handle = start();

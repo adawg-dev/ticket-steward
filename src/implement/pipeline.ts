@@ -73,6 +73,8 @@ const pushFromBundle = async (input: { paths: JobPaths; deps: PipelineDeps; remo
   }
 };
 
+const shortRef = (ref: string): string => ref.replace(/^refs\/heads\//, "");
+
 const handback = (label: Handback["label"], reason: string, detail = ""): Handback => ({ label, reason, detail });
 
 const commitMessage = (identifier: string, message: string): string => {
@@ -121,8 +123,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     return { status: "failed", error: errorMessage(err), retryable: true };
   }
   if (existing[0] !== undefined) {
-    const ref = existing[0].ref.replace(/^refs\/heads\//, "");
-    return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, ref) }, null);
+    return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) }, null);
   }
 
   const env = buildBrainEnv(deps.secrets, deps.config.brain, deps.config.workspace.port);
@@ -213,11 +214,12 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   await saveBundle(worktree.path, baseSha, join(paths.jobDir, BUNDLE_FILE));
   deps.stores.jobs.recordCommit(ctx.jobId, branch, committed.sha);
   const stored: StoredImplement = { result, handback: null };
+  // Stored before the push, so any failure from here on (even a crash after the push lands) retries via publishImplementOnly.
+  deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
   try {
     await pushFromBundle({ paths, deps, remote, sha: committed.sha, baseSha, branch, identifier: ctx.identifier, branchTypes: settings.branchTypes });
   } catch (err) {
-    if (err instanceof BranchExistsError) return finish(ctx, deps, { result, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, err.ref) }, null);
-    deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
+    if (err instanceof BranchExistsError) return finish(ctx, deps, { result, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(err.ref)) }, null);
     return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
   }
   deps.stores.jobs.markPushed(ctx.jobId);
@@ -245,6 +247,14 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
   if (job === null || stored === null) return { status: "failed", error: "no stored implement result to publish", retryable: false };
   if (stored.handback === null && job.pushedAt === null) {
     if (job.branch === null || job.commitSha === null) return { status: "failed", error: "no recorded commit to push", retryable: false };
+    // Never push for a ticket closed since the failed attempt.
+    try {
+      const latest = await deps.tracker.fetchTicket(ctx.issueId);
+      const closed = closedReason(ctx.identifier, latest.state);
+      if (closed !== null) return { status: "failed", error: closed, retryable: false };
+    } catch (err) {
+      return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
+    }
     const paths = jobPaths(ctx, deps);
     try {
       // A push that landed before its record was saved (crash window) is ours: the exact branch at the exact commit.
@@ -257,6 +267,11 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
         await pushFromBundle({ paths, deps, remote: configured.remote, sha: job.commitSha, baseSha, branch: job.branch, identifier: ctx.identifier, branchTypes: configured.settings.branchTypes });
       }
     } catch (err) {
+      if (err instanceof BranchExistsError) {
+        // Someone else's branch now carries the ticket (ours at our commit counted as landed above): hand back, naming it.
+        const handedBack: StoredImplement = { result: stored.result, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(err.ref)) };
+        return finish(ctx, deps, handedBack, null);
+      }
       return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
     }
     deps.stores.jobs.markPushed(ctx.jobId);
