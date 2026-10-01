@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { git, gitOrThrow, scrubCredentials } from "../workspace/git.js";
+import { execa } from "execa";
+import { git, gitEnvRecord, gitOrThrow, scrubCredentials } from "../workspace/git.js";
 import type { RemoteCredentials } from "../workspace/mirror.js";
 import { branchRefPattern, carriesTicket } from "./branch.js";
 
@@ -13,7 +14,10 @@ export type GuardResult = { ok: true; paths: string[] } | { ok: false; reason: s
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
-export type GuardInput = { overlayFiles: string[]; skillsPrefix: string; secretValues: string[] };
+/** `maxDiffBytes` caps one file's scanned diff (default `MAX_DIFF_BYTES`); a larger one is refused, never truncated. */
+export type GuardInput = { overlayFiles: string[]; skillsPrefix: string; secretValues: string[]; maxDiffBytes?: number };
+
+const MAX_DIFF_BYTES = 64 * 1024 * 1024;
 
 const SECRET_DIFF_FLAGS = ["--no-color", "--unified=0", "--text", "--no-ext-diff", "--no-textconv"];
 /** Each path is passed back to git as a pathspec; literal, so a name like `:(glob)x` names that file and not a pattern. */
@@ -36,6 +40,16 @@ export const addedLines = (diff: string): string[] => {
 
 const usableSecrets = (values: string[]): string[] => values.filter((value) => value.length >= MIN_SECRET_LENGTH);
 
+type ScanDiff = { ok: true; diff: string } | { ok: false; reason: string };
+
+/** One file's diff for the secret scan. Fails closed: a git error or output over `maxBytes` is a refusal, never a partial pass. */
+const scanDiff = async (cwd: string, args: string[], env: Record<string, string>, maxBytes: number): Promise<ScanDiff> => {
+  const result = await execa("git", args, { cwd, env: { ...gitEnvRecord(), ...env }, extendEnv: false, reject: false, maxBuffer: { stdout: maxBytes } });
+  if (result.isMaxBuffer) return { ok: false, reason: "the change is too large to scan for secrets" };
+  if (result.exitCode !== 0) return { ok: false, reason: "the change could not be scanned for secrets" };
+  return { ok: true, diff: result.stdout };
+};
+
 /**
  * The shared path guard and secret scan, over `git diff <range>`: `--cached` for the index, `<base> <sha>` for a commit.
  * Refuses an empty change, steward-copied files (overlay, skills) and added lines carrying a secret value.
@@ -50,8 +64,9 @@ const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: R
   if (secrets.length > 0) {
     const leaking: string[] = [];
     for (const path of paths) {
-      const diff = await git(["diff", ...SECRET_DIFF_FLAGS, ...range, "--", path], cwd, { ...env, ...LITERAL_PATHSPECS });
-      if (addedLines(diff.stdout).some((line) => secrets.some((secret) => line.includes(secret)))) leaking.push(path);
+      const scanned = await scanDiff(cwd, ["diff", ...SECRET_DIFF_FLAGS, ...range, "--", path], { ...env, ...LITERAL_PATHSPECS }, input.maxDiffBytes ?? MAX_DIFF_BYTES);
+      if (!scanned.ok) return { ok: false, reason: scanned.reason, detail: path };
+      if (addedLines(scanned.diff).some((line) => secrets.some((secret) => line.includes(secret)))) leaking.push(path);
     }
     if (leaking.length > 0) return { ok: false, reason: "the change contains a secret value", detail: leaking.join("\n") };
   }

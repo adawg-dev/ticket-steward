@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BranchExistsError, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
 import { gitEnvRecord } from "../../src/workspace/git.js";
@@ -76,6 +76,7 @@ describe("stageAndGuard", () => {
     const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
   });
+
   it("finds a secret on an added line that starts with ++", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 1;\n++sk-live-abcdef123456\n");
     const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
@@ -93,6 +94,12 @@ describe("stageAndGuard", () => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
     const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"] });
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: 'tab\t"q"\u00e9.txt' });
+  });
+
+  it("hands back a change too large to scan instead of scanning a truncated diff", async () => {
+    await writeFile(join(worktree.path, "src/big.txt"), `${"x".repeat(80)}\n`.repeat(100) + "sk-live-abcdef123456\n");
+    const result = await stageAndGuard({ worktreePath: worktree.path, overlayFiles: [], skillsPrefix: ".claude/skills/", secretValues: ["sk-live-abcdef123456"], maxDiffBytes: 1024 });
+    expect(result).toEqual({ ok: false, reason: "the change is too large to scan for secrets", detail: "src/big.txt" });
   });
 });
 
@@ -164,6 +171,16 @@ describe("guardCommit", () => {
     await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--no-gpg-sign", "-m", "c\n\nkey: sk-live-abcdef123456"]);
     const sha = await git(worktree.path, ["rev-parse", "HEAD"]);
     expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: false, reason: "the commit message contains a secret value", detail: "commit message" });
+  });
+
+  it("refuses, rather than passes, when the secret scan's diff fails", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await stageAndGuard({ worktreePath: worktree.path, ...guard });
+    const sha = await commitAll();
+    // The tree diff still lists the path, but the blob is gone, so the per-file content diff exits non-zero.
+    const blob = await git(worktree.path, ["rev-parse", `${sha}:src/a.ts`]);
+    await rm(await git(worktree.path, ["rev-parse", "--path-format=absolute", "--git-path", `objects/${blob.slice(0, 2)}/${blob.slice(2)}`]));
+    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: false, reason: "the change could not be scanned for secrets", detail: "src/a.ts" });
   });
 
   it("refuses a commit whose parent is not the base", async () => {
