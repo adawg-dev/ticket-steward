@@ -47,6 +47,8 @@ export const StewardConfigSchema = z.object({
     bugLabels: z.array(z.string()).default(["Bug"]),
     /** Label-driven workflows; unset keeps the old behaviour of enriching every new ticket. */
     labels: LabelsSchema.optional(),
+    /** Removed; rejected rather than stripped, since a config still carrying it would otherwise enrich every new ticket. */
+    triggerLabel: z.never({ error: "tracker.triggerLabel was replaced by tracker.labels (see docs/ops.md)" }).optional(),
   }),
   codehost: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("gitlab"), baseUrl: z.string(), project: z.string() }),

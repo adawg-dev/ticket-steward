@@ -33,6 +33,14 @@ describe("StewardConfigSchema", () => {
     expect(parsed.tracker.bugLabels).toEqual(["Bug"]);
   });
 
+  it("rejects the removed tracker.triggerLabel with a pointer to tracker.labels", () => {
+    const parsed = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { kind: "linear", triggerLabel: "steward" } });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toEqual([
+      expect.objectContaining({ path: ["tracker", "triggerLabel"], message: "tracker.triggerLabel was replaced by tracker.labels (see docs/ops.md)" }),
+    ]);
+  });
+
   it("rejects a config missing a required field", () => {
     expect(StewardConfigSchema.safeParse({ ...minimalInput, dataDir: undefined }).success).toBe(false);
   });
