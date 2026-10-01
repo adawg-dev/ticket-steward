@@ -1,6 +1,6 @@
 import { execa } from "execa";
 
-const keepTail = (text: string, tailBytes: number): string => {
+export const keepTail = (text: string, tailBytes: number): string => {
   const bytes = Buffer.from(text, "utf8");
   return bytes.length <= tailBytes ? text : bytes.subarray(bytes.length - tailBytes).toString("utf8");
 };

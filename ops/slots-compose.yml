@@ -1,0 +1,55 @@
+# Throwaway services for one Ticket Steward worker slot (docs/ops.md, "Worker slots").
+# Installed root-owned at /etc/ticket-steward/slots/compose.yml; only /usr/local/sbin/steward-slot uses it:
+#   steward-slot up <n>  ->  docker compose -p steward-slot-<n> -f compose.yml up -d --wait
+# The helper exports STEWARD_SLOT_*_PORT for slot n. Every port binds to 127.0.0.1, all data lives on tmpfs,
+# and nothing outlives `down`. The credentials are throwaway, not secrets.
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg17-ts2.27-all
+    pull_policy: missing
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: steward-slot
+      # The -ha image keeps its data under /home/postgres/pgdata; initdb creates this subdirectory with the mode it needs.
+      PGDATA: /home/postgres/pgdata/data
+    ports:
+      - "127.0.0.1:${STEWARD_SLOT_POSTGRES_PORT:?run through steward-slot}:5432"
+    tmpfs:
+      - /home/postgres/pgdata:mode=1777
+    volumes:
+      - /etc/ticket-steward/slots/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Answers on TCP only after the init script ran and the server restarted for real.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "concentrate_tg"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  redis:
+    image: redis:7-alpine
+    pull_policy: missing
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${STEWARD_SLOT_REDIS_PORT:?run through steward-slot}:6379"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  rabbitmq:
+    image: rabbitmq:4.2.0-management
+    pull_policy: missing
+    environment:
+      # guest only accepts loopback connections, and a Docker-mapped port is not loopback.
+      RABBITMQ_DEFAULT_USER: steward
+      RABBITMQ_DEFAULT_PASS: steward-slot
+    ports:
+      - "127.0.0.1:${STEWARD_SLOT_RABBITMQ_PORT:?run through steward-slot}:5672"
+    tmpfs:
+      - /var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 30

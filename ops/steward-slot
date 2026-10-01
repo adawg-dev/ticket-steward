@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# steward-slot: throwaway Postgres+TimescaleDB, Redis and RabbitMQ containers for one Ticket Steward worker slot.
+#
+# Installed root-owned, mode 0755, at /usr/local/sbin/steward-slot. The steward never runs it itself: systemd's
+# steward-slot.socket (/run/steward-slot.sock, group steward, mode 0660) starts one steward-slot@.service instance
+# per connection, running `steward-slot --socket` as root. Operators run the same commands directly as root.
+# It accepts only the commands below and a slot number 1-9, so the steward never passes arguments to Docker.
+set -euo pipefail
+
+readonly COMPOSE_FILE=/etc/ticket-steward/slots/compose.yml
+readonly MAX_REQUEST_BYTES=64
+# A fixed, empty, root-owned docker config dir: no user's docker config or registry credentials apply.
+export DOCKER_CONFIG=/etc/ticket-steward/slots/docker
+
+usage() {
+  echo "usage: steward-slot up|down|status|ports <1-9> | steward-slot check | steward-slot --socket" >&2
+  exit 2
+}
+
+# The only copy of the port formula; compose interpolates the exported variables.
+export_ports() {
+  export STEWARD_SLOT_POSTGRES_PORT=$((15032 + 100 * $1))
+  export STEWARD_SLOT_REDIS_PORT=$((16079 + 100 * $1))
+  export STEWARD_SLOT_RABBITMQ_PORT=$((15072 + 100 * $1))
+}
+
+compose() {
+  docker compose -p "steward-slot-$1" -f "$COMPOSE_FILE" "${@:2}"
+}
+
+# One command: `up|down|status|ports <n>` or `check`.
+main() {
+  [[ $# -ge 1 ]] || usage
+  local command="$1"
+  if [[ "$command" == "check" ]]; then
+    [[ $# -eq 1 ]] || usage
+    export_ports 1
+    docker compose -f "$COMPOSE_FILE" config --quiet >/dev/null 2>&1 || { echo "compose file $COMPOSE_FILE does not parse"; exit 1; }
+    local images
+    images="$(docker compose -f "$COMPOSE_FILE" config --images)" || { echo "compose file $COMPOSE_FILE lists no images"; exit 1; }
+    for image in $images; do
+      docker image inspect "$image" >/dev/null 2>&1 || { echo "image $image is not pulled"; exit 1; }
+    done
+    echo ok
+    return 0
+  fi
+  [[ $# -eq 2 && "$2" =~ ^[1-9]$ ]] || usage
+  local n="$2"
+  export_ports "$n"
+  case "$command" in
+    up) compose "$n" up -d --wait --wait-timeout 120 ;;
+    down) compose "$n" down --volumes --remove-orphans --timeout 10 ;;
+    status) docker ps --filter "label=com.docker.compose.project=steward-slot-$n" --format '{{.Names}} {{.Status}}' ;;
+    ports) printf '{"postgres":%d,"redis":%d,"rabbitmq":%d}\n' "$STEWARD_SLOT_POSTGRES_PORT" "$STEWARD_SLOT_REDIS_PORT" "$STEWARD_SLOT_RABBITMQ_PORT" ;;
+    *) usage ;;
+  esac
+}
+
+# Socket mode: one request line from the connection, the command's output (stderr too), then `exit <code>`.
+# The status travels in-band, so this process itself always exits 0 and the per-connection unit never fails.
+serve_request() {
+  local line code
+  local -a words=()
+  if ! IFS= read -r -t 10 -n $((MAX_REQUEST_BYTES + 1)) line || ((${#line} > MAX_REQUEST_BYTES)); then
+    echo "steward-slot: expected one request line of at most $MAX_REQUEST_BYTES bytes"
+    echo "exit 2"
+    return 0
+  fi
+  read -r -a words <<<"$line"
+  set +e
+  (main ${words[@]+"${words[@]}"}) </dev/null 2>&1
+  code=$?
+  set -e
+  echo "exit $code"
+}
+
+if [[ "${1:-}" == "--socket" ]]; then
+  [[ $# -eq 1 ]] || usage
+  serve_request
+  exit 0
+fi
+main "$@"

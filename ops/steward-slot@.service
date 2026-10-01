@@ -1,0 +1,15 @@
+# One slot-helper request (docs/ops.md §1.11). Started by steward-slot.socket per connection; never enable it directly.
+# Runs as root: the helper validates the request itself and is the only thing on this host the steward can ask to touch Docker.
+[Unit]
+Description=Ticket Steward slot helper request
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/steward-slot --socket
+StandardInput=socket
+StandardOutput=socket
+# The helper sends each command's stderr down the socket itself; only the script's own failures land here.
+StandardError=journal
+# Longer than up's 120 s wait plus a down; a request whose client went away cannot linger.
+RuntimeMaxSec=300
