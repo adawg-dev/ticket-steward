@@ -1,7 +1,10 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
 import type { McpServerSpec } from "../../src/brain/types.js";
+import type { SlotPorts } from "../../src/workspace/slots.js";
+import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeGitLabReview } from "../fakes/fakeGitLabReview.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { ExitSignal, makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
@@ -249,5 +252,118 @@ describe("steward doctor", () => {
 
     expect(stdout()).toContain("[fail] linear labels: missing in Linear: ready-for-agent, needs-info, ready-for-human, agent-implemented");
     expect(stdout()).toContain("[ok] push token: GITLAB_PUSH_TOKEN reaches");
+  });
+});
+
+describe("slot checks", () => {
+  let helper: string;
+  let socketPath: string;
+  let socketServer: Server;
+  let appPortBase: number;
+  let ports: Map<number, SlotPorts>;
+
+  const distinctFreePorts = async (count: number): Promise<number[]> => {
+    const found: number[] = [];
+    while (found.length < count) {
+      const port = await freeTcpPort();
+      if (!found.includes(port)) found.push(port);
+    }
+    return found;
+  };
+
+  beforeEach(async () => {
+    helper = join(dir, "steward-slot");
+    await writeFile(helper, "#!/usr/bin/env bash\n");
+    await chmod(helper, 0o755);
+    // A real socket file, so the existence and type checks see what systemd would create; requests go through the fake runner.
+    socketPath = join(dir, "slot.sock");
+    socketServer = createServer((connection) => connection.destroy());
+    await new Promise<void>((ready) => socketServer.listen(socketPath, () => ready()));
+    await writeFile(join(repo.overlayDir, ".env"), "DB_PORT=5432\n");
+    const [app, p1, r1, q1, p2, r2, q2] = await distinctFreePorts(7);
+    appPortBase = (app ?? 0) - 1;
+    ports = new Map([
+      [1, { postgres: p1 ?? 0, redis: r1 ?? 0, rabbitmq: q1 ?? 0 }],
+      [2, { postgres: p2 ?? 0, redis: r2 ?? 0, rabbitmq: q2 ?? 0 }],
+    ]);
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((done) => socketServer.close(() => done()));
+  });
+
+  const slotRunner = (): FakeSlotRunner => fakeSlotRunner((n) => ports.get(n) ?? { postgres: 1, redis: 1, rabbitmq: 1 });
+
+  const slotLines = async (
+    runner: FakeSlotRunner,
+    options: { env?: Record<string, string | null>; port?: number | null; socket?: string } = {},
+  ): Promise<{ lines: string[]; out: string }> => {
+    const configPath = await writeConfig(dir, {
+      dataDir: repo.dataDir,
+      overlayDir: repo.overlayDir,
+      promptPath: repo.promptPath,
+      fetchUrl: repo.repo,
+      port: options.port ?? null,
+      serverPort: await freeTcpPort(),
+      slots: { count: 2, socket: options.socket ?? socketPath, appPortBase, env: options.env ?? {} },
+    });
+    const { ctx, stdout } = makeContext({ factories: { codehostMcpSpec: fakeCodehostMcpSpec, slotRunner: runner.run, slotHelperPath: helper } });
+    await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"]).catch(() => undefined);
+    return { lines: stdout().split("\n").filter((line) => line.includes("] slot ")), out: stdout() };
+  };
+
+  it.skipIf(process.getuid?.() === 0)("checks the helper, the socket, every slot's ports and the env keys", async () => {
+    const { lines } = await slotLines(slotRunner(), { env: { DB_PORT: "{{postgres}}", REDIS_URL: "redis://localhost:{{redis}}" } });
+
+    const p1 = ports.get(1);
+    const p2 = ports.get(2);
+    expect(lines).toEqual([
+      `[fail] slot helper: ${helper} is not owned by root; chown root:root ${helper}`,
+      `[ok] slot socket: ${socketPath}: check ok`,
+      `[ok] slot 1 ports: app ${appPortBase + 1}, postgres ${p1?.postgres}, redis ${p1?.redis}, rabbitmq ${p1?.rabbitmq} free`,
+      `[ok] slot 2 ports: app ${appPortBase + 2}, postgres ${p2?.postgres}, redis ${p2?.redis}, rabbitmq ${p2?.rabbitmq} free`,
+      "[fail] slot env keys: not in any overlay file: REDIS_URL; remove them from slots.env or sync the overlay",
+    ]);
+  });
+
+  it("names a slot that is still up", async () => {
+    const runner = slotRunner();
+    runner.respond("status", { stdout: "steward-slot-1-postgres-1 Up 3 minutes\n" });
+    const held = createServer();
+    const postgres = ports.get(1)?.postgres ?? 0;
+    await new Promise<void>((resolve) => held.listen(postgres, resolve));
+    try {
+      const { lines } = await slotLines(runner, { env: { DB_PORT: "{{postgres}}" } });
+      expect(lines).toContain(`[fail] slot 1 ports: slot 1 is up (postgres ${postgres} in use); stop serve or run ${helper} down 1 as root`);
+    } finally {
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+    }
+  });
+
+  it("reports a missing socket with the unit to enable", async () => {
+    const missing = join(dir, "missing.sock");
+    const { lines } = await slotLines(slotRunner(), { socket: missing });
+    expect(lines).toContain(`[fail] slot socket: ${missing} does not exist; systemctl enable --now steward-slot.socket (docs/ops.md, "Worker slots")`);
+  });
+
+  it("reports a path that is not a socket", async () => {
+    const plain = join(dir, "plain-file");
+    await writeFile(plain, "");
+    const { lines } = await slotLines(slotRunner(), { socket: plain });
+    expect(lines).toContain(`[fail] slot socket: ${plain} is not a socket`);
+  });
+
+  it("reports a failed check over the socket in the runner's own words", async () => {
+    const runner = slotRunner();
+    const reason = `cannot reach the slot helper at ${socketPath}: connect ECONNREFUSED ${socketPath}`;
+    runner.respond("check", { exitCode: 1, stdout: "", output: reason });
+    const { lines } = await slotLines(runner);
+    expect(lines).toContain(`[fail] slot socket: check over ${socketPath} failed: ${reason}; see docs/ops.md, "Worker slots"`);
+  });
+
+  it("reports workspace.port next to slots as a config failure", async () => {
+    const { out } = await slotLines(slotRunner(), { port: 4100 });
+    expect(out.startsWith("[fail] config: ")).toBe(true);
+    expect(out).toContain("workspace.port was replaced by slots.appPortBase (see docs/ops.md)");
   });
 });

@@ -52,7 +52,9 @@ export interface ConfigPaths {
   overlayDir: string;
   promptPath: string;
   fetchUrl: string;
-  port: number;
+  /** null leaves workspace.port out (required with `slots`). */
+  port: number | null;
+  slots?: Record<string, unknown>;
   serverPort: number;
   skillsDir?: string;
   teams?: string[];
@@ -70,6 +72,8 @@ export const writeConfig = async (dir: string, p: ConfigPaths): Promise<string> 
     p.implement === undefined
       ? ""
       : `implement: ${JSON.stringify({ prompt: p.implement.prompt, checks: p.implement.checks ?? [], commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } })},`;
+  const slots = p.slots === undefined ? "" : `slots: ${JSON.stringify(p.slots)},`;
+  const port = p.port === null ? "" : `port: ${p.port},`;
   const source = `
 import { defineConfig } from "ticket-steward";
 export default defineConfig({
@@ -84,7 +88,7 @@ export default defineConfig({
     ${skills}
     setup: [],
     setupTimeoutMinutes: 1,
-    port: ${p.port},
+    ${port}
     keepOnFailure: true,
   },
   retention: { keptWorktrees: 3, days: 30 },
@@ -92,6 +96,7 @@ export default defineConfig({
   server: { port: ${p.serverPort}, publicUrl: "https://steward.example" },
   ${review}
   ${implement}
+  ${slots}
 });
 `;
   const configPath = join(dir, "steward.config.ts");

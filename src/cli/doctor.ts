@@ -11,15 +11,17 @@ import { createGitLabReview } from "../codehost/gitlabReview.js";
 import { listProtectedBranches, protectionProblems } from "../codehost/gitlabProtection.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { LoadedConfig } from "../config/load.js";
+import { appPortOf, type SlotsConfig, type StewardConfig } from "../config/schema.js";
 import { listFiles } from "../workspace/files.js";
 import { git, scrubCredentials } from "../workspace/git.js";
 import { injectToken, splitCredentials } from "../workspace/mirror.js";
+import { missingOverrideKeys } from "../workspace/overlay.js";
 import { isPortFree } from "../workspace/retention.js";
+import { SlotClient } from "../workspace/slots.js";
 import { errorMessage, exitWith, loadFromProgram, println, type CliContext } from "./context.js";
 import { binPath } from "./paths.js";
 import { withTimeout } from "./probe.js";
 import { openMirror } from "./runtime.js";
-import { appPortOf } from "../config/schema.js";
 
 type Level = "ok" | "fail" | "warn";
 
@@ -244,6 +246,80 @@ const implementChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   return checks;
 };
 
+/** Where the install puts the helper; ops/steward-slot@.service runs it from here. */
+export const SLOT_HELPER_PATH = "/usr/local/sbin/steward-slot";
+const SLOTS_DOC = 'docs/ops.md, "Worker slots"';
+
+/** The helper runs as root: nobody but root may be able to change it. Doctor can read it (it is world-readable). */
+const slotHelperCheck = (helper: string): Check => ({
+  name: "slot helper",
+  run: async () => {
+    if (!existsSync(helper)) return flunk(`${helper} does not exist; install ops/steward-slot (${SLOTS_DOC})`);
+    const info = await stat(helper);
+    if (info.uid !== 0) return flunk(`${helper} is not owned by root; chown root:root ${helper}`);
+    if ((info.mode & 0o022) !== 0) return flunk(`${helper} is writable by group or others; chmod 0755 ${helper}`);
+    return ok(`${helper} is root-owned and not group- or world-writable`);
+  },
+});
+
+/** The socket exists and the helper behind it answers `check` (compose file parses, images pulled). */
+const slotSocketCheck = (socketPath: string, client: SlotClient): Check => ({
+  name: "slot socket",
+  run: async () => {
+    if (!existsSync(socketPath)) return flunk(`${socketPath} does not exist; systemctl enable --now steward-slot.socket (${SLOTS_DOC})`);
+    if (!(await stat(socketPath)).isSocket()) return flunk(`${socketPath} is not a socket`);
+    const result = await client.check();
+    return result.ok ? ok(`${socketPath}: check ok`) : flunk(`check over ${socketPath} failed: ${result.output}; see ${SLOTS_DOC}`);
+  },
+});
+
+/** Doctor expects every slot down (serve stopped or idle), so a held service port usually means a slot left up. */
+const slotPortsCheck = (config: StewardConfig, helper: string, client: SlotClient, n: number): Check => ({
+  name: `slot ${n} ports`,
+  run: async () => {
+    const ports = await client.ports(n);
+    const named: Array<[string, number]> = [["app", appPortOf(config, n)], ["postgres", ports.postgres], ["redis", ports.redis], ["rabbitmq", ports.rabbitmq]];
+    const busy: string[] = [];
+    for (const [name, port] of named) if (!(await isPortFree(port))) busy.push(`${name} ${port}`);
+    if (busy.length === 0) return ok(`${named.map(([name, port]) => `${name} ${port}`).join(", ")} free`);
+    if ((await client.status(n)) !== "") return flunk(`slot ${n} is up (${busy.join(", ")} in use); stop serve or run ${helper} down ${n} as root`);
+    return flunk(`in use: ${busy.join(", ")}`);
+  },
+});
+
+const slotEnvCheck = (config: StewardConfig, slots: SlotsConfig): Check => ({
+  name: "slot env keys",
+  run: async () => {
+    const keys = Object.keys(slots.env);
+    const absent = await missingOverrideKeys(config.workspace.overlayDir, keys);
+    return absent.length === 0 ? ok(`${keys.length} key(s) found in the overlay`) : flunk(`not in any overlay file: ${absent.join(", ")}; remove them from slots.env or sync the overlay`);
+  },
+});
+
+/** Without `slots`: workspace.port is free. With `slots`: the helper, its socket, every slot's ports and the env keys. */
+const portChecks = ({ config }: LoadedConfig, ctx: CliContext): Check[] => {
+  const slots = config.slots;
+  if (slots === undefined) {
+    return [
+      {
+        name: "port",
+        run: async () => {
+          const port = appPortOf(config, 1);
+          return (await isPortFree(port)) ? ok(`${port} is free`) : flunk(`${port} is in use`);
+        },
+      },
+    ];
+  }
+  const client = new SlotClient(slots, ctx.factories?.slotRunner);
+  const helper = ctx.factories?.slotHelperPath ?? SLOT_HELPER_PATH;
+  return [
+    slotHelperCheck(helper),
+    slotSocketCheck(slots.socket, client),
+    ...Array.from({ length: slots.count }, (_, index) => slotPortsCheck(config, helper, client, index + 1)),
+    slotEnvCheck(config, slots),
+  ];
+};
+
 const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   const { config, configPath } = loaded;
   const healthUrl = `${config.server.publicUrl}/health`;
@@ -283,13 +359,7 @@ const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
         return chromium.length > 0 ? ok(join(browsers, chromium[0] ?? "")) : flunk(`no chromium under ${browsers}; run npx playwright install chromium`);
       },
     },
-    {
-      name: "port",
-      run: async () => {
-        const port = appPortOf(config, 1);
-        return (await isPortFree(port)) ? ok(`${port} is free`) : flunk(`${port} is in use`);
-      },
-    },
+    ...portChecks(loaded, ctx),
   ];
 };
 

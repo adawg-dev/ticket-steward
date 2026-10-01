@@ -7,6 +7,7 @@ import type { CodeHost } from "../codehost/types.js";
 import { loadConfig, type LoadedConfig } from "../config/load.js";
 import type { TicketBundle } from "../tracker/types.js";
 import type { Tracker } from "../tracker/types.js";
+import type { SlotRunner } from "../workspace/slots.js";
 
 export interface TemplateListing {
   scope: string;
@@ -25,6 +26,10 @@ export interface CliFactories {
   codehostMcpSpec?: typeof codehostMcpSpec;
   templates?: TemplateLister;
   review?: GitLabReviewApi;
+  /** Stands in for the slot helper's socket; tests never reach systemd or Docker. */
+  slotRunner?: SlotRunner;
+  /** Stands in for /usr/local/sbin/steward-slot in the helper ownership check. */
+  slotHelperPath?: string;
 }
 
 export interface CliContext {
