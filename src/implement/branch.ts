@@ -20,6 +20,6 @@ export const branchName = (type: string, identifier: string, title: string): str
 export const branchRefPattern = (types: string[], identifier: string): RegExp =>
   new RegExp(`^refs/heads/(?:${types.map(escapeRegExp).join("|")})/${escapeRegExp(identifier)}-[a-z0-9-]+$`);
 
-/** True when a remote branch already belongs to this ticket, whatever its type prefix or casing. */
+/** True when a remote branch already belongs to this ticket, whatever its (possibly nested) type prefix or casing; mirrors git's glob where `*` crosses slashes. */
 export const carriesTicket = (ref: string, identifier: string): boolean =>
-  new RegExp(`^refs/heads/[^/]+/${escapeRegExp(identifier)}-`, "i").test(ref);
+  new RegExp(`^refs/heads/.+/${escapeRegExp(identifier)}-`, "i").test(ref);

@@ -31,6 +31,7 @@ describe("branch naming", () => {
 
   it("detects any branch that carries the ticket, whatever its type", () => {
     expect(carriesTicket("refs/heads/feature/API-101-old-attempt", "API-101")).toBe(true);
+    expect(carriesTicket("refs/heads/user/feature/API-101-x", "API-101")).toBe(true);
     expect(carriesTicket("refs/heads/feature/api-101-old-attempt", "API-101")).toBe(true);
     expect(carriesTicket("refs/heads/feature/API-1010-other", "API-101")).toBe(false);
     expect(carriesTicket("refs/heads/dev", "API-101")).toBe(false);

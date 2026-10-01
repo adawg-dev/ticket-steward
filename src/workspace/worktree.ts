@@ -27,6 +27,8 @@ export const createWorktree = async (mirror: Mirror, workRoot: string, name: str
     await removeWorktree(mirror, path);
   }
   await gitOrThrow(["worktree", "add", "--quiet", "--detach", path, sha], mirror.path);
+  // The mirror is bare; without this override git refuses work-tree commands (add, commit) inside the worktree.
+  await gitOrThrow(["config", "--worktree", "core.bare", "false"], path);
   await gitOrThrow(["config", "--worktree", "remote.origin.pushurl", "/dev/null"], path);
   return { path, sha, destroy: () => removeWorktree(mirror, path) };
 };
