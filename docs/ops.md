@@ -250,9 +250,10 @@ ready-for-agent ──implement job──▶ agent-implemented  (branch pushed)
 
 A label counts only when it is first added (or present when the ticket is created); removing
 and re-adding it does not re-run a ticket that already has an Enrichment section (triage) or a
-succeeded implement job. If one update adds both labels, implement wins and triage does not
-also run. Triage is the enrich job plus a verdict. Labels change last in every publish, so a
-failure earlier leaves the trigger label on the ticket and the job `publish_failed`
+succeeded implement job. With an `implement` block configured, an update that adds both labels
+runs implement only; without one, `ready-for-agent` is not a trigger and the ticket triages.
+Triage is the enrich job plus a verdict. Labels change last in every publish, so a failure
+earlier leaves the trigger label on the ticket and the job `publish_failed`
 (`steward jobs retry <id>` re-publishes without re-running the brain or pushing again).
 `steward enrich KEY` and `steward implement KEY` never swap labels.
 
@@ -270,8 +271,9 @@ steward does. GitLab cannot enforce "only branches cut from dev"; the steward's 
 checks do. The list doctor expects to be protected is `implement.protectedBranches`
 (default `["main", "staging", "dev"]`).
 
-**`implement` config.** Absent means `ready-for-agent` is ignored (skipped at intake with
-"implement is not configured"). It requires `tracker.labels` and `GITLAB_PUSH_TOKEN`; config
+**`implement` config.** Absent means `ready-for-agent` is ignored: the webhook parser does not
+treat it as a trigger, so nothing is logged or queued (intake's "implement is not configured"
+skip remains only as a backstop). It requires `tracker.labels` and `GITLAB_PUSH_TOKEN`; config
 load fails otherwise.
 
 ```ts
@@ -291,17 +293,22 @@ implement: {
 **What an implement job does.** Fresh worktree at the latest `dev`, as for every job; the
 agent edits files only. The steward then, stopping at the first failure: requires a non-empty
 diff; stages everything and refuses if any staged path is an overlay file or under the skills
-dir, or if a staged diff (read as text, binary and `-diff` files included) contains the value
-of a secret-looking overlay variable (the comment names paths, never values); runs
+dir, or if a staged diff (read as text, binary and `-diff` files included) adds a line containing
+the value of a secret-looking overlay variable or one of the steward's own secrets (hand-back
+"the change contains a secret value"; the comment names paths, never values); runs
 `implement.checks` (`{{baseSha}}` is the job's base commit); commits as `commitAuthor` with
-kickoff's Husky hooks enabled for that one commit; keeps a copy of the commit as a bundle
-file in the job dir (not a ref, which the mirror's `--prune` fetch would delete); and pushes
+kickoff's Husky hooks enabled for that one commit; re-checks what was committed (the hooks can
+change it): a single commit on the base, the same path and secret guard over its diff, and no
+secret value in the commit message (hand-back "the commit message contains a secret value",
+detail "commit message"); keeps a copy of the commit as a bundle file in the job dir (not a
+ref, which the mirror's `--prune` fetch would delete); and pushes
 branch `<type>/<IDENTIFIER>-<slug>` (type chosen by the agent from `branchTypes`).
 Before pushing it refuses unless the target matches the branch pattern, no remote branch
 already carries the ticket (any type), and the commit has exactly one parent, the base `dev`
 commit. Every push runs from a fresh scratch bare repo in the job dir with hooks disabled, as
 a create-only push (`--force-with-lease=<ref>:`), so it can never update or force an existing
-branch. The token-carrying `ls-remote` runs from an empty steward-owned directory.
+branch. Each token-carrying `ls-remote` runs from a steward-made directory or scratch repo
+(the pre-push one in that scratch bare repo), never the mirror or worktree.
 
 **Hand-backs are successes.** An empty diff, a guard hit, failing checks or hooks, an
 existing branch, or the agent reporting `failed` or `needs_info` end the job `succeeded` with
