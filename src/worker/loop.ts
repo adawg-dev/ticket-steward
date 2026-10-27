@@ -3,6 +3,7 @@ import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { acquireRunLock } from "../core/lock.js";
 import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
+import { runAwaitReview } from "../greptile/await.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
 import { notImplementedOutcome, unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
@@ -17,6 +18,7 @@ export interface WorkerOptions {
   publishOnly?: typeof publishOnly;
   runImplement?: typeof runImplement;
   publishImplementOnly?: typeof publishImplementOnly;
+  runAwaitReview?: typeof runAwaitReview;
 }
 
 export type WorkerDeps = PipelineDeps & WorkerOptions;
@@ -89,6 +91,7 @@ class Worker {
   private readonly republish: typeof publishOnly;
   private readonly implement: typeof runImplement;
   private readonly republishImplement: typeof publishImplementOnly;
+  private readonly awaitReview: typeof runAwaitReview;
   private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly lanes: Lane[];
@@ -110,6 +113,7 @@ class Worker {
     this.republish = deps.publishOnly ?? publishOnly;
     this.implement = deps.runImplement ?? runImplement;
     this.republishImplement = deps.publishImplementOnly ?? publishImplementOnly;
+    this.awaitReview = deps.runAwaitReview ?? runAwaitReview;
     this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
     logger.info({ requeued, failed, slots: this.lanes.length }, "worker started");
@@ -223,6 +227,7 @@ class Worker {
         case "implement":
           return job.implementResult === null ? await this.implement(ctx, deps) : await this.republishImplement(ctx, deps);
         case "await_review":
+          return await this.awaitReview(ctx, deps);
         case "fix":
         case "restart":
           return notImplementedOutcome(job.kind);

@@ -227,8 +227,18 @@ describe("startWorker", () => {
     expect(runJobMock).toHaveBeenCalledTimes(1);
   });
 
+  it("dispatches an await_review job to runAwaitReview", async () => {
+    const runAwaitReview = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const jobId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 1, step: "await" });
+    start({ runAwaitReview });
+
+    await waitForStatus(jobId, "succeeded");
+
+    expect(runAwaitReview).toHaveBeenCalledTimes(1);
+    expect(runJobMock).not.toHaveBeenCalled();
+  });
+
   it.each([
-    ["await", "await_review"],
     ["fix", "fix"],
     ["restart", "restart"],
   ] as const)("fails a loop %s job as not implemented yet without running the enrich pipeline", async (step, kind) => {
