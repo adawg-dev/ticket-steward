@@ -1,8 +1,8 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Agent, MCPServerStdio, run } from "@openai/agents";
-import { z } from "zod";
 import { BrainResultSchema } from "../core/result.js";
+import { FixResultSchema } from "../greptile/result.js";
 import { ImplementResultSchema } from "../implement/result.js";
 import { createBrainTools } from "./tools/index.js";
 import { BackgroundProcesses } from "./tools/processes.js";
@@ -69,9 +69,6 @@ const mcpServers = (input: BrainInput): MCPServerStdio[] =>
 
 export const modelSettingsFor = (input: Pick<BrainInput, "reasoningEffort">): { reasoning?: { effort: ReasoningEffort } } =>
   input.reasoningEffort === undefined ? {} : { reasoning: { effort: input.reasoningEffort } };
-
-/** Placeholder until the fix result schema lands. */
-const FixResultSchema = z.object({});
 
 const agentFor = <TOutput extends typeof BrainResultSchema | typeof ImplementResultSchema | typeof FixResultSchema>(
   input: BrainInput,
