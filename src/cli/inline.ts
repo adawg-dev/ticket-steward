@@ -2,6 +2,7 @@ import { acquireRunLock } from "../core/lock.js";
 import { publishOnly, redactOutcome, runJob } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { runAwaitReview } from "../greptile/await.js";
+import { runFix } from "../greptile/fix.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { notImplementedOutcome, unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
 import { errorMessage, fail, println, type CliContext } from "./context.js";
@@ -17,7 +18,7 @@ const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
   return { error: outcome.error };
 };
 
-/** Dispatches the way the worker does: implement and await_review jobs go to their pipelines, a stored result means publish-only. */
+/** Dispatches the way the worker does: implement, await_review and fix jobs go to their pipelines, a stored result means publish-only. */
 const dispatch = (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutcome> => {
   const unreadable = unreadableOutcome(job);
   if (unreadable !== null) return Promise.resolve(unreadable);
@@ -29,6 +30,7 @@ const dispatch = (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutco
     case "await_review":
       return runAwaitReview(ctx, runtime.deps);
     case "fix":
+      return runFix(ctx, runtime.deps);
     case "restart":
       return Promise.resolve(notImplementedOutcome(job.kind));
   }

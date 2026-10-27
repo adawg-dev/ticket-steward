@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   implement_result TEXT,
   branch TEXT,
   commit_sha TEXT,
-  pushed_at TEXT
+  pushed_at TEXT,
+  fix_result TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_issue_status ON jobs (issue_id, status);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status);
@@ -93,6 +94,7 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }
   { table: "jobs", column: "branch", definition: "TEXT" },
   { table: "jobs", column: "commit_sha", definition: "TEXT" },
   { table: "jobs", column: "pushed_at", definition: "TEXT" },
+  { table: "jobs", column: "fix_result", definition: "TEXT" },
 ];
 
 /** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */

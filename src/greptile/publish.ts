@@ -2,6 +2,7 @@ import type { PipelineDeps } from "../core/deps.js";
 import type { JobOutcome } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
 import type { Loop, LoopPatch } from "../store/loops.js";
+import type { FixResult } from "./result.js";
 import type { GreptileSummary } from "./summary.js";
 
 /** The hidden marker on every steward comment about a loop; a post is skipped when its marker is already there. */
@@ -72,8 +73,11 @@ export const publishPassed = (deps: PipelineDeps, loop: Loop, summary: GreptileS
   );
 };
 
-/** Hands the ticket back to a person: a Linear comment, `ready-for-human`, and a note on the MR saying why the steward stopped. */
-export const publishHandback = (deps: PipelineDeps, loop: Loop, reason: string): Promise<JobOutcome> => {
+/**
+ * Hands the ticket back to a person: a Linear comment, `ready-for-human`, and a note on the MR saying why the steward stopped.
+ * `detail` (an output tail, paths) goes in the Linear comment only.
+ */
+export const publishHandback = (deps: PipelineDeps, loop: Loop, reason: string, detail = ""): Promise<JobOutcome> => {
   const marker = handbackMarker(loop);
   const last = loop.history.at(-1);
   const lines = [
@@ -81,6 +85,7 @@ export const publishHandback = (deps: PipelineDeps, loop: Loop, reason: string):
     "",
     `Merge request: ${loop.mrUrl ?? "none found"}`,
     last === undefined ? "Last Greptile score: none yet" : `Last Greptile score: ${score(last.score)}/5 (round ${last.round})`,
+    ...(detail === "" ? [] : ["", "```", detail, "```"]),
   ];
   return publish(
     deps,
@@ -105,4 +110,41 @@ export const publishStop = (deps: PipelineDeps, loop: Loop, reason: string, comm
     { state: "stopped" },
     { status: "succeeded", warning: `stopped: ${reason}` },
   );
+};
+
+/**
+ * Replies to every thread the fix answered (a `fixed` one with the pushed commit), then resolves it: Greptile keeps an
+ * unresolved finding in its summary, so declined threads are resolved too. A retry skips replies whose marker is there and
+ * threads already resolved.
+ */
+export const publishThreads = async (deps: PipelineDeps, loop: Loop, result: FixResult, pushedSha: string | null): Promise<JobOutcome> => {
+  const gitlab = deps.gitlab;
+  if (gitlab === undefined || loop.projectId === null || loop.mrIid === null) return { status: "publish_failed", error: "replies: no merge request to reply on" };
+  const { projectId, mrIid } = loop;
+  try {
+    const discussions = await gitlab.listDiscussions(projectId, mrIid);
+    for (const thread of result.threads) {
+      const marker = LOOP_MARKER(loop.id, `reply ${thread.discussionId} ${pushedSha ?? "nopush"}`);
+      const notes = discussions.find((discussion) => discussion.id === thread.discussionId)?.notes ?? [];
+      if (!hasMarker(notes.map((note) => note.body), marker)) {
+        const fixedIn = thread.action === "fixed" && pushedSha !== null ? `\n\nFixed in ${pushedSha.slice(0, 7)}.` : "";
+        await gitlab.replyToDiscussion(projectId, mrIid, thread.discussionId, deps.redactor.redact(`${thread.reply}${fixedIn}\n\n${marker}`));
+      }
+      if (notes[0]?.resolved !== true) await gitlab.resolveDiscussion(projectId, mrIid, thread.discussionId);
+    }
+  } catch (err) {
+    return { status: "publish_failed", error: `replies: ${errorMessage(err)}` };
+  }
+  return { status: "succeeded" };
+};
+
+/** Asks Greptile to review the unchanged head after a round with no push; once per round and head. */
+export const requestReview = async (deps: PipelineDeps, loop: Loop): Promise<JobOutcome> => {
+  if (deps.gitlab === undefined || loop.projectId === null || loop.mrIid === null) return { status: "publish_failed", error: "review request: no merge request" };
+  try {
+    await noteOnce(deps, loop, LOOP_MARKER(loop.id, `review round=${loop.round} head=${loop.headSha.slice(0, 7)}`), "@greptileai review");
+  } catch (err) {
+    return { status: "publish_failed", error: `review request: ${errorMessage(err)}` };
+  }
+  return { status: "succeeded" };
 };

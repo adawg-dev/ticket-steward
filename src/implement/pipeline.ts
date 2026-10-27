@@ -25,16 +25,18 @@ import { branchUrl, publishImplement } from "./publish.js";
 import { validateImplementResult, type Handback, type StoredImplement } from "./result.js";
 
 const MINUTE_MS = 60_000;
-const CHECK_TAIL_BYTES = 8 * 1024;
+/** How much of a failed check's output a hand-back keeps. */
+export const CHECK_TAIL_BYTES = 8 * 1024;
 const BUNDLE_FILE = "implement.bundle";
 const PUSH_REPO = "push.git";
 const LS_REMOTE_DIR = "ls-remote";
 const SKILLS_PREFIX = ".claude/skills/";
 
-const stewardChecks = (checks: string[], baseSha: string): string[] => checks.map((command) => command.replaceAll("{{baseSha}}", baseSha));
+/** `implement.checks` with `{{baseSha}}` filled in. */
+export const stewardChecks = (checks: string[], baseSha: string): string[] => checks.map((command) => command.replaceAll("{{baseSha}}", baseSha));
 
 /** The worktree paths the steward copied in: overlay files at their own paths, its skills under `.claude/skills/`. */
-const stewardCopies = async (skillsDir: string | undefined, overlayFiles: string[]): Promise<string[]> => {
+export const stewardCopies = async (skillsDir: string | undefined, overlayFiles: string[]): Promise<string[]> => {
   const skills = skillsDir !== undefined && existsSync(skillsDir) ? await listFiles(skillsDir) : [];
   return [...overlayFiles, ...skills.map((file) => `${SKILLS_PREFIX}${file}`)];
 };
@@ -43,7 +45,8 @@ const notConfigured: JobOutcome = { status: "failed", error: "implement is not c
 
 type Settings = { settings: ImplementConfig; remote: RemoteCredentials };
 
-const settingsOf = (deps: PipelineDeps): Settings | null => {
+/** The implement settings and the push remote (with GITLAB_PUSH_TOKEN), or null when implement is not configured. */
+export const settingsOf = (deps: PipelineDeps): Settings | null => {
   const settings = deps.config.implement;
   const token = deps.secrets.GITLAB_PUSH_TOKEN;
   if (settings === undefined || token === undefined || token === "") return null;
@@ -100,7 +103,8 @@ const shortRef = (ref: string): string => ref.replace(/^refs\/heads\//, "");
 
 const handback = (label: Handback["label"], reason: string, detail = ""): Handback => ({ label, reason, detail });
 
-const commitMessage = (identifier: string, message: string): string => {
+/** The agent's commit message with the ticket identifier prefixed to its subject. */
+export const commitMessage = (identifier: string, message: string): string => {
   const [subject = "", ...body] = message.trim().split("\n");
   return [`${identifier}: ${subject.trim()}`, ...body].join("\n");
 };
@@ -123,7 +127,7 @@ const finish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredImpleme
 };
 
 /** Overlay files (never to be committed) and every secret the change must not carry: the overlay's and the steward's own. */
-const guardSecrets = async (overlayDir: string, stewardSecrets: Record<string, string | undefined>): Promise<{ files: string[]; secrets: string[] }> => {
+export const guardSecrets = async (overlayDir: string, stewardSecrets: Record<string, string | undefined>): Promise<{ files: string[]; secrets: string[] }> => {
   const files = existsSync(overlayDir) ? await listFiles(overlayDir) : [];
   return { files, secrets: collectSecretValues(stewardSecrets, files.map((file) => join(overlayDir, file))) };
 };

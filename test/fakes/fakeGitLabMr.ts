@@ -82,6 +82,10 @@ export class FakeGitLabMr implements GitLabMrApi {
 
   async replyToDiscussion(_project: number | string, _iid: number, discussionId: string, body: string): Promise<void> {
     this.replies.push({ discussionId, body });
+    this.discussions.find((item) => item.id === discussionId)?.notes.push({
+      id: this.nextId++, body, author: BOT, system: false, resolvable: true, resolved: false,
+      type: null, createdAt: "2026-10-27T10:00:00Z", updatedAt: "2026-10-27T10:00:00Z", position: null,
+    });
   }
 
   async resolveDiscussion(_project: number | string, _iid: number, discussionId: string): Promise<void> {

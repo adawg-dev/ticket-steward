@@ -4,6 +4,7 @@ import { acquireRunLock } from "../core/lock.js";
 import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { runAwaitReview } from "../greptile/await.js";
+import { runFix } from "../greptile/fix.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
 import { notImplementedOutcome, unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
@@ -19,6 +20,7 @@ export interface WorkerOptions {
   runImplement?: typeof runImplement;
   publishImplementOnly?: typeof publishImplementOnly;
   runAwaitReview?: typeof runAwaitReview;
+  runFix?: typeof runFix;
 }
 
 export type WorkerDeps = PipelineDeps & WorkerOptions;
@@ -92,6 +94,7 @@ class Worker {
   private readonly implement: typeof runImplement;
   private readonly republishImplement: typeof publishImplementOnly;
   private readonly awaitReview: typeof runAwaitReview;
+  private readonly fix: typeof runFix;
   private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly lanes: Lane[];
@@ -114,6 +117,7 @@ class Worker {
     this.implement = deps.runImplement ?? runImplement;
     this.republishImplement = deps.publishImplementOnly ?? publishImplementOnly;
     this.awaitReview = deps.runAwaitReview ?? runAwaitReview;
+    this.fix = deps.runFix ?? runFix;
     this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
     logger.info({ requeued, failed, slots: this.lanes.length }, "worker started");
@@ -229,6 +233,7 @@ class Worker {
         case "await_review":
           return await this.awaitReview(ctx, deps);
         case "fix":
+          return await this.fix(ctx, deps);
         case "restart":
           return notImplementedOutcome(job.kind);
       }

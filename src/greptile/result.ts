@@ -44,3 +44,15 @@ export const validateFixResult = (output: unknown, findings: Finding[]): { ok: t
   }
   return { ok: true, result };
 };
+
+/** What a fix job decided once its brain ran: stored before anything is published, so a retry never runs the brain again. */
+export const StoredFixSchema = z.object({
+  /** null when the job handed back before a valid result (the brain failed, or its result was invalid). */
+  result: FixResultSchema.nullable(),
+  handback: z.object({ reason: z.string(), detail: z.string() }).nullable(),
+  /** The round the fix answered: Greptile's score and review counter, and the head pipeline's status. */
+  score: z.number().int(),
+  reviewCount: z.number().int().nullable(),
+  pipeline: z.string().nullable(),
+});
+export type StoredFix = z.infer<typeof StoredFixSchema>;

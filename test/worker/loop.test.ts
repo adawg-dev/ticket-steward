@@ -238,16 +238,24 @@ describe("startWorker", () => {
     expect(runJobMock).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["fix", "fix"],
-    ["restart", "restart"],
-  ] as const)("fails a loop %s job as not implemented yet without running the enrich pipeline", async (step, kind) => {
-    const jobId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 1, step });
+  it("dispatches a fix job to runFix", async () => {
+    const runFix = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const jobId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 1, step: "fix" });
+    start({ runFix });
+
+    await waitForStatus(jobId, "succeeded");
+
+    expect(runFix).toHaveBeenCalledTimes(1);
+    expect(runJobMock).not.toHaveBeenCalled();
+  });
+
+  it("fails a loop restart job as not implemented yet without running the enrich pipeline", async () => {
+    const jobId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 1, step: "restart" });
     start();
 
     await waitForStatus(jobId, "failed");
 
-    expect(stores.jobs.get(jobId)?.error).toBe(`${kind} is not implemented yet`);
+    expect(stores.jobs.get(jobId)?.error).toBe("restart is not implemented yet");
     expect(stores.jobs.get(jobId)?.attempts).toBe(1);
     expect(runJobMock).not.toHaveBeenCalled();
   });

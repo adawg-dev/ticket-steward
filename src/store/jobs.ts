@@ -1,6 +1,7 @@
 import { jobKindFor, type IssueJobKind } from "../core/intake.js";
 import { StoredBrainResultSchema, type BrainResult, type StoredBrainResult } from "../core/result.js";
 import type { JobOutcome } from "../core/types.js";
+import { StoredFixSchema, type StoredFix } from "../greptile/result.js";
 import { StoredImplementSchema, type StoredImplement } from "../implement/result.js";
 import type { TriggerEvent } from "../tracker/types.js";
 import { nowIso, readStored, type Database } from "./db.js";
@@ -23,6 +24,8 @@ export interface Job {
   result: StoredBrainResult | null;
   resultSha: string | null;
   implementResult: StoredImplement | null;
+  /** A fix job's validated result or hand-back, so a retry publishes it instead of running the brain again. */
+  fixResult: StoredFix | null;
   branch: string | null;
   commitSha: string | null;
   pushedAt: string | null;
@@ -40,7 +43,7 @@ export interface Job {
   unreadable: StoredColumn[];
 }
 
-export type StoredColumn = "trigger" | "result" | "implement_result";
+export type StoredColumn = "trigger" | "result" | "implement_result" | "fix_result";
 
 interface JobRow {
   id: number;
@@ -55,6 +58,7 @@ interface JobRow {
   result: string | null;
   result_sha: string | null;
   implement_result: string | null;
+  fix_result: string | null;
   branch: string | null;
   commit_sha: string | null;
   pushed_at: string | null;
@@ -97,6 +101,7 @@ const toJob = (row: JobRow): Job => {
     result: readStored(row.result, "result", StoredBrainResultSchema, unreadable),
     resultSha: row.result_sha,
     implementResult: readStored(row.implement_result, "implement_result", StoredImplementSchema, unreadable),
+    fixResult: readStored(row.fix_result, "fix_result", StoredFixSchema, unreadable),
     branch: row.branch,
     commitSha: row.commit_sha,
     pushedAt: row.pushed_at,
@@ -144,6 +149,7 @@ export class JobStore {
   private readonly claimOne;
   private readonly storeResult;
   private readonly storeImplement;
+  private readonly storeFix;
   private readonly storeCommit;
   private readonly storePushed;
   private readonly storeSession;
@@ -190,6 +196,7 @@ export class JobStore {
     this.claimOne = db.prepare<[string, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
     this.storeResult = db.prepare<[string, string, number]>("UPDATE jobs SET result = ?, result_sha = ? WHERE id = ?");
     this.storeImplement = db.prepare<[string, number]>("UPDATE jobs SET implement_result = ? WHERE id = ?");
+    this.storeFix = db.prepare<[string, number]>("UPDATE jobs SET fix_result = ? WHERE id = ?");
     this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ? WHERE id = ?");
     this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
     this.storeSession = db.prepare<[string, number]>("UPDATE jobs SET session_id = ? WHERE id = ?");
@@ -259,6 +266,10 @@ export class JobStore {
 
   saveImplementResult(id: number, stored: StoredImplement): void {
     this.storeImplement.run(JSON.stringify(stored), id);
+  }
+
+  saveFixResult(id: number, stored: StoredFix): void {
+    this.storeFix.run(JSON.stringify(stored), id);
   }
 
   recordCommit(id: number, branch: string, sha: string): void {

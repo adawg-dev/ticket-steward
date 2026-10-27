@@ -305,6 +305,16 @@ describe("implement jobs", () => {
     expect(job?.commitSha).toBe("a".repeat(40));
     expect(job?.pushedAt).not.toBeNull();
   });
+
+  it("stores a fix job's decision and names an unreadable one", () => {
+    const id = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 1, step: "fix" });
+    stores.jobs.saveFixResult(id, { result: null, handback: { reason: "the agent's result was invalid", detail: "summary is empty" }, score: 3, reviewCount: 2, pipeline: "success" });
+    expect(stores.jobs.get(id)?.fixResult).toMatchObject({ handback: { reason: "the agent's result was invalid" }, score: 3 });
+
+    stores.db.prepare("UPDATE jobs SET fix_result = ? WHERE id = ?").run('{"score":"x"}', id);
+    expect(stores.jobs.get(id)?.fixResult).toBeNull();
+    expect(stores.jobs.get(id)?.unreadable).toEqual(["fix_result"]);
+  });
 });
 
 describe("claimNext with running jobs", () => {

@@ -7,6 +7,8 @@ export interface FakeBrainOptions {
   writeFiles?: Record<string, string>;
   editWorkspace?: Record<string, string>;
   fail?: boolean;
+  /** The error a failing run reports. */
+  error?: string;
   usage?: BrainUsage;
   /** The SDK session id a successful run returns. */
   sessionId?: string;
@@ -41,7 +43,7 @@ export class FakeBrain implements Brain {
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, content);
     }
-    if (this.options.fail === true) return { ok: false, output: undefined, error: "fake brain failure" };
+    if (this.options.fail === true) return { ok: false, output: undefined, error: this.options.error ?? "fake brain failure" };
     const usage = this.options.usage ?? { inputTokens: 10, outputTokens: 5 };
     return { ok: true, output: this.options.result, usage, ...(this.options.sessionId === undefined ? {} : { sessionId: this.options.sessionId }) };
   }
