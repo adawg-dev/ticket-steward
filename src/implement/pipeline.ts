@@ -18,7 +18,7 @@ import { runSetup } from "../workspace/setup.js";
 import type { Worktree } from "../workspace/worktree.js";
 import { branchName } from "./branch.js";
 import { extractAgentBrief } from "./brief.js";
-import { BranchExistsError, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "./git.js";
+import { BranchExistsError, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, type PushMode, remoteTicketBranches, saveBundle, stageAndGuard } from "./git.js";
 import { renderImplementPrompt } from "./prompt.js";
 import { branchUrl, publishImplement } from "./publish.js";
 import { validateImplementResult, type Handback, type StoredImplement } from "./result.js";
@@ -62,7 +62,7 @@ const lsRemoteSite = async (paths: JobPaths, remote: RemoteCredentials): Promise
 };
 
 /** Pushes the bundled commit from a scratch repo in the job dir; never from the worktree or mirror (agent-writable config). */
-const pushFromBundle = async (input: { paths: JobPaths; deps: PipelineDeps; remote: RemoteCredentials; sha: string; baseSha: string; branch: string; identifier: string; branchTypes: string[] }): Promise<void> => {
+const pushFromBundle = async (input: { paths: JobPaths; deps: PipelineDeps; remote: RemoteCredentials; sha: string; baseSha: string; branch: string; identifier: string; branchTypes: string[]; mode: PushMode }): Promise<void> => {
   const scratchDir = join(input.paths.jobDir, PUSH_REPO);
   try {
     await pushCommit({
@@ -75,6 +75,7 @@ const pushFromBundle = async (input: { paths: JobPaths; deps: PipelineDeps; remo
       branch: input.branch,
       identifier: input.identifier,
       branchTypes: input.branchTypes,
+      mode: input.mode,
     });
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
@@ -236,7 +237,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   // Stored before the push, so any failure from here on (even a crash after the push lands) retries via publishImplementOnly.
   deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
   try {
-    await pushFromBundle({ paths, deps, remote, sha: committed.sha, baseSha, branch, identifier: ctx.identifier, branchTypes: settings.branchTypes });
+    await pushFromBundle({ paths, deps, remote, sha: committed.sha, baseSha, branch, identifier: ctx.identifier, branchTypes: settings.branchTypes, mode: { kind: "create" } });
   } catch (err) {
     if (err instanceof BranchExistsError) return finish(ctx, deps, { result, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(err.ref)) }, null);
     return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
@@ -283,7 +284,7 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
       if (!landed) {
         // The base comes from the bundle header (no git in the mirror); pushCommit still verifies the commit's parent is that base.
         const baseSha = await bundleBase(join(paths.jobDir, BUNDLE_FILE));
-        await pushFromBundle({ paths, deps, remote: configured.remote, sha: job.commitSha, baseSha, branch: job.branch, identifier: ctx.identifier, branchTypes: configured.settings.branchTypes });
+        await pushFromBundle({ paths, deps, remote: configured.remote, sha: job.commitSha, baseSha, branch: job.branch, identifier: ctx.identifier, branchTypes: configured.settings.branchTypes, mode: { kind: "create" } });
       }
     } catch (err) {
       if (err instanceof BranchExistsError) {

@@ -207,8 +207,11 @@ export class BranchExistsError extends Error {
   }
 }
 
+/** How to push: create a new branch, or fast-forward an existing one that must still be at `previousHead`. */
+export type PushMode = { kind: "create" } | { kind: "fastForward"; previousHead: string };
+
 /**
- * Pushes `sha` to a new branch after checking the ref pattern, the ancestry, and that no branch carries the ticket. Never forces.
+ * Pushes `sha` after checking the ref pattern, the ancestry, and (create) that no branch carries the ticket. Never a plain force.
  * Runs in a fresh scratch repo (never the worktree or mirror, whose config the agent may have set) with hooks disabled, so the
  * push credentials only reach git itself. Objects come from the bundle plus the mirror's objects (via alternates) for the base.
  */
@@ -222,6 +225,7 @@ export const pushCommit = async (input: {
   branch: string;
   identifier: string;
   branchTypes: string[];
+  mode: PushMode;
 }): Promise<void> => {
   const ref = `refs/heads/${input.branch}`;
   if (!branchRefPattern(input.branchTypes, input.identifier).test(ref)) throw new Error(`refusing to push to ${ref}: not a ${input.branchTypes.join("|")}/${input.identifier}-<slug> branch`);
@@ -232,11 +236,15 @@ export const pushCommit = async (input: {
   await restoreFromBundle(input.scratchDir, input.bundlePath, input.sha);
   const parents = (await gitOrThrow(["rev-list", "--parents", "-n", "1", input.sha], input.scratchDir)).split(" ").slice(1);
   if (parents.length !== 1 || parents[0] !== input.baseSha) throw new Error(`refusing to push: ${input.sha.slice(0, 7)} is not a single commit on top of ${input.baseSha.slice(0, 7)}`);
-  const existing = await remoteTicketBranches(input.remote, input.scratchDir, input.identifier);
-  if (existing[0] !== undefined) throw new BranchExistsError(existing[0].ref);
-  // Create-only: the empty expected value makes git refuse if the ref exists by push time (never a force).
+  if (input.mode.kind === "create") {
+    const existing = await remoteTicketBranches(input.remote, input.scratchDir, input.identifier);
+    if (existing[0] !== undefined) throw new BranchExistsError(existing[0].ref);
+  }
+  // Create: the empty expected value makes git refuse if the ref exists by push time. Fast-forward: the lease is the previous head,
+  // so a branch that moved since is refused. Never a plain force.
+  const expected = input.mode.kind === "create" ? "" : input.mode.previousHead;
   const pushed = await git(
-    ["-c", "core.hooksPath=/dev/null", "push", "--quiet", "--porcelain", `--force-with-lease=${ref}:`, input.remote.url, `${input.sha}:${ref}`],
+    ["-c", "core.hooksPath=/dev/null", "push", "--quiet", "--porcelain", `--force-with-lease=${ref}:${expected}`, input.remote.url, `${input.sha}:${ref}`],
     input.scratchDir,
     input.remote.env,
   );

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BranchExistsError, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
+import { BranchExistsError, type PushMode, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
 import { gitEnvRecord } from "../../src/workspace/git.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
@@ -247,7 +247,7 @@ describe("push", () => {
     return result.sha;
   };
   const remote = () => ({ url: source, env: {} });
-  const push = (sha: string, over: { baseSha?: string; branch?: string; env?: Record<string, string> } = {}): Promise<void> =>
+  const push = (sha: string, over: { baseSha?: string; branch?: string; env?: Record<string, string>; mode?: PushMode } = {}): Promise<void> =>
     pushCommit({
       scratchDir: join(root, "scratch"),
       objectsDir: join(mirror.path, "objects"),
@@ -258,6 +258,7 @@ describe("push", () => {
       branch: over.branch ?? "fix/API-1-keep-last-chunk",
       identifier: "API-1",
       branchTypes: TYPES,
+      mode: over.mode ?? { kind: "create" },
     });
 
   it("pushes the commit to a new branch", async () => {
@@ -295,6 +296,40 @@ describe("push", () => {
     await worktree.destroy();
     await push(sha, { branch: "fix/API-1-x" });
     expect(await git(source, ["rev-parse", "refs/heads/fix/API-1-x"])).toBe(sha);
+  });
+
+  describe("fastForward", () => {
+    const BRANCH = "fix/API-1-keep-last-chunk";
+    const REF = `refs/heads/${BRANCH}`;
+    /** Pushes a first commit, then commits a second on top of it and bundles it against the first. */
+    const pushedThenChild = async (): Promise<{ first: string; second: string }> => {
+      const first = await commitChange();
+      await push(first, { branch: BRANCH });
+      await writeFile(join(worktree.path, "src/a.ts"), "export const a = 3;\n");
+      await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
+      const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message: "API-1: y", author: AUTHOR, env: env() });
+      if (!result.ok) throw new Error(result.output);
+      await saveBundle(worktree.path, first, join(root, "implement.bundle"));
+      return { first, second: result.sha };
+    };
+
+    it("updates the remote branch from the previous head to a child commit", async () => {
+      const { first, second } = await pushedThenChild();
+      await push(second, { branch: BRANCH, baseSha: first, mode: { kind: "fastForward", previousHead: first } });
+      expect(await git(source, ["rev-parse", REF])).toBe(second);
+    });
+
+    it("throws and leaves the remote alone when the branch moved past the previous head", async () => {
+      const { first, second } = await pushedThenChild();
+      await git(source, ["branch", "-f", BRANCH, base]);
+      await expect(push(second, { branch: BRANCH, baseSha: first, mode: { kind: "fastForward", previousHead: first } })).rejects.toThrow();
+      expect(await git(source, ["rev-parse", REF])).toBe(base);
+    });
+
+    it("refuses a commit whose parent is not the previous head", async () => {
+      const { first, second } = await pushedThenChild();
+      await expect(push(second, { branch: BRANCH, baseSha: base, mode: { kind: "fastForward", previousHead: first } })).rejects.toThrow("not a single commit on top of");
+    });
   });
 
   it("never runs an agent-planted pre-push hook (worktree or mirror hooksPath)", async () => {
