@@ -5,9 +5,10 @@ import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/p
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { runAwaitReview } from "../greptile/await.js";
 import { runFix } from "../greptile/fix.js";
+import { runRestart } from "../greptile/start.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
-import { notImplementedOutcome, unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
+import { unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 
 export interface WorkerOptions {
@@ -21,6 +22,7 @@ export interface WorkerOptions {
   publishImplementOnly?: typeof publishImplementOnly;
   runAwaitReview?: typeof runAwaitReview;
   runFix?: typeof runFix;
+  runRestart?: typeof runRestart;
 }
 
 export type WorkerDeps = PipelineDeps & WorkerOptions;
@@ -95,6 +97,7 @@ class Worker {
   private readonly republishImplement: typeof publishImplementOnly;
   private readonly awaitReview: typeof runAwaitReview;
   private readonly fix: typeof runFix;
+  private readonly restart: typeof runRestart;
   private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly lanes: Lane[];
@@ -118,6 +121,7 @@ class Worker {
     this.republishImplement = deps.publishImplementOnly ?? publishImplementOnly;
     this.awaitReview = deps.runAwaitReview ?? runAwaitReview;
     this.fix = deps.runFix ?? runFix;
+    this.restart = deps.runRestart ?? runRestart;
     this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
     logger.info({ requeued, failed, slots: this.lanes.length }, "worker started");
@@ -235,7 +239,7 @@ class Worker {
         case "fix":
           return await this.fix(ctx, deps);
         case "restart":
-          return notImplementedOutcome(job.kind);
+          return await this.restart(ctx, deps);
       }
     } catch (err) {
       return { status: "failed", error: errorMessage(err), retryable: false };

@@ -121,9 +121,6 @@ export const unreadableOutcome = (job: Job): JobOutcome | null =>
     ? null
     : { status: "failed", error: `stored ${job.unreadable.join(", ")} is unreadable; fix or clear the column before retrying`, retryable: false };
 
-/** A loop job kind no pipeline handles yet: it fails for good rather than fall through to another kind's pipeline. */
-export const notImplementedOutcome = (kind: JobKind): JobOutcome => ({ status: "failed", error: `${kind} is not implemented yet`, retryable: false });
-
 interface JobColumns {
   issueId: string;
   identifier: string;

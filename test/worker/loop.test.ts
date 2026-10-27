@@ -249,14 +249,14 @@ describe("startWorker", () => {
     expect(runJobMock).not.toHaveBeenCalled();
   });
 
-  it("fails a loop restart job as not implemented yet without running the enrich pipeline", async () => {
+  it("dispatches a restart job to runRestart", async () => {
+    const runRestart = vi.fn(async () => ({ status: "succeeded" }) as const);
     const jobId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 1, step: "restart" });
-    start();
+    start({ runRestart });
 
-    await waitForStatus(jobId, "failed");
+    await waitForStatus(jobId, "succeeded");
 
-    expect(stores.jobs.get(jobId)?.error).toBe("restart is not implemented yet");
-    expect(stores.jobs.get(jobId)?.attempts).toBe(1);
+    expect(runRestart).toHaveBeenCalledTimes(1);
     expect(runJobMock).not.toHaveBeenCalled();
   });
 

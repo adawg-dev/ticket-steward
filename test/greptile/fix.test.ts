@@ -7,6 +7,7 @@ import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import { stableWorktreeName } from "../../src/core/workspace.js";
 import { runFix } from "../../src/greptile/fix.js";
+import { runRestart } from "../../src/greptile/start.js";
 import { LOOP_MARKER } from "../../src/greptile/publish.js";
 import type { FixResult } from "../../src/greptile/result.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
@@ -300,6 +301,39 @@ describe("runFix", () => {
     expect(outcome).toEqual({ status: "succeeded" });
     expect(brain.lastInput().prompt).toContain("- add docs/notes.md");
     expect(loopOf(id).adoptedFrom).toBeNull();
+  });
+
+  it("after a restart, gives the agent the person's commits and the comments since the hand-back", async () => {
+    await git(repo.repo, ["checkout", "-q", BRANCH]);
+    const personHead = await commitFile(repo.repo, "docs/notes.md", "notes\n");
+    await git(repo.repo, ["checkout", "-q", "main"]);
+    await repo.mirror.fetch();
+    gitlab.mr = fakeMergeRequest({ sha: personHead, sourceBranch: BRANCH, description: summaryBody(3, personHead), headPipeline: { id: 9, sha: personHead, status: "success" } });
+    gitlab.openMr = gitlab.mr;
+    gitlab.discussions = [];
+    finding = gitlab.addDiscussion(GREPTILE, "Null check missing on the last chunk.");
+    tracker.addIssue({
+      ...structuredClone(issue),
+      comments: [{ author: "Ada", body: "Keep the old buffer size when you fix it", createdAt: "2026-10-27T10:00:00.000Z" }],
+    });
+    const id = createLoop();
+    stores.loops.update(id, { state: "handed_back", round: 3, handedBackAt: "2026-10-27T09:00:00.000Z" });
+    const restart: TriggerEvent = { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "restart", labelDriven: true };
+    const restartJob = stores.jobs.enqueue(restart);
+    stores.jobs.claimById(restartJob);
+    const deps = makeDeps(editing({ result: changed(finding) }));
+    expect(await runRestart({ jobId: restartJob, attempt: 1, issueId: "issue-1", identifier: "API-1", teamKey: "API", trigger: restart, dryRun: false }, deps))
+      .toEqual({ status: "succeeded" });
+    // The await job finds Greptile's 3/5 on the person's head and queues the fix.
+    stores.loops.update(id, { state: "fixing" });
+    const brain = editing({ result: changed(finding) });
+
+    const outcome = await runFix(claim(id), { ...deps, brain, runBrain: (_config, input) => brain.run(input, () => undefined) });
+
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(brain.lastInput().prompt).toContain("- add docs/notes.md");
+    expect(brain.lastInput().prompt).toContain("Keep the old buffer size when you fix it");
+    expect(loopOf(id)).toMatchObject({ round: 1, adoptedFrom: null });
   });
 
   it("retries a publish failure after the push without running the brain or replying twice", async () => {

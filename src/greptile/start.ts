@@ -1,6 +1,10 @@
+import type { MergeRequestInfo } from "../codehost/gitlabMr.js";
 import type { PipelineDeps } from "../core/deps.js";
-import { transaction, type Job } from "../store/index.js";
+import type { JobOutcome, RunContext } from "../core/types.js";
+import { errorMessage } from "../core/workspace.js";
+import { transaction, type Job, type Loop } from "../store/index.js";
 import type { TriggerEvent } from "../tracker/types.js";
+import { commentOnce, LOOP_MARKER } from "./publish.js";
 
 /** Where the implement push left the ticket: the base it branched from and the worktree its brain session ran in. */
 export interface LoopStart {
@@ -39,4 +43,78 @@ export const startLoop = (deps: Pick<PipelineDeps, "config" | "stores">, job: Jo
     stores.jobs.enqueue({ kind: "loop", issueId: job.issueId, identifier: job.identifier, teamKey: job.teamKey, loopId, step: "await" });
     return loopId;
   });
+};
+
+type RestartDeps = Pick<PipelineDeps, "config" | "stores" | "tracker" | "gitlab" | "redactor">;
+
+const fail = (error: string): JobOutcome => ({ status: "failed", error, retryable: false });
+
+/** Back to `awaiting_review` at round 0 on the open MR, adopting its head; the history and hand-back time are kept. */
+const resumeLoop = async (deps: RestartDeps, loop: Loop, mr: MergeRequestInfo, labelDriven: boolean): Promise<JobOutcome> => {
+  const { stores } = deps;
+  const labels = deps.config.tracker.labels;
+  try {
+    // Before the loop moves, so a failed swap is retried on a loop that is still handed back.
+    if (labelDriven && labels !== undefined) await deps.tracker.swapLabel(loop.issueId, labels.implement, labels.implemented);
+  } catch (err) {
+    return { status: "failed", error: `labels: ${errorMessage(err)}`, retryable: true };
+  }
+  transaction(stores.db, () => {
+    stores.loops.update(loop.id, {
+      state: "awaiting_review",
+      round: 0,
+      adoptedFrom: mr.sha === loop.headSha ? null : loop.headSha,
+      headSha: mr.sha,
+      projectId: mr.projectId,
+      mrIid: mr.iid,
+      mrUrl: mr.webUrl,
+      waitStartedAt: null,
+      reviewCountAtTrigger: null,
+      endedAt: null,
+      labelDriven,
+    });
+    stores.jobs.enqueue({ kind: "loop", issueId: loop.issueId, identifier: loop.identifier, teamKey: loop.teamKey, loopId: loop.id, step: "await" });
+  });
+  return { status: "succeeded" };
+};
+
+/**
+ * No open MR to resume on: says so on Linear and queues an implement, which hands back with "a branch already exists"
+ * while the branch is there. A label restart queues it as the label would; `steward fix` queues a CLI one that leaves labels alone.
+ */
+const restartImplement = async (deps: RestartDeps, ctx: RunContext, loop: Loop, labelDriven: boolean): Promise<JobOutcome> => {
+  try {
+    await commentOnce(deps, loop, LOOP_MARKER(loop.id, `restart job=${ctx.jobId}`), [
+      `no open merge request for ${loop.branch}; starting a fresh implement`,
+    ]);
+  } catch (err) {
+    return { status: "failed", error: `comment: ${errorMessage(err)}`, retryable: true };
+  }
+  const { issueId, identifier, teamKey } = loop;
+  const trigger: TriggerEvent = labelDriven
+    ? { kind: "issue.labeled", issueId, identifier, teamKey, deliveryId: `restart-${ctx.jobId}`, description: "", stateType: null, action: "implement" }
+    : { kind: "cli", issueId, identifier, teamKey, action: "implement" };
+  deps.stores.jobs.enqueue(trigger);
+  return { status: "succeeded" };
+};
+
+/** The restart job: resumes a handed-back loop on its open MR, or falls back to a fresh implement when there is none. */
+export const runRestart = async (ctx: RunContext, deps: RestartDeps): Promise<JobOutcome> => {
+  const { config, gitlab } = deps;
+  if (ctx.trigger.kind !== "loop") return fail("restart needs a loop trigger");
+  if (config.greptile === undefined || gitlab === undefined || config.codehost.kind !== "gitlab") {
+    return fail("the Greptile loop needs greptile configured, a GitLab code host and GITLAB_TOKEN");
+  }
+  const loopId = ctx.trigger.loopId;
+  const loop = deps.stores.loops.get(loopId);
+  if (loop === null) return fail(`loop ${loopId} not found`);
+  if (loop.state !== "handed_back") return { status: "succeeded", warning: `loop ${loopId} is ${loop.state}, not handed back` };
+  const labelDriven = ctx.trigger.labelDriven === true;
+  let mr: MergeRequestInfo | null;
+  try {
+    mr = await gitlab.findOpenMergeRequest(config.codehost.project, loop.branch);
+  } catch (err) {
+    return { status: "failed", error: errorMessage(err), retryable: true };
+  }
+  return mr === null ? restartImplement(deps, ctx, loop, labelDriven) : resumeLoop(deps, loop, mr, labelDriven);
 };

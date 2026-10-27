@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { defaultContext, exitWith, type CliContext } from "./context.js";
 import { registerDoctor } from "./doctor.js";
 import { registerEnrich } from "./enrich.js";
+import { registerFix } from "./fix.js";
 import { registerImplement } from "./implement.js";
 import { registerInit } from "./init.js";
 import { registerJobs } from "./jobs.js";
@@ -28,6 +29,7 @@ export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   registerServe(program, ctx);
   registerEnrich(program, ctx);
   registerImplement(program, ctx);
+  registerFix(program, ctx);
   registerJobs(program, ctx);
   registerTemplates(program, ctx);
   registerPrompt(program, ctx);

@@ -60,6 +60,8 @@ export interface ConfigPaths {
   teams?: string[];
   labels?: boolean;
   implement?: { prompt: string; checks?: string[] };
+  /** Needs `implement` too. */
+  greptile?: { prompt: string };
 }
 
 /** Writes a steward.config.ts into `dir` pointing at the given paths and returns its path. */
@@ -70,6 +72,7 @@ export const writeConfig = async (dir: string, p: ConfigPaths): Promise<string> 
     p.implement === undefined
       ? ""
       : `implement: ${JSON.stringify({ prompt: p.implement.prompt, checks: p.implement.checks ?? [], commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } })},`;
+  const greptile = p.greptile === undefined ? "" : `greptile: ${JSON.stringify({ botUsername: "greptile-bot", prompt: p.greptile.prompt })},`;
   const slots = p.slots === undefined ? "" : `slots: ${JSON.stringify(p.slots)},`;
   const port = p.port === null ? "" : `port: ${p.port},`;
   const source = `
@@ -93,6 +96,7 @@ export default defineConfig({
   prompt: ${JSON.stringify(p.promptPath)},
   server: { port: ${p.serverPort}, publicUrl: "https://steward.example" },
   ${implement}
+  ${greptile}
   ${slots}
 });
 `;

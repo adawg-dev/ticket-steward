@@ -16,7 +16,7 @@ const hasMarker = (bodies: string[], marker: string): boolean => bodies.some((bo
 const score = (value: number | null): string => (value === null ? "?" : String(value));
 
 /** Posts the Linear comment unless one with the marker is already on the ticket. */
-const commentOnce = async (deps: PipelineDeps, loop: Loop, marker: string, lines: string[]): Promise<void> => {
+export const commentOnce = async (deps: Pick<PipelineDeps, "tracker" | "redactor">, loop: Loop, marker: string, lines: string[]): Promise<void> => {
   const ticket = await deps.tracker.fetchTicket(loop.issueId);
   if (hasMarker(ticket.comments.map((comment) => comment.body), marker)) return;
   await deps.tracker.postComment(loop.issueId, deps.redactor.redact([...lines, "", marker].join("\n")));
