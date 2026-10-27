@@ -73,21 +73,7 @@ describe("StewardConfigSchema", () => {
   });
 });
 
-describe("review config", () => {
-  it("defaults allowForks and maxComments", () => {
-    const parsed = StewardConfigSchema.parse({ ...minimalInput, review: { botUsername: "steward-bot", prompt: "./prompts/review.md" } });
-    expect(parsed.review).toEqual({ botUsername: "steward-bot", prompt: "./prompts/review.md", allowForks: false, maxComments: 15 });
-  });
-
-  it("is optional", () => {
-    expect(StewardConfigSchema.parse(minimalInput).review).toBeUndefined();
-  });
-
-  it("requires a gitlab codehost", () => {
-    const result = StewardConfigSchema.safeParse({ ...minimalInput, codehost: { kind: "github", owner: "o", repo: "r" }, review: { botUsername: "b", prompt: "p" } });
-    expect(result.success).toBe(false);
-  });
-
+describe("tracker config", () => {
   it("defaults bugLabels to Bug", () => {
     expect(StewardConfigSchema.parse(minimalInput).tracker.bugLabels).toEqual(["Bug"]);
   });

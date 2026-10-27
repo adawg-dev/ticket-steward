@@ -2,7 +2,6 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createBrain } from "../brain/index.js";
 import type { Brain, BrainInput, BrainRun } from "../brain/types.js";
-import { createGitLabReview } from "../codehost/gitlabReview.js";
 import { createCodeHost } from "../codehost/index.js";
 import type { LoadedConfig } from "../config/load.js";
 import type { PipelineDeps } from "../core/pipeline.js";
@@ -46,7 +45,6 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promi
   const tracker = openTracker(loaded, ctx);
   const injectedBrain = ctx.factories?.brain;
   const codehost = ctx.factories?.codehost ?? createCodeHost(config.codehost, secrets);
-  const review = ctx.factories?.review ?? createGitLabReview(config, secrets);
   const deps: PipelineDeps = {
     config,
     secrets,
@@ -59,7 +57,6 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promi
     stores,
     redactor: await buildRedactor(loaded),
     now: () => new Date(),
-    ...(review === undefined ? {} : { review }),
     ...(injectedBrain === undefined ? {} : brainRunner(injectedBrain)),
     // serve gives each worker loop its own slot; inline runs (enrich|implement KEY, jobs retry) use slot 1 under run.lock.
     ...(config.slots === undefined ? {} : { slot: { n: 1, client: new SlotClient(config.slots, ctx.factories?.slotRunner) } }),

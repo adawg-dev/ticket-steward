@@ -147,7 +147,7 @@ steward overlay sync --from /path/to/sandbox-checkout --allow-pattern 'prod-read
 Per job, every overlay file is copied into the worktree at the same relative path, mode
 0600, with `localhost:3000` / `127.0.0.1:3000` rewritten to the job's port (`workspace.port`, or the
 slot's app port with `slots`) when `workspace.portRewrite` is set. With `slots`, `slots.env` then
-overrides keys in the job's copy (§1.11).
+overrides keys in the job's copy (§1.10).
 
 ### 1.6 Public URL
 
@@ -183,9 +183,8 @@ sudo cloudflared service install
 ```
 
 Either way, `server.publicUrl` in the config is `https://steward.example.com` and the
-steward itself listens on plain HTTP on `127.0.0.1:3020`. Only `/health`,
-`/webhooks/linear` and (with `review` configured, §1.10) `/webhooks/gitlab` exist, and the
-webhooks are verified, so exposing the port is acceptable.
+steward itself listens on plain HTTP on `127.0.0.1:3020`. Only `/health` and
+`/webhooks/linear` exist, and the webhook is verified, so exposing the port is acceptable.
 
 ### 1.7 Linear API key and webhook
 
@@ -357,12 +356,11 @@ webhook and codehost secrets; the running user does not own `~/.ssh` or `~/.kube
 and fetches; the overlay has at least one file; the skills dir exists; `LINEAR_API_KEY` is set
 and answers a `viewer { id name }` query (the line names the user every write will appear
 as); `publicUrl/health` answers; the
-codehost MCP server starts and answers `tools/list`; with `review` configured, a GitLab
-webhook secret is set and `GITLAB_TOKEN` has the `api` scope and acts as `review.botUsername` (§1.10); with `tracker.labels`
+codehost MCP server starts and answers `tools/list`; with `tracker.labels`
 set, all five labels exist in Linear; with `implement` configured, `GITLAB_PUSH_TOKEN` can `ls-remote` the repo (a read, so it
 cannot prove Developer access; the first real push does) and, for GitLab, `implement.protectedBranches` are protected with
 no Developer-role or project-bot push or merge grant (read with `GITLAB_TOKEN`); Playwright's Chromium is installed;
-`workspace.port` is free, or, with `slots` (§1.11): `/usr/local/sbin/steward-slot` is root-owned and not
+`workspace.port` is free, or, with `slots` (§1.10): `/usr/local/sbin/steward-slot` is root-owned and not
 group- or world-writable, `slots.socket` exists, is a socket and answers `check`, every slot's app and
 service ports are free (a slot left up is named), and every `slots.env` key is defined in the overlay.
 
@@ -392,46 +390,7 @@ steward enrich KEY-123 --dry-run    # prints the rendered section and recorded w
 steward enrich KEY-123              # enqueues if serve is running, otherwise runs inline under run.lock
 ```
 
-### 1.10 GitLab merge-request review (optional)
-
-With a `review` block in `steward.config.ts`, the steward reviews merge requests it is
-added to as a reviewer. On a bug ticket it replays the saved reproduction recipe on the MR
-head (it never runs the test suite; CI does that), reviews the diff, and posts inline
-comments on diff lines. It reviews again on every new push while it is still a reviewer.
-Review requires `codehost.kind: "gitlab"`.
-
-1. **The steward's GitLab user.** Create a project access token on the project (Settings →
-   Access tokens) with the **Reporter** role and the **`api`** scope. GitLab creates a bot
-   user for it named `project_<id>_bot_<suffix>`; that user is the steward's reviewer
-   identity. Put the token in `.env` as `GITLAB_TOKEN` (the same token also serves the
-   enrichment's commit lookups). The instance is GitLab Ultimate, so project access tokens
-   and several reviewers per MR are available. On Free you would use a dedicated user's
-   personal access token instead, and an MR could have only one reviewer.
-2. **`review.botUsername`** must equal that user's username exactly:
-
-   ```ts
-   review: { botUsername: "project_123_bot_abc123", prompt: "./prompts/review.md" },
-   ```
-
-   `allowForks` (default `false`) and `maxComments` (default `15`) are optional.
-3. **The webhook.** In the project's Settings → Webhooks, add
-   `https://steward.example.com/webhooks/gitlab` (`<server.publicUrl>/webhooks/gitlab`)
-   with only the **Merge request events** trigger. Set a signing token (GitLab 19.1+,
-   preferred) and copy it into `.env` as `GITLAB_WEBHOOK_SIGNING_TOKEN`, or set a plain
-   secret token and copy it as `GITLAB_WEBHOOK_SECRET`. The route answers 404 while
-   `review` is not configured.
-4. **Cloudflare Access.** When the tunnel's hostname sits behind Cloudflare Access, its
-   **Bypass** policy must cover `/webhooks/*`, so that both `/webhooks/linear` and
-   `/webhooks/gitlab` reach the tunnel. A policy on `/webhooks/linear` alone blocks
-   GitLab's deliveries.
-5. **Doctor.** Run `steward doctor` (§1.8). With `review` set it adds two lines:
-   `gitlab webhook secret` (one of the two secrets is present) and `gitlab reviewer`
-   (`GITLAB_TOKEN` has the `api` scope and acts as `review.botUsername`).
-6. **Test.** Add the steward as a reviewer on an MR whose branch or title contains a
-   ticket key (for example `api-123-fix-stream`). Within a few minutes the MR gets a
-   summary note and any inline comments, and `steward jobs` lists a `review` job.
-
-### 1.11 Worker slots (optional)
+### 1.10 Worker slots (optional)
 
 Without `slots`, the worker runs one job at a time on `workspace.port`, against whatever the overlay's
 env files point at. With `slots`, it runs `slots.count` jobs at once (1–9). Each job gets a **slot**: an
@@ -622,22 +581,10 @@ steward jobs gc           # run retention now: worktrees, artifacts, transcripts
 Failed jobs keep their worktree under `dataDir/work/<id>-<attempt>` when
 `workspace.keepOnFailure` is true; retention keeps the newest `retention.keptWorktrees`.
 
-**Reproduction recipes.** When the brain reproduces a bug ticket, the steward saves the
-recipe in the `repros` table (one row per Linear issue, the newest wins) and copies the
-recipe's files to `<dataDir>/repros/<jobId>/`. Recipes survive the retention sweep, since
-a review may come weeks later. A review job restores those files into the MR worktree and
-replays the recipe. An MR whose bug was never reproduced gets one "cannot verify" note
-instead of a replay.
-
-**Review jobs that end `skipped: …`.** A review job that finds nothing to do succeeds with
-a `skipped: …` warning:
-
-| Warning | Meaning |
-|---|---|
-| moved on | a newer push has its own job |
-| no longer a reviewer | the steward was removed |
-| is merged or closed | the MR is finished |
-| no reproduced recipe | the unverifiable note was posted |
+**Reproduction recipes.** When the brain reproduces a bug ticket, the recipe is part of
+the job's stored result and of the ticket's Enrichment section; the steward keeps no copy
+of the recipe's files, which go with the worktree. Review jobs left over from the removed
+MR reviewer fail with "MR review was removed" when the steward starts.
 
 ## 5. Linear API key rejected
 

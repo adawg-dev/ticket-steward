@@ -109,21 +109,10 @@ export const StewardConfigSchema = z.object({
     port: z.number().int().positive(),
     publicUrl: z.string(),
   }),
-  review: z
-    .object({
-      botUsername: z.string().min(1),
-      prompt: z.string(),
-      allowForks: z.boolean().default(false),
-      maxComments: z.number().int().positive().default(15),
-    })
-    .optional(),
   implement: ImplementSchema.optional(),
   /** Parallel jobs on fresh per-job containers; unset keeps one job at a time on workspace.port. */
   slots: SlotsSchema.optional(),
 }).superRefine((config, ctx) => {
-  if (config.review !== undefined && config.codehost.kind !== "gitlab") {
-    ctx.addIssue({ code: "custom", path: ["review"], message: 'review requires codehost.kind "gitlab"' });
-  }
   if (config.implement !== undefined && config.tracker.labels === undefined) {
     ctx.addIssue({ code: "custom", path: ["implement"], message: "implement requires tracker.labels" });
   }

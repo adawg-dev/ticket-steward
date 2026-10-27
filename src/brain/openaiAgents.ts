@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { Agent, MCPServerStdio, run } from "@openai/agents";
 import { BrainResultSchema } from "../core/result.js";
 import { ImplementResultSchema } from "../implement/result.js";
-import { ReviewResultSchema } from "../review/result.js";
 import { createBrainTools } from "./tools/index.js";
 import { BackgroundProcesses } from "./tools/processes.js";
 import type { Brain, BrainInput, BrainUsage, ReasoningEffort } from "./types.js";
@@ -70,7 +69,7 @@ const mcpServers = (input: BrainInput): MCPServerStdio[] =>
 export const modelSettingsFor = (input: Pick<BrainInput, "reasoningEffort">): { reasoning?: { effort: ReasoningEffort } } =>
   input.reasoningEffort === undefined ? {} : { reasoning: { effort: input.reasoningEffort } };
 
-const agentFor = <TOutput extends typeof BrainResultSchema | typeof ReviewResultSchema | typeof ImplementResultSchema>(
+const agentFor = <TOutput extends typeof BrainResultSchema | typeof ImplementResultSchema>(
   input: BrainInput,
   servers: MCPServerStdio[],
   processes: BackgroundProcesses,
@@ -102,11 +101,9 @@ export const createOpenAiAgentsBrain = (): Brain => ({
     try {
       await Promise.all(servers.map((s) => s.connect()));
       const agent =
-        input.output === "review"
-          ? agentFor(input, servers, processes, ReviewResultSchema)
-          : input.output === "implement"
-            ? agentFor(input, servers, processes, ImplementResultSchema)
-            : agentFor(input, servers, processes, BrainResultSchema);
+        input.output === "implement"
+          ? agentFor(input, servers, processes, ImplementResultSchema)
+          : agentFor(input, servers, processes, BrainResultSchema);
       const prompt = `${input.prompt}${await skillsText(input.workspacePath, input.inlineSkills)}`;
       const result = await run(agent, prompt, { maxTurns: input.maxTurns, signal: abortController.signal });
       for (const item of result.newItems) onMessage(JSON.stringify(item.toJSON()));

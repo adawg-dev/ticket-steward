@@ -5,7 +5,6 @@ import { buildProgram } from "../../src/cli/program.js";
 import type { McpServerSpec } from "../../src/brain/types.js";
 import type { SlotPorts } from "../../src/workspace/slots.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
-import { FakeGitLabReview } from "../fakes/fakeGitLabReview.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { ExitSignal, makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
 
@@ -167,73 +166,6 @@ describe("steward doctor", () => {
       expect(line).toBe("[fail] linear api key: Linear rejected LINEAR_API_KEY: the key is invalid or revoked");
     });
   });
-  describe("gitlab review checks", () => {
-    const reviewDoctor = async (opts: { env: string; review?: { botUsername: string; prompt: string }; api?: FakeGitLabReview }): Promise<string> => {
-      await writeFile(join(dir, ".env"), opts.env);
-      const configPath = await writeConfig(dir, {
-        dataDir: repo.dataDir,
-        overlayDir: repo.overlayDir,
-        promptPath: repo.promptPath,
-        fetchUrl: repo.repo,
-        port: await freeTcpPort(),
-        serverPort: await freeTcpPort(),
-        ...(opts.review === undefined ? {} : { review: opts.review }),
-      });
-      const { ctx, stdout } = makeContext({
-        fetchImpl: linearFetch(() => new Response("{}", { status: 200 })),
-        factories: { codehostMcpSpec: fakeCodehostMcpSpec, ...(opts.api === undefined ? {} : { review: opts.api }) },
-      });
-      await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"]).catch(() => undefined);
-      return stdout();
-    };
-    const reviewEnv = `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nGITLAB_WEBHOOK_SECRET=gitlab-secret\n`;
-    const reviewSettings = (botUsername: string): { botUsername: string; prompt: string } => ({ botUsername, prompt: join(dir, "review.md") });
-
-    it("checks the GitLab review setup when review is configured", async () => {
-      const output = await reviewDoctor({ env: reviewEnv, review: reviewSettings("steward-bot"), api: new FakeGitLabReview() });
-
-      expect(output).toContain("[ok] gitlab webhook secret: GITLAB_WEBHOOK_SECRET present");
-      expect(output).toContain("[ok] gitlab reviewer: GITLAB_TOKEN acts as steward-bot with the api scope");
-    });
-
-    it("fails when the token lacks the api scope or belongs to someone else", async () => {
-      const review = new FakeGitLabReview();
-      review.scopes = ["read_api"];
-      const output = await reviewDoctor({ env: reviewEnv, review: reviewSettings("steward-bot"), api: review });
-      expect(output).toContain("[fail] gitlab reviewer: GITLAB_TOKEN lacks the api scope; the steward cannot post review comments");
-
-      const other = await reviewDoctor({ env: reviewEnv, review: reviewSettings("someone-else"), api: new FakeGitLabReview() });
-      expect(other).toContain("[fail] gitlab reviewer: GITLAB_TOKEN acts as steward-bot, but review.botUsername is someone-else");
-    });
-
-    it("fails without any GitLab webhook secret", async () => {
-      const output = await reviewDoctor({
-        env: `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\n`,
-        review: reviewSettings("steward-bot"),
-        api: new FakeGitLabReview(),
-      });
-
-      expect(output).toContain("[fail] gitlab webhook secret: set GITLAB_WEBHOOK_SIGNING_TOKEN or GITLAB_WEBHOOK_SECRET");
-    });
-
-    it("fails when a signing token was put in GITLAB_WEBHOOK_SECRET", async () => {
-      const output = await reviewDoctor({
-        env: `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nGITLAB_WEBHOOK_SECRET=whsec_c2lnbmluZw==\n`,
-        review: reviewSettings("steward-bot"),
-        api: new FakeGitLabReview(),
-      });
-
-      expect(output).toContain("[fail] gitlab webhook secret: GITLAB_WEBHOOK_SECRET holds a whsec_ signing token; rename it to GITLAB_WEBHOOK_SIGNING_TOKEN");
-    });
-
-    it("skips the review checks when review is not configured", async () => {
-      const output = await reviewDoctor({ env: reviewEnv, api: new FakeGitLabReview() });
-
-      expect(output).not.toContain("gitlab reviewer");
-      expect(output).not.toContain("gitlab webhook secret");
-    });
-  });
-
   it("fails when a workflow label is missing in Linear", async () => {
     const port = await freeTcpPort();
     const serverPort = await freeTcpPort();

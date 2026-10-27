@@ -3,7 +3,6 @@ import { createClaudeCodeBrain, type QueryImpl } from "../../src/brain/claudeCod
 import type { BrainInput } from "../../src/brain/types.js";
 import { brainResultJsonSchema } from "../../src/core/result.js";
 import { implementResultJsonSchema } from "../../src/implement/result.js";
-import { reviewResultJsonSchema } from "../../src/review/result.js";
 
 const input: BrainInput = {
   workspacePath: "/data/work/42-1",
@@ -99,15 +98,6 @@ describe("claude-code brain", () => {
 
     const captured = queryMock.mock.calls[0]?.[0].options;
     expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: brainResultJsonSchema });
-  });
-
-  it("asks for the review schema when the input is a review", async () => {
-    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
-
-    await createClaudeCodeBrain({ queryImpl: queryMock }).run({ ...input, output: "review" }, onMessage);
-
-    const captured = queryMock.mock.calls[0]?.[0].options;
-    expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: reviewResultJsonSchema });
   });
 
   it("asks for the implement schema when the input is an implement", async () => {

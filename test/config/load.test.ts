@@ -122,24 +122,13 @@ describe("loadConfig", () => {
   });
 });
 
-describe("loadConfig review", () => {
-  it("resolves review.prompt against the config dir", async () => {
+describe("loadConfig after the MR reviewer was removed", () => {
+  it("drops a leftover review block and GitLab webhook secrets", async () => {
     await writeFile(join(dir, "steward.config.ts"), configSource(`review: { botUsername: "steward-bot", prompt: "./prompts/review.md" },`));
-    const { config } = await loadConfig({ cwd: dir });
-    expect(config.review).toEqual({ botUsername: "steward-bot", prompt: join(dir, "prompts", "review.md"), allowForks: false, maxComments: 15 });
-  });
-
-  it("leaves review undefined when it is not configured", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource());
-    const { config } = await loadConfig({ cwd: dir });
-    expect(config.review).toBeUndefined();
-  });
-
-  it("reads the GitLab webhook secrets from .env", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource());
     await writeFile(join(dir, ".env"), "GITLAB_WEBHOOK_SECRET=gl-secret\nGITLAB_WEBHOOK_SIGNING_TOKEN=gl-signing\n");
-    const { secrets } = await loadConfig({ cwd: dir });
-    expect(secrets).toEqual({ GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_WEBHOOK_SIGNING_TOKEN: "gl-signing" });
+    const { config, secrets } = await loadConfig({ cwd: dir });
+    expect("review" in config).toBe(false);
+    expect(secrets).toEqual({});
   });
 });
 

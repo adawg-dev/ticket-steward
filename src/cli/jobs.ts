@@ -41,7 +41,6 @@ const retryMode = (job: Job): string => {
     if (job.pushedAt === null) return `job ${job.id}: publish-only (push ${job.branch ?? "?"} from the bundle, then comment and labels)`;
     return `job ${job.id}: publish-only (${job.branch ?? "?"} already pushed; comment and labels only)`;
   }
-  if (job.kind === "review") return job.reviewResult === null ? `job ${job.id}: full run` : `job ${job.id}: publish-only (review stored)`;
   return job.result === null ? `job ${job.id}: full run` : `job ${job.id}: publish-only (result stored at ${job.resultSha})`;
 };
 
@@ -98,7 +97,7 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
 
   jobs
     .command("retry")
-    .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when a result or review is stored")
+    .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when a result is stored")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
       const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);

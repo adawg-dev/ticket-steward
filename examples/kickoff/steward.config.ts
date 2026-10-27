@@ -21,8 +21,6 @@ export default defineConfig({
   retention: { keptWorktrees: 3, days: 30 },
   prompt: "./prompts/enrich.md",
   server: { port: 3020, publicUrl: "https://steward.example.com" },
-  // Review merge requests that add the steward's GitLab user as a reviewer (docs/ops.md §1.10).
-  // review: { botUsername: "ticket-steward", prompt: "./prompts/review.md" },
   // Label-driven implementation (ready-for-agent). Requires GITLAB_PUSH_TOKEN in .env: a project access token, Developer role, write_repository only.
   // Copy <ticket-steward>/prompts/implement.md to /etc/ticket-steward/prompts/implement.md (steward init does not write it).
   implement: {
@@ -30,7 +28,7 @@ export default defineConfig({
     checks: ["pnpm turbo check-types lint --filter='...[{{baseSha}}]'"],
     commitAuthor: { name: "Ticket Steward", email: "steward@concentrate.ai" },
   },
-  // Parallel jobs, each on fresh local Postgres+TimescaleDB, Redis and RabbitMQ containers (docs/ops.md §1.11).
+  // Parallel jobs, each on fresh local Postgres+TimescaleDB, Redis and RabbitMQ containers (docs/ops.md §1.10).
   // Without this block, put `port: 4100` back in workspace and jobs run one at a time against the overlay's services.
   slots: {
     count: 2,

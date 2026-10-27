@@ -52,16 +52,6 @@ CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
   seen_at TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS repros (
-  issue_id TEXT PRIMARY KEY,
-  identifier TEXT NOT NULL,
-  job_id INTEGER NOT NULL,
-  sha TEXT NOT NULL,
-  recipe TEXT NOT NULL,
-  files_dir TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
 `;
 
 /** Columns added after the first release; applied to databases created before them. */
@@ -79,8 +69,15 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }
 /** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */
 const POST_MIGRATIONS = "CREATE INDEX IF NOT EXISTS jobs_subject_status ON jobs (subject, status);";
 
-/** Tables of the removed Linear OAuth flow; dropped so stored OAuth tokens do not linger on disk. */
-const DROPPED_TABLES = ["tokens", "oauth_state", "flags"];
+/**
+ * Tables of removed features: the Linear OAuth flow (dropped so stored OAuth tokens do not linger on disk) and the MR
+ * reviewer's repro replay.
+ */
+const DROPPED_TABLES = ["tokens", "oauth_state", "flags", "repros"];
+
+/** The MR reviewer is gone, so no worker can run a review job; one left queued or running fails instead. */
+const FAIL_REMOVED_REVIEWS =
+  "UPDATE jobs SET status = 'failed', error = 'MR review was removed', finished_at = ? WHERE kind = 'review' AND status IN ('queued', 'running')";
 
 const TableInfo = z.array(z.object({ name: z.string() }));
 
@@ -106,6 +103,7 @@ export const openDatabase = (dataDir: string): Database => {
   db.pragma("busy_timeout = 5000");
   db.exec(MIGRATIONS);
   addMissingColumns(db);
+  db.prepare(FAIL_REMOVED_REVIEWS).run(nowIso());
   db.exec(POST_MIGRATIONS);
   dropRemovedTables(db);
   return db;

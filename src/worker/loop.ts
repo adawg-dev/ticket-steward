@@ -5,7 +5,6 @@ import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/p
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
-import { publishReviewOnly, runReview } from "../review/pipeline.js";
 import { unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 
@@ -16,8 +15,6 @@ export interface WorkerOptions {
   sweepMs?: number;
   runJob?: typeof runJob;
   publishOnly?: typeof publishOnly;
-  runReview?: typeof runReview;
-  publishReviewOnly?: typeof publishReviewOnly;
   runImplement?: typeof runImplement;
   publishImplementOnly?: typeof publishImplementOnly;
 }
@@ -82,8 +79,6 @@ class Worker {
   private readonly backoffMs: number[];
   private readonly execute: typeof runJob;
   private readonly republish: typeof publishOnly;
-  private readonly review: typeof runReview;
-  private readonly republishReview: typeof publishReviewOnly;
   private readonly implement: typeof runImplement;
   private readonly republishImplement: typeof publishImplementOnly;
   private readonly abort = new AbortController();
@@ -105,8 +100,6 @@ class Worker {
     this.backoffMs = deps.backoffMs ?? DEFAULT_BACKOFF_MS;
     this.execute = deps.runJob ?? runJob;
     this.republish = deps.publishOnly ?? publishOnly;
-    this.review = deps.runReview ?? runReview;
-    this.republishReview = deps.publishReviewOnly ?? publishReviewOnly;
     this.implement = deps.runImplement ?? runImplement;
     this.republishImplement = deps.publishImplementOnly ?? publishImplementOnly;
     this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
@@ -218,7 +211,6 @@ class Worker {
     if (unreadable !== null) return unreadable;
     try {
       if (job.kind === "implement") return job.implementResult === null ? await this.implement(ctx, deps) : await this.republishImplement(ctx, deps);
-      if (job.kind === "review") return job.reviewResult === null ? await this.review(ctx, deps) : await this.republishReview(ctx, deps);
       return job.result === null ? await this.execute(ctx, deps) : await this.republish(ctx, deps);
     } catch (err) {
       return { status: "failed", error: errorMessage(err), retryable: false };

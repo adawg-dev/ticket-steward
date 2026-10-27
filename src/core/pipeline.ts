@@ -13,7 +13,7 @@ import { CLOSED_STATE_TYPES } from "./intake.js";
 import { renderPrompt } from "./prompt.js";
 import type { Redactor } from "./redact.js";
 import { alreadyCommented, buildTriageComment, buildEnrichmentSection, replaceSection } from "./render.js";
-import { captureReproFiles, isBugTicket, normalizeRepro, reproFilesDir } from "./repro.js";
+import { isBugTicket, normalizeRepro } from "./repro.js";
 import { validateResult, type Repro, type StoredBrainResult } from "./result.js";
 import type { JobOutcome, RunContext } from "./types.js";
 import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, type JobPaths } from "./workspace.js";
@@ -101,7 +101,7 @@ const uploadAttachments = async (deps: PipelineDeps, artifactsDir: string, resul
   return { uploaded, notes: notes.map((note) => deps.redactor.redact(note)) };
 };
 
-const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainResult, sha: string, artifactsDir: string, extraNotes: string[] = []): Promise<JobOutcome> => {
+const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainResult, sha: string, artifactsDir: string): Promise<JobOutcome> => {
   const { tracker, config, codehost } = deps;
   const result = redactResult(stored, deps.redactor);
   let comments: ReadonlyArray<{ body: string }> = [];
@@ -112,7 +112,7 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainR
     if (closed !== null) return { status: "failed", error: closed.message, retryable: false };
     comments = latest.comments;
     const { uploaded, notes } = await uploadAttachments(deps, artifactsDir, result);
-    const section = buildEnrichmentSection(result, uploaded, [...notes, ...extraNotes.map((note) => deps.redactor.redact(note))], {
+    const section = buildEnrichmentSection(result, uploaded, notes, {
       now: deps.now(),
       sha,
       branch: config.workspace.baseBranch,
@@ -127,7 +127,7 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainR
   }
   const labels = config.tracker.labels;
   // A legacy stored result (no triage) has no verdict to swap to.
-  const swap = ctx.trigger.kind !== "mr.review" && ctx.trigger.action === "triage" && labels !== undefined && result.triage !== null ? { labels, triage: result.triage } : null;
+  const swap = ctx.trigger.action === "triage" && labels !== undefined && result.triage !== null ? { labels, triage: result.triage } : null;
   let warning: string | undefined;
   try {
     const body = buildTriageComment(result, ctx.jobId);
@@ -172,18 +172,9 @@ const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktre
   if (!run.ok) return { status: "failed", error: run.error ?? "brain run failed", retryable: run.error === INTERRUPTED_ERROR };
   const validated = validateResult(run.output);
   if (!validated.ok) return { status: "failed", error: validated.error, retryable: false };
-  let result = normalizeRepro(validated.result, prepared.isBug);
-  const recipeNotes: string[] = [];
-  if (!ctx.dryRun && result.repro !== null) {
-    const filesDir = reproFilesDir(config.dataDir, ctx.jobId);
-    const { saved, notes } = await captureReproFiles(worktree.path, result.repro.files, filesDir);
-    recipeNotes.push(...notes);
-    const recipe: Repro = { ...result.repro, files: saved };
-    result = { ...result, repro: recipe };
-    deps.stores.repros.upsert({ issueId: ctx.issueId, identifier: ctx.identifier, jobId: ctx.jobId, sha: worktree.sha, recipe, filesDir });
-  }
+  const result = normalizeRepro(validated.result, prepared.isBug);
   if (!ctx.dryRun) deps.stores.jobs.saveResult(ctx.jobId, result, worktree.sha);
-  return publish(ctx, deps, result, worktree.sha, paths.artifactsDir, recipeNotes);
+  return publish(ctx, deps, result, worktree.sha, paths.artifactsDir);
 };
 
 export const runJob = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {

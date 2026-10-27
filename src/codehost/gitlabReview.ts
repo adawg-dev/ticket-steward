@@ -188,6 +188,6 @@ export class GitLabReviewClient implements GitLabReviewApi {
 
 export const createGitLabReview = (config: StewardConfig, secrets: Secrets): GitLabReviewApi | undefined => {
   const token = secrets.GITLAB_TOKEN;
-  if (config.review === undefined || config.codehost.kind !== "gitlab" || token === undefined || token === "") return undefined;
+  if (config.codehost.kind !== "gitlab" || token === undefined || token === "") return undefined;
   return new GitLabReviewClient({ baseUrl: config.codehost.baseUrl, token });
 };

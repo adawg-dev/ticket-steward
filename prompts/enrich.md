@@ -46,11 +46,11 @@ Choose the most direct method that shows the bug:
 - `http`: call the local app with curl or a similar one-liner;
 - `browser`: drive the local app with the Playwright tools.
 
-Record exactly what you did in `repro`, because the steward replays it later on the merge request that fixes the bug, with no other context:
+Record exactly what you did in `repro`, so that someone with no other context can repeat it from the ticket:
 
 - `command`: the single shell command, run from `{{workspacePath}}`, that shows the bug (null only for `browser`);
 - `steps`: numbered, concrete steps (routes, personas, inputs, clicks), enough for someone else to repeat them;
-- `files`: every file you created for the reproduction, as paths relative to `{{workspacePath}}` (the steward saves them with the recipe; leave them in place);
+- `files`: every file you created for the reproduction, as paths relative to `{{workspacePath}}` (the recipe names them; leave them in place);
 - `expected` and `observed`: what should happen and what actually happened, quoting the decisive output.
 
 Set `status` to `reproduced` only if you saw the bug happen yourself; otherwise `not_reproduced`, and say why in `observed`. Do not run the full test suite, lint or typecheck.

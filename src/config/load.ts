@@ -14,8 +14,6 @@ export const SecretsSchema = z.object({
   MIRROR_TOKEN: z.string().optional(),
   MIRROR_USERNAME: z.string().optional(),
   GITLAB_TOKEN: z.string().optional(),
-  GITLAB_WEBHOOK_SECRET: z.string().optional(),
-  GITLAB_WEBHOOK_SIGNING_TOKEN: z.string().optional(),
   GITLAB_PUSH_TOKEN: z.string().optional(),
   GITHUB_TOKEN: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
@@ -67,7 +65,6 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string }): P
         ? {}
         : { skillsDir: resolveFromConfigDir(configDir, parsed.workspace.skillsDir) }),
     },
-    ...(parsed.review === undefined ? {} : { review: { ...parsed.review, prompt: resolveFromConfigDir(configDir, parsed.review.prompt) } }),
     ...(parsed.implement === undefined ? {} : { implement: { ...parsed.implement, prompt: resolveFromConfigDir(configDir, parsed.implement.prompt) } }),
   };
   const secrets = await readSecrets(configDir);

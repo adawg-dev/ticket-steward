@@ -3,7 +3,7 @@ import { jobKindFor, shouldEnqueue } from "../core/intake.js";
 import type { RunContext } from "../core/types.js";
 import { runImplement } from "../implement/pipeline.js";
 import { ReadOnlyTracker } from "../tracker/readOnly.js";
-import type { IssueTrigger } from "../tracker/types.js";
+import type { TriggerEvent } from "../tracker/types.js";
 import { fail, loadFromProgram, println, type CliContext } from "./context.js";
 import { reportOutcome, runInline, tailJob, withRunLock } from "./inline.js";
 import { answers, localHealthUrl } from "./probe.js";
@@ -22,7 +22,7 @@ export const registerImplement = (program: Command, ctx: CliContext): void => {
       const { config } = runtime.loaded;
       if (config.implement === undefined) return fail(ctx, "implement is not configured (add an implement block and GITLAB_PUSH_TOKEN)");
       const { id, identifier, teamKey } = await runtime.tracker.resolveIssueId(key);
-      const event: IssueTrigger = { kind: "cli", issueId: id, identifier, teamKey, action: "implement" };
+      const event: TriggerEvent = { kind: "cli", issueId: id, identifier, teamKey, action: "implement" };
       const { jobs } = runtime.stores;
       const kind = jobKindFor(event);
       const decision = shouldEnqueue({

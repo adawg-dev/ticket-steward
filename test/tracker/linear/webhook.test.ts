@@ -104,7 +104,7 @@ describe("parseEvent", () => {
     const opts = { labels: { triage: "needs-triage", implement: "ready-for-agent" } };
     const TRIAGE = { id: "label-triage", name: "needs-triage" };
     const AGENT = { id: "label-agent", name: "ready-for-agent" };
-    const actionOf = (event: ReturnType<typeof parseEvent>) => (event !== null && event.kind !== "mr.review" ? event.action : undefined);
+    const actionOf = (event: ReturnType<typeof parseEvent>) => (event === null ? undefined : event.action);
     const withLabels = (labels: Array<{ id: string; name: string }>) => ({ ...issueCreateBody, data: { ...issueCreateBody.data, labels } });
 
     it("maps a create carrying needs-triage to issue.created with action triage", () => {

@@ -1,8 +1,5 @@
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { captureReproFiles, isBugTicket, normalizeRepro, renderReproMarkdown, restoreReproFiles, REPRO_MAX_BYTES } from "../../src/core/repro.js";
+import { isBugTicket, normalizeRepro, renderReproMarkdown } from "../../src/core/repro.js";
 import type { BrainResult } from "../../src/core/result.js";
-import { removeDir, tmpDir } from "../workspace/helpers.js";
 
 const result: BrainResult = {
   template: { matched: null, conforms: true, missing: [] },
@@ -33,68 +30,6 @@ describe("normalizeRepro", () => {
 
   it("drops any recipe for non-bugs", () => {
     expect(normalizeRepro(result, false).repro).toBeNull();
-  });
-});
-
-describe("captureReproFiles", () => {
-  let root: string;
-  let worktree: string;
-  let dest: string;
-
-  beforeEach(async () => {
-    root = await tmpDir();
-    worktree = join(root, "wt");
-    dest = join(root, "repros", "7");
-    await mkdir(join(worktree, "apps/api/test"), { recursive: true });
-    await writeFile(join(worktree, "apps/api/test/repro.test.ts"), "it('repro', () => {});\n");
-  });
-
-  afterEach(() => removeDir(root));
-
-  it("copies listed files under the destination", async () => {
-    const { saved, notes } = await captureReproFiles(worktree, ["apps/api/test/repro.test.ts"], dest);
-    expect(saved).toEqual(["apps/api/test/repro.test.ts"]);
-    expect(notes).toEqual([]);
-    expect(await readFile(join(dest, "apps/api/test/repro.test.ts"), "utf8")).toContain("repro");
-  });
-
-  it("refuses paths outside the worktree", async () => {
-    await writeFile(join(root, "secret.txt"), "nope");
-    await symlink(join(root, "secret.txt"), join(worktree, "link.txt"));
-    const { saved, notes } = await captureReproFiles(worktree, ["../secret.txt", "/etc/hostname", "link.txt", "apps/api/test/repro.test.ts"], dest);
-    expect(saved).toEqual(["apps/api/test/repro.test.ts"]);
-    expect(notes).toEqual([
-      "Recipe file `../secret.txt` not saved: the path must stay inside the workspace.",
-      "Recipe file `/etc/hostname` not saved: the path must stay inside the workspace.",
-      "Recipe file `link.txt` not saved: the path must stay inside the workspace.",
-    ]);
-  });
-
-  it("refuses missing, oversized and surplus files", async () => {
-    await writeFile(join(worktree, "big.bin"), Buffer.alloc(REPRO_MAX_BYTES + 1));
-    const many = Array.from({ length: 21 }, (_, i) => `f${i}.txt`);
-    for (const file of many) await writeFile(join(worktree, file), "x");
-    const { saved, notes } = await captureReproFiles(worktree, ["missing.ts", "big.bin", ...many], dest);
-    expect(saved).toHaveLength(20);
-    expect(notes).toEqual([
-      "Recipe file `missing.ts` not saved: file not found.",
-      "Recipe file `big.bin` not saved: larger than 1 MB.",
-      "Recipe file `f20.txt` not saved: more than 20 files.",
-    ]);
-  });
-});
-
-describe("restoreReproFiles", () => {
-  it("puts saved files back at their workspace paths", async () => {
-    const root = await tmpDir();
-    const filesDir = join(root, "saved");
-    await mkdir(join(filesDir, "apps/api/test"), { recursive: true });
-    await writeFile(join(filesDir, "apps/api/test/repro.test.ts"), "x");
-    const worktree = join(root, "wt");
-    await mkdir(worktree);
-    expect(await restoreReproFiles(filesDir, ["apps/api/test/repro.test.ts", "../escape.ts"], worktree)).toEqual(["apps/api/test/repro.test.ts"]);
-    expect(await readFile(join(worktree, "apps/api/test/repro.test.ts"), "utf8")).toBe("x");
-    await removeDir(root);
   });
 });
 

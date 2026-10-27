@@ -1,13 +1,11 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
-import { parseMergeRequestEvent, verifyGitlabWebhook } from "../codehost/gitlabWebhook.js";
 import { jobKindFor, shouldEnqueue, type IntakeDecision } from "../core/intake.js";
 import { logger } from "../log.js";
 import { transaction, type Job, type Stores } from "../store/index.js";
-import { reviewSubject } from "../store/jobs.js";
 import { parseEvent, verifySignature } from "../tracker/linear/webhook.js";
-import type { ReviewTrigger, Tracker, TriggerEvent } from "../tracker/types.js";
+import type { Tracker, TriggerEvent } from "../tracker/types.js";
 import type { WorkerState } from "../worker/index.js";
 
 export interface ServerDeps {
@@ -95,65 +93,11 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
     // ready-for-agent triggers only with an implement block; intake's "implement is not configured" skip stays as a backstop.
     const triggers = labels === undefined ? undefined : { triage: labels.triage, ...(deps.config.implement === undefined ? {} : { implement: labels.implement }) };
     const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body, { labels: triggers });
-    if (event === null || event.kind === "cli" || event.kind === "mr.review") return { ok: true, action: "ignored" };
+    if (event === null || event.kind === "cli") return { ok: true, action: "ignored" };
 
     const decision = intake(deps, event);
     logger.info({ delivery: event.deliveryId, kind: event.kind, identifier: event.identifier, action: decision.action }, "webhook received");
     return { ok: true, action: decision.action };
-  });
-};
-
-type ReviewIntake = "enqueue" | "superseded" | "duplicate";
-
-const reviewIntake = (deps: ServerDeps, trigger: ReviewTrigger): ReviewIntake =>
-  transaction(deps.stores.db, () => {
-    const { jobs, deliveries } = deps.stores;
-    if (!deliveries.markSeen(trigger.deliveryId)) return "duplicate";
-    const queued = jobs.findQueuedBySubject(reviewSubject(trigger.projectId, trigger.mrIid));
-    if (queued !== null && jobs.replaceTrigger(queued.id, trigger)) return "superseded";
-    jobs.enqueue(trigger);
-    return "enqueue";
-  });
-
-const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
-  app.post<{ Body: string }>("/webhooks/gitlab", async (request, reply) => {
-    const review = deps.config.review;
-    if (review === undefined) return reply.code(404).send({ ok: false });
-    const headers = {
-      token: header(request.headers["x-gitlab-token"]),
-      id: header(request.headers["webhook-id"]),
-      timestamp: header(request.headers["webhook-timestamp"]),
-      signature: header(request.headers["webhook-signature"]),
-    };
-    const secrets = { secret: deps.secrets.GITLAB_WEBHOOK_SECRET, signingToken: deps.secrets.GITLAB_WEBHOOK_SIGNING_TOKEN };
-    if (!verifyGitlabWebhook(request.body, headers, secrets, Math.floor(Date.now() / 1000))) {
-      // Which auth style arrived versus which is configured; never the values themselves.
-      const auth = {
-        sentToken: headers.token !== undefined,
-        sentSignature: headers.signature !== undefined,
-        hasSecret: (secrets.secret ?? "") !== "",
-        hasSigningToken: (secrets.signingToken ?? "") !== "",
-      };
-      logger.warn({ event: header(request.headers["x-gitlab-event"]), ...auth }, "gitlab webhook rejected");
-      return reply.code(401).send({ ok: false });
-    }
-    if (header(request.headers["x-gitlab-event"]) !== "Merge Request Hook") return { ok: true, action: "ignored" };
-    const body = parseJson(request.body);
-    if (body === undefined) return reply.code(400).send({ ok: false });
-    const delivery = header(request.headers["webhook-id"]) ?? header(request.headers["idempotency-key"]);
-    const parsed = parseMergeRequestEvent(body, {
-      deliveryId: delivery === undefined ? undefined : `gitlab:${delivery}`,
-      botUsername: review.botUsername,
-      teams: deps.config.tracker.teams,
-      allowForks: review.allowForks,
-    });
-    if (!parsed.ok) {
-      logger.info({ reason: parsed.reason }, "gitlab webhook ignored");
-      return { ok: true, action: "ignored", reason: parsed.reason };
-    }
-    const action = reviewIntake(deps, parsed.trigger);
-    logger.info({ delivery: parsed.trigger.deliveryId, mr: parsed.trigger.mrIid, key: parsed.trigger.linearKey, reason: parsed.trigger.reason, action }, "gitlab webhook received");
-    return { ok: true, action };
   });
 };
 
@@ -168,7 +112,6 @@ export const buildServer = (deps: ServerDeps): FastifyInstance => {
   const app = Fastify();
   app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, body, done) => done(null, body));
   registerWebhook(app, deps);
-  registerGitlabWebhook(app, deps);
   registerHealth(app, deps);
   return app;
 };

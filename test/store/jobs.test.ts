@@ -1,7 +1,6 @@
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import { openStores, type Stores } from "../../src/store/index.js";
-import { reviewSubject } from "../../src/store/jobs.js";
-import type { ReviewTrigger, TriggerEvent } from "../../src/tracker/types.js";
+import type { TriggerEvent } from "../../src/tracker/types.js";
 import { brainResult, createdEvent, freshDataDir, secondEvent } from "./helpers.js";
 
 let stores: Stores;
@@ -29,6 +28,31 @@ describe("JobStore", () => {
     expect(stores.jobs.get(good)?.unreadable).toEqual([]);
     expect(stores.jobs.claimNext()?.id).toBe(good);
     expect(stores.jobs.claimNext()?.unreadable).toEqual(["result", "implement_result"]);
+  });
+
+  it("fails review jobs left from before the reviewer was removed", () => {
+    const dir = freshDataDir();
+    const first = openStores(dir);
+    const insert = first.db.prepare(
+      "INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at, kind, subject) VALUES (?, ?, ?, ?, ?, ?, 'review', ?)",
+    );
+    const trigger = JSON.stringify({ kind: "mr.review", projectId: 42, mrIid: 7, headSha: "a".repeat(40), linearKey: "API-1", teamKey: "API" });
+    const queued = Number(insert.run("API-1", "API-1", "API", trigger, "queued", new Date().toISOString(), "mr:42!7").lastInsertRowid);
+    const running = Number(insert.run("API-1", "API-1", "API", trigger, "running", new Date().toISOString(), "mr:42!7").lastInsertRowid);
+    const done = Number(insert.run("API-1", "API-1", "API", trigger, "succeeded", new Date().toISOString(), "mr:42!7").lastInsertRowid);
+    first.db.exec("CREATE TABLE repros (issue_id TEXT PRIMARY KEY)");
+    first.db.close();
+
+    const reopened = openStores(dir);
+    try {
+      expect(reopened.jobs.get(queued)).toMatchObject({ status: "failed", error: "MR review was removed", finishedAt: expect.any(String) });
+      expect(reopened.jobs.get(running)).toMatchObject({ status: "failed", error: "MR review was removed" });
+      expect(reopened.jobs.get(done)).toMatchObject({ status: "succeeded", error: null });
+      expect(reopened.jobs.claimNext()).toBeNull();
+      expect(reopened.db.prepare("SELECT name FROM sqlite_master WHERE name = 'repros'").all()).toEqual([]);
+    } finally {
+      reopened.db.close();
+    }
   });
 
   it("enqueue then get returns a queued job carrying the trigger", () => {
@@ -235,81 +259,6 @@ describe("JobStore", () => {
   });
 });
 
-const review = (headSha: string, deliveryId = `d-${headSha}`): ReviewTrigger => ({
-  kind: "mr.review",
-  deliveryId,
-  projectId: 42,
-  projectPath: "acme/repo",
-  mrIid: 7,
-  mrUrl: "https://gitlab.example/acme/repo/-/merge_requests/7",
-  headSha,
-  linearKey: "API-1",
-  teamKey: "API",
-  reason: "push",
-});
-
-describe("review jobs", () => {
-  it("stores kind and subject", () => {
-    const id = stores.jobs.enqueue(review("a".repeat(40)));
-    expect(stores.jobs.get(id)).toMatchObject({ kind: "review", subject: "mr:42!7", issueId: "API-1", identifier: "API-1", teamKey: "API" });
-    expect(stores.jobs.get(stores.jobs.enqueue(createdEvent))).toMatchObject({ kind: "enrich", subject: null });
-  });
-
-  it("keeps enrichment dedupe blind to review jobs", () => {
-    const id = stores.jobs.enqueue({ ...review("a".repeat(40)), linearKey: "issue-1" });
-    stores.jobs.claimById(id);
-    stores.jobs.finish(id, { status: "succeeded" });
-    expect(stores.jobs.hasSucceeded("issue-1")).toBe(false);
-    stores.jobs.enqueue({ ...review("b".repeat(40)), linearKey: "issue-1" });
-    expect(stores.jobs.findQueued("issue-1")).toBeNull();
-  });
-
-  it("finds a queued review by subject and replaces its trigger", () => {
-    const id = stores.jobs.enqueue(review("a".repeat(40)));
-    expect(stores.jobs.findQueuedBySubject(reviewSubject(42, 7))?.id).toBe(id);
-    expect(stores.jobs.replaceTrigger(id, review("b".repeat(40)))).toBe(true);
-    const job = stores.jobs.get(id);
-    expect(job?.trigger.kind === "mr.review" ? job.trigger.headSha : null).toBe("b".repeat(40));
-  });
-
-  it("resets a retrying review when a newer push replaces its trigger", () => {
-    const id = stores.jobs.enqueue(review("a".repeat(40)));
-    stores.jobs.claimById(id);
-    stores.jobs.claimById(id);
-    stores.jobs.saveReviewResult(id, {
-      result: { verdict: "not_fixed", rerun: { observed: "still 500", deviations: null }, summary: "s", comments: [], confidence: "medium" },
-      diffRefs: { baseSha: "1".repeat(40), startSha: "1".repeat(40), headSha: "a".repeat(40) },
-    });
-    stores.jobs.scheduleRetry(id, new Date(Date.now() + 60_000), "GitLab 502");
-    expect(stores.jobs.findQueuedBySubject(reviewSubject(42, 7))?.id).toBe(id);
-
-    expect(stores.jobs.replaceTrigger(id, review("b".repeat(40)))).toBe(true);
-
-    const job = stores.jobs.get(id);
-    expect(job?.trigger.kind === "mr.review" ? job.trigger.headSha : null).toBe("b".repeat(40));
-    expect(job).toMatchObject({ status: "queued", reviewResult: null, attempts: 0, notBefore: null, error: null });
-    expect(stores.jobs.claimNext()?.id).toBe(id);
-  });
-
-  it("does not replace the trigger of a running review", () => {
-    const id = stores.jobs.enqueue(review("a".repeat(40)));
-    stores.jobs.claimById(id);
-    expect(stores.jobs.findQueuedBySubject(reviewSubject(42, 7))).toBeNull();
-    expect(stores.jobs.replaceTrigger(id, review("b".repeat(40)))).toBe(false);
-  });
-
-  it("stores and reads back a review result", () => {
-    const id = stores.jobs.enqueue(review("a".repeat(40)));
-    const stored = {
-      result: { verdict: "not_fixed" as const, rerun: { observed: "still 500", deviations: null }, summary: "s", comments: [], confidence: "medium" as const },
-      diffRefs: { baseSha: "1".repeat(40), startSha: "1".repeat(40), headSha: "a".repeat(40) },
-    };
-    stores.jobs.saveReviewResult(id, stored);
-    expect(stores.jobs.get(id)?.reviewResult).toEqual(stored);
-    expect(stores.jobs.get(id)?.result).toBeNull();
-  });
-});
-
 describe("implement jobs", () => {
   const implementEvent: TriggerEvent = {
     kind: "issue.labeled",
@@ -383,17 +332,18 @@ describe("claimNext with running jobs", () => {
     expect(stores.jobs.claimNext()?.id).toBe(implement);
   });
 
-  it("skips a review whose merge request has a running review, but not an issue job of the same key", () => {
-    const first = stores.jobs.enqueue(review("a".repeat(40)));
-    expect(stores.jobs.claimNext()?.id).toBe(first);
-    const second = stores.jobs.enqueue(review("b".repeat(40)));
-    const issueJob = stores.jobs.enqueue({ kind: "cli", issueId: "API-1", identifier: "API-1", teamKey: "API" });
+  it("skips a job whose subject has a running job, even on another ticket", () => {
+    const running = stores.jobs.enqueue(createdEvent);
+    const sameSubject = stores.jobs.enqueue(secondEvent);
+    const noSubject = stores.jobs.enqueue({ kind: "cli", issueId: "issue-3", identifier: "API-3", teamKey: "API" });
+    stores.db.prepare("UPDATE jobs SET subject = 'mr:42!7' WHERE id IN (?, ?)").run(running, sameSubject);
+    expect(stores.jobs.claimNext()?.id).toBe(running);
 
-    expect(stores.jobs.claimNext()?.id).toBe(issueJob);
+    expect(stores.jobs.claimNext()?.id).toBe(noSubject);
     expect(stores.jobs.claimNext()).toBeNull();
 
-    stores.jobs.finish(first, { status: "succeeded" });
-    expect(stores.jobs.claimNext()?.id).toBe(second);
+    stores.jobs.finish(running, { status: "succeeded" });
+    expect(stores.jobs.claimNext()?.id).toBe(sameSubject);
   });
 
   it("requeueInterruptedJob requeues only that job and closes only its attempt", () => {

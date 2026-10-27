@@ -6,7 +6,7 @@ export interface McpServerSpec {
   env: Record<string, string>;
 }
 
-export type BrainOutput = "enrich" | "review" | "implement";
+export type BrainOutput = "enrich" | "implement";
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 

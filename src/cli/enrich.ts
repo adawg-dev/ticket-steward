@@ -3,7 +3,7 @@ import { shouldEnqueue, STEWARD_BEGIN, STEWARD_END } from "../core/intake.js";
 import { runJob } from "../core/pipeline.js";
 import type { RunContext } from "../core/types.js";
 import { ReadOnlyTracker, type RecordedWrite } from "../tracker/readOnly.js";
-import type { IssueTrigger } from "../tracker/types.js";
+import type { TriggerEvent } from "../tracker/types.js";
 import { fail, loadFromProgram, println, type CliContext } from "./context.js";
 import { reportOutcome, runInline, tailJob, withRunLock } from "./inline.js";
 import { answers, localHealthUrl } from "./probe.js";
@@ -23,7 +23,7 @@ const describeWrite = ({ method, args }: RecordedWrite): string => {
   return `${method}(${target}) ${payload.length} chars`;
 };
 
-const cliContext = (event: IssueTrigger, jobId: number, attempt: number, dryRun: boolean): RunContext => ({
+const cliContext = (event: TriggerEvent, jobId: number, attempt: number, dryRun: boolean): RunContext => ({
   jobId,
   attempt,
   issueId: event.issueId,
@@ -34,7 +34,7 @@ const cliContext = (event: IssueTrigger, jobId: number, attempt: number, dryRun:
 });
 
 /** Runs the pipeline against a recording tracker under run.lock, so it never overlaps a live job. */
-const dryRun = async (runtime: Runtime, event: IssueTrigger, ctx: CliContext): Promise<void> => {
+const dryRun = async (runtime: Runtime, event: TriggerEvent, ctx: CliContext): Promise<void> => {
   const tracker = new ReadOnlyTracker(runtime.tracker);
   println(ctx, `dry run for ${event.identifier} (${event.issueId}); nothing will be written`);
   const outcome = await withRunLock(runtime, ctx, () => runJob(cliContext(event, 0, 1, true), { ...runtime.deps, tracker }));
@@ -54,7 +54,7 @@ export const registerEnrich = (program: Command, ctx: CliContext): void => {
       const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);
       const { config } = runtime.loaded;
       const { id, identifier, teamKey } = await runtime.tracker.resolveIssueId(key);
-      const event: IssueTrigger = { kind: "cli", issueId: id, identifier, teamKey };
+      const event: TriggerEvent = { kind: "cli", issueId: id, identifier, teamKey };
       const { jobs } = runtime.stores;
       const decision = shouldEnqueue({
         event,

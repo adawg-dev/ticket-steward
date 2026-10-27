@@ -9,7 +9,7 @@ import type { RunContext } from "../../src/core/types.js";
 import type { ImplementResult } from "../../src/implement/result.js";
 import { publishImplementOnly, runImplement } from "../../src/implement/pipeline.js";
 import { openStores, type Stores } from "../../src/store/index.js";
-import type { IssueTrigger, TicketBundle } from "../../src/tracker/types.js";
+import type { TriggerEvent, TicketBundle } from "../../src/tracker/types.js";
 import { SlotClient } from "../../src/workspace/slots.js";
 import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
@@ -39,7 +39,7 @@ const issue: TicketBundle = {
   templates: [],
 };
 
-const trigger: IssueTrigger = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: issue.description, stateType: "unstarted", action: "implement" };
+const trigger: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: issue.description, stateType: "unstarted", action: "implement" };
 
 const implemented: ImplementResult = {
   outcome: "implemented",
@@ -105,7 +105,7 @@ const makeDeps = (runBrain: PipelineDeps["runBrain"], config: StewardConfig = ma
   ...(runBrain === undefined ? {} : { runBrain }),
 });
 
-const claim = (event: IssueTrigger = trigger): RunContext => {
+const claim = (event: TriggerEvent = trigger): RunContext => {
   const jobId = stores.jobs.enqueue(event);
   stores.jobs.claimById(jobId);
   stores.attempts.start(jobId);

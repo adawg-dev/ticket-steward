@@ -2,13 +2,10 @@ import { jobKindFor, type IssueJobKind } from "../core/intake.js";
 import { StoredBrainResultSchema, type BrainResult, type StoredBrainResult } from "../core/result.js";
 import type { JobOutcome } from "../core/types.js";
 import { StoredImplementSchema, type StoredImplement } from "../implement/result.js";
-import { StoredReviewSchema, type StoredReview } from "../review/result.js";
-import type { ReviewTrigger, TriggerEvent } from "../tracker/types.js";
+import type { TriggerEvent } from "../tracker/types.js";
 import { nowIso, type Database } from "./db.js";
 
-export type JobKind = "enrich" | "review" | "implement";
-
-export const reviewSubject = (projectId: number, mrIid: number): string => `mr:${projectId}!${mrIid}`;
+export type JobKind = "enrich" | "implement";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "publish_failed" | "skipped";
 
@@ -24,7 +21,6 @@ export interface Job {
   attempts: number;
   result: StoredBrainResult | null;
   resultSha: string | null;
-  reviewResult: StoredReview | null;
   implementResult: StoredImplement | null;
   branch: string | null;
   commitSha: string | null;
@@ -41,7 +37,7 @@ export interface Job {
   unreadable: StoredColumn[];
 }
 
-export type StoredColumn = "trigger" | "result" | "review_result" | "implement_result";
+export type StoredColumn = "trigger" | "result" | "implement_result";
 
 interface JobRow {
   id: number;
@@ -55,7 +51,6 @@ interface JobRow {
   attempts: number;
   result: string | null;
   result_sha: string | null;
-  review_result: string | null;
   implement_result: string | null;
   branch: string | null;
   commit_sha: string | null;
@@ -85,7 +80,7 @@ const readStored = <T>(raw: string | null, column: StoredColumn, schema: StoredS
   return null;
 };
 
-const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "mr.review"]);
+const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli"]);
 
 /** The stored trigger, or (noted in `unreadable`) a stand-in from the row's own columns when it is not a trigger object. */
 const readTrigger = (row: JobRow, unreadable: StoredColumn[]): TriggerEvent => {
@@ -115,7 +110,6 @@ const toJob = (row: JobRow): Job => {
     attempts: row.attempts,
     result: readStored(row.result, "result", StoredBrainResultSchema, unreadable),
     resultSha: row.result_sha,
-    reviewResult: readStored(row.review_result, "review_result", StoredReviewSchema, unreadable),
     implementResult: readStored(row.implement_result, "implement_result", StoredImplementSchema, unreadable),
     branch: row.branch,
     commitSha: row.commit_sha,
@@ -143,24 +137,23 @@ interface JobColumns {
   subject: string | null;
 }
 
-/** A review job is keyed by its Linear key until the worker resolves it; its subject names the MR. */
-const jobColumns = (event: TriggerEvent): JobColumns =>
-  event.kind === "mr.review"
-    ? { issueId: event.linearKey, identifier: event.linearKey, teamKey: event.teamKey, kind: "review", subject: reviewSubject(event.projectId, event.mrIid) }
-    : { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, kind: jobKindFor(event), subject: null };
+const jobColumns = (event: TriggerEvent): JobColumns => ({
+  issueId: event.issueId,
+  identifier: event.identifier,
+  teamKey: event.teamKey,
+  kind: jobKindFor(event),
+  subject: null,
+});
 
 const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?";
 
 export class JobStore {
   private readonly insert;
   private readonly selectQueued;
-  private readonly selectQueuedBySubject;
-  private readonly swapTrigger;
   private readonly existsSucceeded;
   private readonly claimOldest;
   private readonly claimOne;
   private readonly storeResult;
-  private readonly storeReview;
   private readonly storeImplement;
   private readonly storeCommit;
   private readonly storePushed;
@@ -190,30 +183,21 @@ export class JobStore {
       // A handed-back implement job also finishes succeeded; only one that pushed a branch implemented the ticket.
       "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded' AND kind = ? AND (kind <> 'implement' OR pushed_at IS NOT NULL)) AS found",
     );
-    this.selectQueuedBySubject = db.prepare<[string], JobRow>(
-      "SELECT * FROM jobs WHERE subject = ? AND status = 'queued' ORDER BY id LIMIT 1",
-    );
-    this.swapTrigger = db.prepare<[string, string, string, string, number]>(
-      `UPDATE jobs SET trigger = ?, issue_id = ?, identifier = ?, team_key = ?,
-         review_result = NULL, attempts = 0, not_before = NULL, error = NULL
-       WHERE id = ? AND status = 'queued'`,
-    );
-    // The oldest due job whose ticket (enrich, implement: same issue_id) or merge request (review: same subject) has no
-    // running job. One statement, and better-sqlite3 is synchronous, so two loops can never claim the same job.
+    // The oldest due job with no running job on the same ticket (issue_id) or on the same non-null subject. One statement,
+    // and better-sqlite3 is synchronous, so two loops can never claim the same job.
     this.claimOldest = db.prepare<[string, string], JobRow>(
       `${CLAIM} WHERE id = (
          SELECT q.id FROM jobs q
          WHERE q.status = 'queued' AND (q.not_before IS NULL OR q.not_before <= ?)
            AND NOT EXISTS (
              SELECT 1 FROM jobs r WHERE r.status = 'running' AND (
-               (q.kind <> 'review' AND r.kind <> 'review' AND r.issue_id = q.issue_id)
+               r.issue_id = q.issue_id
                OR (q.subject IS NOT NULL AND r.subject = q.subject)))
          ORDER BY q.id LIMIT 1)
        RETURNING *`,
     );
     this.claimOne = db.prepare<[string, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
     this.storeResult = db.prepare<[string, string, number]>("UPDATE jobs SET result = ?, result_sha = ? WHERE id = ?");
-    this.storeReview = db.prepare<[string, number]>("UPDATE jobs SET review_result = ? WHERE id = ?");
     this.storeImplement = db.prepare<[string, number]>("UPDATE jobs SET implement_result = ? WHERE id = ?");
     this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ? WHERE id = ?");
     this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
@@ -269,21 +253,6 @@ export class JobStore {
     return Number(lastInsertRowid);
   }
 
-  findQueuedBySubject(subject: string): Job | null {
-    const row = this.selectQueuedBySubject.get(subject);
-    return row === undefined ? null : toJob(row);
-  }
-
-  /**
-   * Points a still-queued review at a newer push; false once the job has been claimed.
-   * The job starts over for the new head: a review saved for the old head is dropped,
-   * and the attempt count and any retry backoff are reset.
-   */
-  replaceTrigger(id: number, trigger: ReviewTrigger): boolean {
-    const columns = jobColumns(trigger);
-    return this.swapTrigger.run(JSON.stringify(trigger), columns.issueId, columns.identifier, columns.teamKey, id).changes === 1;
-  }
-
   findQueued(issueId: string, kind: IssueJobKind = "enrich"): Job | null {
     const row = this.selectQueued.get(issueId, kind);
     return row === undefined ? null : toJob(row);
@@ -318,10 +287,6 @@ export class JobStore {
 
   saveResult(id: number, result: BrainResult, sha: string): void {
     this.storeResult.run(JSON.stringify(result), sha, id);
-  }
-
-  saveReviewResult(id: number, stored: StoredReview): void {
-    this.storeReview.run(JSON.stringify(stored), id);
   }
 
   finish(id: number, outcome: JobOutcome): void {

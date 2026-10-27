@@ -58,7 +58,6 @@ export interface ConfigPaths {
   serverPort: number;
   skillsDir?: string;
   teams?: string[];
-  review?: { botUsername: string; prompt: string };
   labels?: boolean;
   implement?: { prompt: string; checks?: string[] };
 }
@@ -66,7 +65,6 @@ export interface ConfigPaths {
 /** Writes a steward.config.ts into `dir` pointing at the given paths and returns its path. */
 export const writeConfig = async (dir: string, p: ConfigPaths): Promise<string> => {
   const skills = p.skillsDir === undefined ? "" : `skillsDir: ${JSON.stringify(p.skillsDir)},`;
-  const review = p.review === undefined ? "" : `review: ${JSON.stringify(p.review)},`;
   const labels = p.labels === true || p.implement !== undefined ? "labels: {}," : "";
   const implement =
     p.implement === undefined
@@ -94,7 +92,6 @@ export default defineConfig({
   retention: { keptWorktrees: 3, days: 30 },
   prompt: ${JSON.stringify(p.promptPath)},
   server: { port: ${p.serverPort}, publicUrl: "https://steward.example" },
-  ${review}
   ${implement}
   ${slots}
 });

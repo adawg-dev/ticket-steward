@@ -1,4 +1,4 @@
-import type { IssueTrigger } from "../tracker/types.js";
+import type { TriggerEvent } from "../tracker/types.js";
 import { isGatewayIssue } from "./gateway.js";
 
 export const STEWARD_BEGIN = "<!-- ticket-steward:begin -->";
@@ -9,7 +9,7 @@ export const CLOSED_STATE_TYPES: readonly string[] = ["completed", "canceled"];
 
 export type IssueJobKind = "enrich" | "implement";
 
-export const jobKindFor = (event: IssueTrigger): IssueJobKind => (event.action === "implement" ? "implement" : "enrich");
+export const jobKindFor = (event: TriggerEvent): IssueJobKind => (event.action === "implement" ? "implement" : "enrich");
 
 export const closedReason = (identifier: string, state: { name: string; type: string }): string | null =>
   CLOSED_STATE_TYPES.includes(state.type) ? `${identifier} is ${state.name}; Ticket Steward does not work on Done or Canceled tickets` : null;
@@ -17,7 +17,7 @@ export const closedReason = (identifier: string, state: { name: string; type: st
 export type IntakeDecision = { action: "enqueue" } | { action: "attach" } | { action: "skip"; reason: string };
 
 export const shouldEnqueue = (input: {
-  event: IssueTrigger;
+  event: TriggerEvent;
   allowlist: string[];
   gatewayIssues: "enrich" | "skip";
   priorSuccess: boolean;

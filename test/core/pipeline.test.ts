@@ -12,7 +12,7 @@ import type { BrainResult } from "../../src/core/result.js";
 import type { RunContext } from "../../src/core/types.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import { ReadOnlyTracker } from "../../src/tracker/readOnly.js";
-import type { IssueTrigger, TicketBundle } from "../../src/tracker/types.js";
+import type { TriggerEvent, TicketBundle } from "../../src/tracker/types.js";
 import { isPortFree } from "../../src/workspace/retention.js";
 import { SlotClient } from "../../src/workspace/slots.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
@@ -43,7 +43,7 @@ const issue: TicketBundle = {
   templates: [],
 };
 
-const createdTrigger: IssueTrigger = {
+const createdTrigger: TriggerEvent = {
   kind: "issue.created",
   issueId: "issue-1",
   identifier: "API-1",
@@ -142,7 +142,7 @@ const detachedDeps = (config: StewardConfig): PipelineDeps => ({
   runBrain: (brain, input, redactor, opts) => runBrainDetached(brain, { ...input, env: { ...input.env, NODE_ENV: "test" } }, redactor, opts),
 });
 
-const claimJob = (trigger: IssueTrigger): RunContext => {
+const claimJob = (trigger: TriggerEvent): RunContext => {
   const jobId = stores.jobs.enqueue(trigger);
   stores.jobs.claimById(jobId);
   stores.attempts.start(jobId);
@@ -267,7 +267,7 @@ describe("runJob", () => {
     expect(stores.jobs.get(ctx.jobId)?.result?.repro).toEqual(recipe);
   });
 
-  it("saves recipe files and the recipe record for a bug ticket", async () => {
+  it("renders the recipe into the Enrichment section and keeps no copy of its files", async () => {
     const recipe = { status: "reproduced" as const, method: "test" as const, command: "node repro.mjs", steps: [], files: ["repro.mjs"], expected: "ok", observed: "boom" };
     const ctx = claimJob(createdTrigger);
     const brain = brainWith({ result: { ...brainResult, repro: recipe } });
@@ -277,11 +277,10 @@ describe("runJob", () => {
       },
     });
     expect((await runJob(ctx, deps)).status).toBe("succeeded");
-    const record = stores.repros.get("issue-1");
-    expect(record?.jobId).toBe(ctx.jobId);
-    expect(record?.recipe.files).toEqual(["repro.mjs"]);
-    expect(await readFile(join(record?.filesDir ?? "", "repro.mjs"), "utf8")).toContain("boom");
+    expect(stores.jobs.get(ctx.jobId)?.result?.repro).toEqual(recipe);
     expect(tracker.getDescription("issue-1")).toContain("### Reproduction");
+    expect(tracker.getDescription("issue-1")).toContain("`repro.mjs`");
+    expect(existsSync(join(repo.dataDir, "repros"))).toBe(false);
   });
 
   it("drops the recipe for a ticket without a bug label", async () => {
