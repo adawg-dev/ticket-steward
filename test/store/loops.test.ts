@@ -148,6 +148,24 @@ describe("LoopStore", () => {
     expect(stores.loops.active().map((loop) => loop.id)).toEqual([awaitingMr, awaitingReview, fixing]);
   });
 
+  it("stranded returns running loops with no queued or running job", () => {
+    const step = (loopId: number) => ({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "await" }) as const;
+    const queued = stores.loops.create(newLoop());
+    stores.jobs.enqueue(step(queued));
+    const running = stores.loops.create(newLoop());
+    stores.jobs.claimById(stores.jobs.enqueue(step(running)));
+    const failed = stores.loops.create(newLoop());
+    const failedJob = stores.jobs.enqueue(step(failed));
+    stores.jobs.claimById(failedJob);
+    stores.jobs.finish(failedJob, { status: "failed", error: "GitLab down", retryable: true });
+    const noJob = stores.loops.create(newLoop());
+    stores.loops.update(noJob, { state: "fixing" });
+    const ended = stores.loops.create(newLoop());
+    stores.loops.update(ended, { state: "handed_back" });
+
+    expect(stores.loops.stranded().map((loop) => loop.id)).toEqual([failed, noJob]);
+  });
+
   it("keptWithin returns active loops and loops ended inside the window", () => {
     const active = stores.loops.create(newLoop({ worktreeName: "a" }));
     const recent = stores.loops.create(newLoop({ worktreeName: "b" }));

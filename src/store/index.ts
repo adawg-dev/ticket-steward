@@ -6,7 +6,7 @@ import { LoopStore } from "./loops.js";
 
 export type { Database } from "./db.js";
 export { openDatabase } from "./db.js";
-export { JobStore, unreadableOutcome, type Job, type JobKind, type JobStatus } from "./jobs.js";
+export { JobStore, loopSubject, unreadableOutcome, type Job, type JobKind, type JobStatus } from "./jobs.js";
 export {
   ACTIVE_LOOP_STATES,
   LoopStore,

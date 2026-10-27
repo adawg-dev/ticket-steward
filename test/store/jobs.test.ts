@@ -423,11 +423,22 @@ describe("loop jobs", () => {
     expect(stores.jobs.get(id)?.sessionId).toBe("session-9");
   });
 
-  it("defer after a claim requeues the job until the given time and gives back the attempt", () => {
+  it("latestForSubject returns a loop's newest job, whatever its status", () => {
+    const first = stores.jobs.enqueue(loopEvent("await"));
+    stores.jobs.claimById(first);
+    stores.jobs.finish(first, { status: "succeeded" });
+    const second = stores.jobs.enqueue(loopEvent("fix"));
+    stores.jobs.claimById(second);
+    stores.jobs.finish(second, { status: "failed", error: "crashed: boom", retryable: false });
+
+    expect(stores.jobs.latestForSubject("loop:3")).toMatchObject({ id: second, kind: "fix", status: "failed", error: "crashed: boom" });
+    expect(stores.jobs.latestForSubject("loop:4")).toBeNull();
+  });
+
+  it("defer after a claim requeues the job until the given time and starts its failure count over", () => {
     const id = stores.jobs.enqueue(loopEvent("await"));
     stores.jobs.claimNext();
     stores.jobs.scheduleRetry(id, new Date(), "an earlier error");
-    const before = stores.jobs.get(id)?.attempts;
     expect(stores.jobs.claimNext()?.attempts).toBe(2);
     const until = new Date(Date.now() + 60_000);
 
@@ -435,8 +446,7 @@ describe("loop jobs", () => {
 
     const job = stores.jobs.get(id);
     expect(job?.status).toBe("queued");
-    expect(before).toBe(1);
-    expect(job?.attempts).toBe(before);
+    expect(job?.attempts).toBe(0);
     expect(job?.notBefore).toBe(until.toISOString());
     expect(job?.error).toBeNull();
     expect(job?.finishedAt).toBeNull();

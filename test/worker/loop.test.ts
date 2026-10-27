@@ -11,7 +11,7 @@ import { Redactor } from "../../src/core/redact.js";
 import type { BrainResult } from "../../src/core/result.js";
 import type { JobOutcome, RunContext } from "../../src/core/types.js";
 import { openStores, type Stores } from "../../src/store/index.js";
-import type { TriggerEvent } from "../../src/tracker/types.js";
+import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { SlotClient } from "../../src/workspace/slots.js";
 import { startWorker, type WorkerDeps, type WorkerHandle } from "../../src/worker/loop.js";
@@ -126,6 +126,39 @@ const heldRuns = () => {
     });
   return { impl, slots, release: (jobId: number) => releases.get(jobId)?.(SUCCEEDED) };
 };
+
+const ticket: TicketBundle = {
+  id: "issue-1",
+  identifier: "API-1",
+  url: "https://linear.app/acme/issue/API-1",
+  title: "Adapter drops the last chunk",
+  description: "The adapter loses the final chunk.",
+  team: { id: "team-1", key: "API", name: "API" },
+  state: { name: "In Review", type: "started" },
+  labels: [],
+  priority: 2,
+  creator: { name: "Ada", isBot: false },
+  createdAt: "2026-09-11T00:00:00.000Z",
+  comments: [],
+  attachments: [],
+  appliedTemplate: null,
+  templates: [],
+};
+
+/** A fix loop for issue-1 in `state`, as its await or fix step would leave it. */
+const runningLoop = (state: "awaiting_review" | "fixing"): number => {
+  const implementId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
+  stores.jobs.claimById(implementId);
+  stores.jobs.finish(implementId, SUCCEEDED);
+  const id = stores.loops.create({
+    issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: implementId, branch: "fix/API-1-chunk",
+    baseSha: "a".repeat(40), headSha: "b".repeat(40), worktreeName: "ticket-API-1", labelDriven: false, sessionId: "session-1",
+  });
+  stores.loops.update(id, { state });
+  return id;
+};
+
+const loopStep = (loopId: number, step: "await" | "fix"): TriggerEvent => ({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step });
 
 const issue2 = { ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" };
 
@@ -258,6 +291,75 @@ describe("startWorker", () => {
 
     expect(runRestart).toHaveBeenCalledTimes(1);
     expect(runJobMock).not.toHaveBeenCalled();
+  });
+
+  it("hands back a loop whose fix job failed for good, with the job's error", async () => {
+    tracker.addIssue(ticket);
+    const loopId = runningLoop("fixing");
+    const jobId = stores.jobs.enqueue(loopStep(loopId, "fix"));
+    const runFix = vi.fn(async () => ({ status: "failed", error: "crashed: boom", retryable: false }) as const);
+    start({ runFix });
+
+    await vi.waitFor(() => {
+      expect(stores.loops.get(loopId)?.state).toBe("handed_back");
+    });
+
+    expect(stores.jobs.get(jobId)?.status).toBe("failed");
+    expect(tracker.comments("issue-1")).toHaveLength(1);
+    expect(tracker.comments("issue-1")[0]).toContain("Ticket Steward handed this back: the loop's fix job failed: crashed: boom.");
+  });
+
+  it("hands back at startup a loop an earlier run left with no job, and leaves a loop with a queued job alone", async () => {
+    tracker.addIssue(ticket);
+    const stranded = runningLoop("awaiting_review");
+    const failed = stores.jobs.enqueue(loopStep(stranded, "await"));
+    stores.jobs.claimById(failed);
+    stores.jobs.finish(failed, { status: "publish_failed", error: "comment: Linear down" });
+    const waiting = runningLoop("awaiting_review");
+    const queued = stores.jobs.enqueue(loopStep(waiting, "await"));
+    stores.jobs.defer(queued, new Date(Date.now() + 3_600_000));
+    start();
+
+    await vi.waitFor(() => {
+      expect(stores.loops.get(stranded)?.state).toBe("handed_back");
+    });
+
+    expect(tracker.comments("issue-1")[0]).toContain("the loop's await_review job could not publish: comment: Linear down");
+    expect(stores.loops.get(waiting)?.state).toBe("awaiting_review");
+  });
+
+  it("tries a stranded loop's hand-back again on the next sweep when it could not publish", async () => {
+    tracker.addIssue(ticket);
+    tracker.failNextWrite();
+    const loopId = runningLoop("awaiting_review");
+    const failed = stores.jobs.enqueue(loopStep(loopId, "await"));
+    stores.jobs.claimById(failed);
+    stores.jobs.finish(failed, { status: "failed", error: "GitLab down", retryable: true });
+    start({ strandedMs: 20 });
+
+    await vi.waitFor(() => {
+      expect(stores.loops.get(loopId)?.state).toBe("handed_back");
+    });
+
+    expect(tracker.comments("issue-1")).toHaveLength(1);
+  });
+
+  it("does not add up an await job's retryable failures across the polls of a long wait", async () => {
+    const polled: JobOutcome = { status: "deferred", until: new Date(0) };
+    const runAwaitReview = vi.fn<() => Promise<JobOutcome>>()
+      .mockResolvedValueOnce(RETRYABLE)
+      .mockResolvedValueOnce(polled)
+      .mockResolvedValueOnce(RETRYABLE)
+      .mockResolvedValueOnce(polled)
+      .mockResolvedValueOnce(RETRYABLE)
+      .mockResolvedValueOnce(polled)
+      .mockResolvedValueOnce(SUCCEEDED);
+    const jobId = stores.jobs.enqueue(loopStep(1, "await"));
+    start({ runAwaitReview, maxAttempts: 2 });
+
+    await waitForStatus(jobId, "succeeded");
+
+    expect(runAwaitReview).toHaveBeenCalledTimes(7);
   });
 
   it("retries a retryable failure after the backoff and succeeds on the second attempt", async () => {

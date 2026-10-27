@@ -22,8 +22,11 @@ const reload = (deps: PipelineDeps, id: number): Loop => {
   return loop;
 };
 
-/** One poll: the ticket's state, the MR (looked up by branch until found, then stored) and its discussions. */
-const observe = async (deps: PipelineDeps, loop: Loop, project: string): Promise<Observed> => {
+/**
+ * One poll: the ticket's state, the MR (looked up by branch until found, then stored) and its discussions. Finding the MR
+ * ends the MR wait, so the review and pipeline waits start their own clock at `now`.
+ */
+const observe = async (deps: PipelineDeps, loop: Loop, project: string, now: Date): Promise<Observed> => {
   const gitlab = deps.gitlab;
   if (gitlab === undefined) throw new Error("no GitLab client");
   const ticket = await deps.tracker.fetchTicket(loop.issueId);
@@ -31,7 +34,9 @@ const observe = async (deps: PipelineDeps, loop: Loop, project: string): Promise
   let mr: MergeRequestInfo | null;
   if (loop.projectId === null || loop.mrIid === null) {
     mr = await gitlab.findOpenMergeRequest(project, loop.branch);
-    if (mr !== null) deps.stores.loops.update(loop.id, { projectId: mr.projectId, mrIid: mr.iid, mrUrl: mr.webUrl, state: "awaiting_review" });
+    if (mr !== null) {
+      deps.stores.loops.update(loop.id, { projectId: mr.projectId, mrIid: mr.iid, mrUrl: mr.webUrl, state: "awaiting_review", waitStartedAt: now.toISOString() });
+    }
   } else {
     mr = await gitlab.getMergeRequest(loop.projectId, loop.mrIid);
   }
@@ -55,7 +60,7 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   const now = deps.now();
   let observed: Observed;
   try {
-    observed = await observe(deps, stored, config.codehost.project);
+    observed = await observe(deps, stored, config.codehost.project, now);
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
   }

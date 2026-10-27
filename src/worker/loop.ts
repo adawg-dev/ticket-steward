@@ -7,6 +7,7 @@ import type { JobOutcome, RunContext } from "../core/types.js";
 import { runAwaitReview } from "../greptile/await.js";
 import { runFix } from "../greptile/fix.js";
 import { runRestart } from "../greptile/start.js";
+import { handBackStranded } from "../greptile/stranded.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
 import { unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
@@ -17,6 +18,8 @@ export interface WorkerOptions {
   maxAttempts?: number;
   backoffMs?: number[];
   sweepMs?: number;
+  /** How often running fix loops left with no job are handed back. */
+  strandedMs?: number;
   runJob?: typeof runJob;
   publishOnly?: typeof publishOnly;
   runImplement?: typeof runImplement;
@@ -54,6 +57,7 @@ const DEFAULT_POLL_MS = 2_000;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BACKOFF_MS = [60_000, 300_000];
 const DEFAULT_SWEEP_MS = 60 * 60 * 1000;
+const DEFAULT_STRANDED_MS = 5 * 60 * 1000;
 const DELIVERY_RETENTION_DAYS = 7;
 /** The helper serves slots 1-9 whatever slots.count is. */
 const HELPER_SLOTS = 9;
@@ -101,6 +105,7 @@ class Worker {
   private readonly restart: typeof runRestart;
   private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
+  private readonly strandedTimer: NodeJS.Timeout;
   private readonly lanes: Lane[];
   private readonly loopsDone: Promise<void>;
   private readonly onSigterm = (): void => void this.stop();
@@ -108,6 +113,8 @@ class Worker {
   private stopping: Promise<void> | null = null;
   /** True while retention runs; claims wait, so no job starts while worktree directories are being removed. */
   private sweeping = false;
+  /** The hand-back of stranded loops in progress, so two never overlap and shutdown can wait for it. */
+  private rescuing: Promise<void> | null = null;
 
   constructor(
     private readonly deps: WorkerDeps,
@@ -127,10 +134,15 @@ class Worker {
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
     logger.info({ requeued, failed, slots: this.lanes.length }, "worker started");
     this.sweepTimer = setInterval(() => void this.sweepWhenIdle(), deps.sweepMs ?? DEFAULT_SWEEP_MS).unref();
+    this.strandedTimer = setInterval(() => void this.rescueStranded(), deps.strandedMs ?? DEFAULT_STRANDED_MS).unref();
     process.once("SIGTERM", this.onSigterm);
     // A crash can leave a slot's containers behind: every slot goes down before any loop claims.
     this.loopsDone = this.downAll()
       .then(() => this.sweep())
+      .then(() => {
+        // Not awaited: a stranded loop has no job, so the lanes never touch it.
+        void this.rescueStranded();
+      })
       .then(() => Promise.all(this.lanes.map((lane) => this.loop(lane).catch((err: unknown) => logger.error({ slot: lane.slot, err: errorMessage(err) }, "worker loop crashed")))))
       .then(() => undefined)
       .catch((err: unknown) => logger.error({ err: errorMessage(err) }, "worker crashed"));
@@ -149,10 +161,12 @@ class Worker {
     this.stopped = true;
     process.removeListener("SIGTERM", this.onSigterm);
     clearInterval(this.sweepTimer);
+    clearInterval(this.strandedTimer);
     this.abort.abort();
     for (const lane of this.lanes) lane.wake?.();
     try {
       await this.loopsDone;
+      await this.rescuing;
       await this.downAll();
     } finally {
       this.lock.release();
@@ -274,6 +288,8 @@ class Worker {
       return;
     }
     jobs.finish(job.id, outcome);
+    // A loop step that ended for good leaves its loop with nothing to move it: hand it back now, not at the next timer.
+    if (outcome.status !== "succeeded" && (job.kind === "await_review" || job.kind === "fix")) void this.rescueStranded();
   }
 
   private failBestEffort(job: Job, error: string): void {
@@ -281,6 +297,27 @@ class Worker {
       this.deps.stores.jobs.finish(job.id, { status: "failed", error, retryable: false });
     } catch (err) {
       logger.error({ jobId: job.id, err: errorMessage(err) }, "job could not be marked failed");
+    }
+  }
+
+  /** Hands back running loops left with no job (best effort; a failed hand-back is tried again on the next timer). */
+  private rescueStranded(): Promise<void> {
+    if (this.stopped || this.deps.tracker.apiKeyRejected()) return Promise.resolve();
+    this.rescuing ??= this.handBackStranded().finally(() => {
+      this.rescuing = null;
+    });
+    return this.rescuing;
+  }
+
+  private async handBackStranded(): Promise<void> {
+    try {
+      for (const { loopId, identifier, reason, outcome } of await handBackStranded(this.deps)) {
+        const fields = { loopId, identifier, reason, status: outcome.status, ...outcomeDetail(outcome) };
+        if (outcome.status === "succeeded") logger.warn(fields, "stranded fix loop handed back");
+        else logger.error(fields, "stranded fix loop could not be handed back");
+      }
+    } catch (err) {
+      logger.error({ err: errorMessage(err) }, "stranded fix loop sweep failed");
     }
   }
 

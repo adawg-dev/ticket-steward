@@ -129,10 +129,13 @@ interface JobColumns {
   subject: string | null;
 }
 
+/** The subject of every job a loop runs; `LoopStore.stranded` matches it in SQL. */
+export const loopSubject = (loopId: number): string => `loop:${loopId}`;
+
 /** A loop step runs as its own job kind (`await` as `await_review`), with the loop as subject so its steps never overlap. */
 const jobColumns = (event: TriggerEvent): JobColumns => {
   const ticket = { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey };
-  if (event.kind === "loop") return { ...ticket, kind: event.step === "await" ? "await_review" : event.step, subject: `loop:${event.loopId}` };
+  if (event.kind === "loop") return { ...ticket, kind: event.step === "await" ? "await_review" : event.step, subject: loopSubject(event.loopId) };
   return { ...ticket, kind: jobKindFor(event), subject: null };
 };
 
@@ -156,6 +159,7 @@ export class JobStore {
   private readonly unclaim;
   private readonly reopen;
   private readonly selectById;
+  private readonly selectLatestForSubject;
   private readonly selectByStatus;
   private readonly selectAll;
   private readonly requeueRunning;
@@ -204,7 +208,7 @@ export class JobStore {
       "UPDATE jobs SET status = 'queued', not_before = ?, error = ?, finished_at = NULL WHERE id = ?",
     );
     this.deferUntil = db.prepare<[string, number]>(
-      "UPDATE jobs SET status = 'queued', attempts = MAX(attempts - 1, 0), not_before = ?, error = NULL, finished_at = NULL WHERE id = ?",
+      "UPDATE jobs SET status = 'queued', attempts = 0, not_before = ?, error = NULL, finished_at = NULL WHERE id = ?",
     );
     this.unclaim = db.prepare<[string, number]>(
       "UPDATE jobs SET status = 'queued', attempts = MAX(attempts - 1, 0), not_before = NULL, error = ?, finished_at = NULL WHERE id = ?",
@@ -213,6 +217,7 @@ export class JobStore {
       "UPDATE jobs SET status = 'queued', not_before = NULL, finished_at = NULL WHERE id = ? AND status != 'running'",
     );
     this.selectById = db.prepare<[number], JobRow>("SELECT * FROM jobs WHERE id = ?");
+    this.selectLatestForSubject = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE subject = ? ORDER BY id DESC LIMIT 1");
     this.selectByStatus = db.prepare<[JobStatus, number], JobRow>(
       "SELECT * FROM jobs WHERE status = ? ORDER BY id DESC LIMIT ?",
     );
@@ -311,7 +316,10 @@ export class JobStore {
     this.deferRetry.run(notBefore.toISOString(), error, id);
   }
 
-  /** A deferred outcome: back in the queue until `until`, with the claimed attempt given back, since waiting is not a failure. */
+  /**
+   * A deferred outcome: back in the queue until `until`. Waiting is progress, not a failure, so the failure count starts
+   * over: a long wait's polls never add up their occasional retryable errors into a terminal failure.
+   */
   defer(id: number, until: Date): void {
     this.deferUntil.run(until.toISOString(), id);
   }
@@ -328,6 +336,12 @@ export class JobStore {
 
   get(id: number): Job | null {
     const row = this.selectById.get(id);
+    return row === undefined ? null : toJob(row);
+  }
+
+  /** The newest job with this subject (a loop's last step), whatever its status. */
+  latestForSubject(subject: string): Job | null {
+    const row = this.selectLatestForSubject.get(subject);
     return row === undefined ? null : toJob(row);
   }
 

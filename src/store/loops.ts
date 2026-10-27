@@ -176,6 +176,7 @@ export class LoopStore {
   private readonly selectByImplementJob;
   private readonly selectLatestForIssue;
   private readonly selectActive;
+  private readonly selectStranded;
   private readonly selectKept;
   private readonly storeHistory;
 
@@ -190,6 +191,12 @@ export class LoopStore {
     this.selectLatestForIssue = db.prepare<[string], LoopRow>("SELECT * FROM loops WHERE issue_id = ? ORDER BY id DESC LIMIT 1");
     this.selectActive = db.prepare<string[], LoopRow>(
       `SELECT * FROM loops WHERE state IN (${ACTIVE_LOOP_STATES.map(() => "?").join(", ")}) ORDER BY id`,
+    );
+    // A loop job's subject is `loop:<id>` (`loopSubject` in jobs.ts).
+    this.selectStranded = db.prepare<string[], LoopRow>(
+      `SELECT * FROM loops l WHERE l.state IN (${ACTIVE_LOOP_STATES.map(() => "?").join(", ")})
+         AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.subject = 'loop:' || l.id AND j.status IN ('queued', 'running'))
+       ORDER BY l.id`,
     );
     this.selectKept = db.prepare<[string], LoopRow>("SELECT * FROM loops WHERE ended_at IS NULL OR ended_at >= ? ORDER BY id");
     this.storeHistory = db.prepare<[string, number]>("UPDATE loops SET history = ? WHERE id = ?");
@@ -233,6 +240,14 @@ export class LoopStore {
   /** Loops still running (awaiting the MR or a review, or fixing), oldest first. */
   active(): Loop[] {
     return this.selectActive.all(...ACTIVE_LOOP_STATES).map((row) => toLoop(row).loop);
+  }
+
+  /**
+   * Running loops with no queued or running job: their last step ended for good (failed, or out of attempts), so nothing
+   * would move them again. One statement, so a step handing over to the next (one transaction) is never caught in between.
+   */
+  stranded(): Loop[] {
+    return this.selectStranded.all(...ACTIVE_LOOP_STATES).map((row) => toLoop(row).loop);
   }
 
   /** Writes the given fields; moving to an ended state also stamps `endedAt` unless the patch sets it. */

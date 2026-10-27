@@ -8,8 +8,15 @@ import type { GreptileSummary } from "./summary.js";
 /** The hidden marker on every steward comment about a loop; a post is skipped when its marker is already there. */
 export const LOOP_MARKER = (loopId: number, what: string): string => `<!-- ticket-steward:loop id=${loopId} ${what} -->`;
 
-/** One hand-back per round and head: a restarted loop that is handed back again gets a fresh marker. */
-const handbackMarker = (loop: Loop): string => LOOP_MARKER(loop.id, `handback round=${loop.round} head=${loop.headSha.slice(0, 7)}`);
+/**
+ * Which life of the loop a post belongs to: the last hand-back time, written only once a hand-back is fully published. A
+ * retry of one publish keeps it, while a restarted loop gets a new one, even at the same round and head.
+ */
+const lifetime = (loop: Loop): string => `after=${loop.handedBackAt ?? "start"}`;
+
+/** One hand-back per round, head and life of the loop. */
+const handbackMarker = (loop: Loop): string =>
+  LOOP_MARKER(loop.id, `handback round=${loop.round} head=${loop.headSha.slice(0, 7)} ${lifetime(loop)}`);
 
 const hasMarker = (bodies: string[], marker: string): boolean => bodies.some((body) => body.includes(marker));
 
@@ -138,11 +145,11 @@ export const publishThreads = async (deps: PipelineDeps, loop: Loop, result: Fix
   return { status: "succeeded" };
 };
 
-/** Asks Greptile to review the unchanged head after a round with no push; once per round and head. */
+/** Asks Greptile to review the unchanged head after a round with no push; once per round, head and life of the loop. */
 export const requestReview = async (deps: PipelineDeps, loop: Loop): Promise<JobOutcome> => {
   if (deps.gitlab === undefined || loop.projectId === null || loop.mrIid === null) return { status: "publish_failed", error: "review request: no merge request" };
   try {
-    await noteOnce(deps, loop, LOOP_MARKER(loop.id, `review round=${loop.round} head=${loop.headSha.slice(0, 7)}`), "@greptileai review");
+    await noteOnce(deps, loop, LOOP_MARKER(loop.id, `review round=${loop.round} head=${loop.headSha.slice(0, 7)} ${lifetime(loop)}`), "@greptileai review");
   } catch (err) {
     return { status: "publish_failed", error: `review request: ${errorMessage(err)}` };
   }

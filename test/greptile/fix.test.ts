@@ -222,6 +222,21 @@ describe("runFix", () => {
     expect(queuedAwaits()).toHaveLength(1);
   });
 
+  it("hands back a round with no push when Greptile's summary has no review counter to wait past", async () => {
+    gitlab.mr.description = `<h3>Greptile Summary</h3>\n\n### Confidence Score: 3/5\n\n<sub>Last reviewed commit: [fix](https://gitlab.example/acme/repo/-/commit/${headSha})</sub>`;
+    const id = createLoop();
+
+    const outcome = await runFix(claim(id), makeDeps(new FakeBrain({ result: declined(finding) })));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: Greptile's summary has no review counter, so its next review cannot be told apart" });
+    expect(loopOf(id)).toMatchObject({ state: "handed_back", round: 0, reviewCountAtTrigger: null });
+    expect(gitlab.replies).toEqual([]);
+    expect(gitlab.resolved).toEqual([]);
+    expect(gitlab.notes.some((note) => note.includes("@greptileai"))).toBe(false);
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
+    expect(queuedAwaits()).toEqual([]);
+  });
+
   it("hands back when the agent changes nothing two rounds running", async () => {
     const id = createLoop();
     stores.loops.appendRound(id, { round: 0, headSha, score: 3, pipeline: "success", fixed: 0, declined: 1, outcome: "no_changes" });

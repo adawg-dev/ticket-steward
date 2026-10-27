@@ -388,7 +388,11 @@ or the MR was merged or closed; the steward says so and leaves labels alone).
 **Hand-back reasons.** The ticket becomes `ready-for-human` with the reason in a comment, and the MR gets a note. Reasons:
 no MR was opened; a person pushed to the branch; Greptile failed or never reviewed the head; no finished pipeline, or it
 failed or was canceled; the fix could not be verified (checks, secret guard, no single commit); or the score is still
-below 5/5 after `maxRounds` fix rounds. The brain can also hand back itself when it cannot fix a finding.
+below 5/5 after `maxRounds` fix rounds. The brain can also hand back itself when it cannot fix a finding. A round with no
+push hands back when Greptile's summary has no `Reviews (N)` counter, since its next review could not be told apart. A
+loop whose await, fix or hand-back job fails for good (out of attempts, or a crash) is handed back with that job's error
+within a few minutes, so it never sits in a running state with nothing to move it. Retryable errors only add up while
+they come in a row: each poll that finds the loop still waiting starts the count over.
 
 **Restart.** Re-add `ready-for-agent` to the ticket, or run `steward fix <KEY>` (leaves labels alone). Comments newer than
 the hand-back are given to the restarted loop. `steward jobs show <id>` prints the loop and one line per round

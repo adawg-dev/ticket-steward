@@ -162,8 +162,14 @@ const publishChanged = async (fix: Fix, stored: StoredFix, result: FixResult, mr
   );
 };
 
-/** A `no_changes` fix: reply and resolve, then ask Greptile to review the unchanged head again. */
+/**
+ * A `no_changes` fix: reply and resolve, then ask Greptile to review the unchanged head again. The next review is told
+ * apart from this one by its `Reviews (N)` counter, so a summary without one hands back before anything is posted.
+ */
 const publishNoChanges = async (fix: Fix, stored: StoredFix, result: FixResult): Promise<JobOutcome> => {
+  if (stored.reviewCount === null) {
+    return publishHandback(fix.deps, fix.loop, "Greptile's summary has no review counter, so its next review cannot be told apart", result.summary);
+  }
   const replied = await publishThreads(fix.deps, fix.loop, result, null);
   if (replied.status !== "succeeded") return replied;
   const requested = await requestReview(fix.deps, fix.loop);

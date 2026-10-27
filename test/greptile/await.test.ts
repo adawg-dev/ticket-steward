@@ -5,7 +5,7 @@ import type { PipelineDeps } from "../../src/core/pipeline.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import { runAwaitReview } from "../../src/greptile/await.js";
-import { LOOP_MARKER, publishHandback } from "../../src/greptile/publish.js";
+import { LOOP_MARKER, publishHandback, requestReview } from "../../src/greptile/publish.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { Mirror } from "../../src/workspace/mirror.js";
@@ -152,6 +152,18 @@ describe("runAwaitReview", () => {
     expect(loopOf(id)).toMatchObject({ projectId: 42, mrIid: 7, mrUrl: gitlab.mr.webUrl, state: "awaiting_review" });
   });
 
+  it("gives the review its own wait once the MR is found, however long the MR took", async () => {
+    const id = createLoop();
+    stores.loops.update(id, { waitStartedAt: new Date(NOW.getTime() - 35 * 60_000).toISOString() });
+    gitlab.openMr = fakeMergeRequest({ sha: SHA });
+
+    const outcome = await runAwaitReview(claim(id), makeDeps());
+
+    expect(outcome).toEqual({ status: "deferred", until: new Date(NOW.getTime() + 60_000) });
+    expect(tracker.comments("issue-1")).toEqual([]);
+    expect(loopOf(id)).toMatchObject({ state: "awaiting_review", mrIid: 7, waitStartedAt: NOW.toISOString() });
+  });
+
   it("passes a 5/5 MR with a green pipeline and no findings", async () => {
     const id = knownMrLoop();
     gitlab.mr.description = summaryBody(5);
@@ -248,16 +260,46 @@ describe("runAwaitReview", () => {
 });
 
 describe("publishHandback", () => {
-  it("posts each comment once when run twice", async () => {
+  it("posts each comment once when a retry runs it again", async () => {
     const id = knownMrLoop();
     const deps = makeDeps();
+    // A retry sees the loop as it was before the publish: the hand-back time is written only once every step succeeded.
+    const before = loopOf(id);
 
-    await publishHandback(deps, loopOf(id), "Greptile did not review ccccccc");
-    await publishHandback(deps, loopOf(id), "Greptile did not review ccccccc");
+    await publishHandback(deps, before, "Greptile did not review ccccccc");
+    await publishHandback(deps, before, "Greptile did not review ccccccc");
 
     expect(tracker.comments("issue-1")).toHaveLength(1);
     expect(gitlab.notes).toHaveLength(1);
     expect(loopOf(id)).toMatchObject({ state: "handed_back", handedBackAt: NOW.toISOString() });
+  });
+
+  it("posts each comment once when the first try failed part-way", async () => {
+    const id = knownMrLoop();
+    const deps = makeDeps();
+    tracker.failNextSwap();
+
+    expect((await publishHandback(deps, loopOf(id), "Greptile did not review ccccccc")).status).toBe("publish_failed");
+    expect(loopOf(id).handedBackAt).toBeNull();
+    await publishHandback(deps, loopOf(id), "Greptile did not review ccccccc");
+
+    expect(tracker.comments("issue-1")).toHaveLength(1);
+    expect(gitlab.notes).toHaveLength(1);
+    expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("posts again when a restarted loop is handed back at the same round and head", async () => {
+    const id = knownMrLoop();
+    const deps = makeDeps();
+    await publishHandback(deps, loopOf(id), "Greptile did not review ccccccc");
+    // A restart without a push: round 0 again on the same head, the hand-back time kept.
+    stores.loops.update(id, { state: "awaiting_review", round: 0, endedAt: null });
+
+    await publishHandback({ ...deps, now: () => new Date(NOW.getTime() + 3_600_000) }, loopOf(id), "Greptile did not review ccccccc");
+
+    expect(tracker.comments("issue-1")).toHaveLength(2);
+    expect(gitlab.notes).toHaveLength(2);
+    expect(loopOf(id).handedBackAt).toBe(new Date(NOW.getTime() + 3_600_000).toISOString());
   });
 
   it("changes no labels for a loop that was not label-driven", async () => {
@@ -266,5 +308,22 @@ describe("publishHandback", () => {
     await publishHandback(makeDeps(), loopOf(id), "Greptile did not review ccccccc");
 
     expect(tracker.labelSwaps()).toEqual([]);
+  });
+});
+
+describe("requestReview", () => {
+  it("asks once per round and head, and again in a restarted loop's life", async () => {
+    const id = knownMrLoop();
+    const deps = makeDeps();
+
+    await requestReview(deps, loopOf(id));
+    await requestReview(deps, loopOf(id));
+    expect(gitlab.notes).toHaveLength(1);
+
+    stores.loops.update(id, { handedBackAt: NOW.toISOString() });
+    await requestReview(deps, loopOf(id));
+
+    expect(gitlab.notes).toHaveLength(2);
+    expect(gitlab.notes.every((note) => note.startsWith("@greptileai review"))).toBe(true);
   });
 });
