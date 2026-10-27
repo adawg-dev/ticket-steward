@@ -33,6 +33,9 @@ const MINUTE_MS = 60_000;
 
 const PlaywrightPackage = z.object({ bin: z.union([z.string(), z.record(z.string(), z.string())]) });
 
+/** Where claude-code keeps its sessions (`CLAUDE_CONFIG_DIR`); denied to the agent because the files are unredacted. */
+export const sessionsDir = (config: PipelineDeps["config"]): string => join(config.dataDir, "sessions");
+
 export const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 export const jobPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths => {
@@ -105,6 +108,7 @@ export const prepareWorkspace = async (
   const worktree = await createWorktree(mirror, paths.workRoot, paths.worktreeName, sha);
   onWorktree(worktree);
   await mkdir(paths.artifactsDir, { recursive: true, mode: 0o700 });
+  await mkdir(sessionsDir(config), { recursive: true, mode: 0o700 });
   const portRewrite = config.workspace.portRewrite === undefined ? {} : { portRewrite: { from: config.workspace.portRewrite.from, to: port } };
   const overrides = slot === null || config.slots === undefined ? {} : { overrides: renderSlotEnv(config.slots.env, slot) };
   await copyOverlay(config.workspace.overlayDir, worktree.path, { ...portRewrite, ...overrides });
@@ -131,8 +135,17 @@ const stewardSkillNames = (skillsDir: string | undefined): string[] =>
         .map((entry) => entry.name)
         .sort();
 
-export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktree, prompt: string, env: Record<string, string>, output: BrainOutput, limits?: { timeoutMinutes: number; maxTurns: number }): BrainInput => {
+export const brainInput = (
+  deps: PipelineDeps,
+  paths: JobPaths,
+  worktree: Worktree,
+  prompt: string,
+  env: Record<string, string>,
+  output: BrainOutput,
+  opts: { limits?: { timeoutMinutes: number; maxTurns: number }; resumeSessionId?: string } = {},
+): BrainInput => {
   const { config, mirror } = deps;
+  const { limits } = opts;
   return {
     workspacePath: worktree.path,
     artifactsDir: paths.artifactsDir,
@@ -148,8 +161,9 @@ export const brainInput = (deps: PipelineDeps, paths: JobPaths, worktree: Worktr
       playwright: playwrightMcpSpec(),
     },
     inlineSkills: stewardSkillNames(config.workspace.skillsDir),
-    denyPaths: [mirror.path, join(config.dataDir, DB_FILENAME), config.workspace.overlayDir, dirname(deps.configPath)],
+    denyPaths: [mirror.path, join(config.dataDir, DB_FILENAME), config.workspace.overlayDir, dirname(deps.configPath), sessionsDir(config)],
     output,
+    ...(opts.resumeSessionId === undefined ? {} : { resumeSessionId: opts.resumeSessionId }),
   };
 };
 

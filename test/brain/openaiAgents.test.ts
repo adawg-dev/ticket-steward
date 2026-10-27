@@ -1,7 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { PLAYWRIGHT_TOOLS, modelSettingsFor, skillsText } from "../../src/brain/openaiAgents.js";
+import { PLAYWRIGHT_TOOLS, createOpenAiAgentsBrain, modelSettingsFor, skillsText } from "../../src/brain/openaiAgents.js";
+import type { BrainInput } from "../../src/brain/types.js";
 import { removeDir, tmpDir } from "../workspace/helpers.js";
 
 describe("modelSettingsFor", () => {
@@ -49,5 +50,28 @@ describe("PLAYWRIGHT_TOOLS", () => {
     expect(PLAYWRIGHT_TOOLS).toContain("browser_navigate");
     expect(PLAYWRIGHT_TOOLS).not.toContain("browser_run_code_unsafe");
     expect(PLAYWRIGHT_TOOLS).not.toContain("browser_file_upload");
+  });
+});
+
+describe("openai-agents brain", () => {
+  it("refuses to resume a session", async () => {
+    const input: BrainInput = {
+      workspacePath: "/data/work/42-1",
+      artifactsDir: "/data/jobs/42/artifacts",
+      transcriptPath: "/data/jobs/42/attempt-1.jsonl",
+      prompt: "fix",
+      env: {},
+      timeoutMs: 10_000,
+      maxTurns: 12,
+      model: "gpt-test",
+      mcpServers: {},
+      denyPaths: [],
+      output: "fix",
+      resumeSessionId: "s0",
+    };
+
+    const run = await createOpenAiAgentsBrain().run(input, () => undefined);
+
+    expect(run).toEqual({ ok: false, output: undefined, error: "openai-agents cannot resume a session" });
   });
 });

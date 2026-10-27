@@ -1,6 +1,6 @@
 import type { PipelineDeps } from "../../src/core/deps.js";
 import { join } from "node:path";
-import { brainInput, jobPaths } from "../../src/core/workspace.js";
+import { brainInput, jobPaths, sessionsDir } from "../../src/core/workspace.js";
 import type { RunContext } from "../../src/core/types.js";
 import type { Worktree } from "../../src/workspace/worktree.js";
 
@@ -57,9 +57,24 @@ describe("brainInput", () => {
   });
 
   it("uses per-kind limits when given", () => {
-    const input = brainInput(fullDeps, paths, worktree, "prompt", {}, "implement", { timeoutMinutes: 60, maxTurns: 150 });
+    const input = brainInput(fullDeps, paths, worktree, "prompt", {}, "implement", { limits: { timeoutMinutes: 60, maxTurns: 150 } });
     expect(input.timeoutMs).toBe(3_600_000);
     expect(input.maxTurns).toBe(150);
     expect(input.output).toBe("implement");
+  });
+
+  it("denies the sessions dir to the agent", () => {
+    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "enrich").denyPaths).toContain("/data/sessions");
+  });
+
+  it("passes the session to resume only when given", () => {
+    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "fix", { resumeSessionId: "s0" }).resumeSessionId).toBe("s0");
+    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "enrich")).not.toHaveProperty("resumeSessionId");
+  });
+});
+
+describe("sessionsDir", () => {
+  it("lives under the data dir", () => {
+    expect(sessionsDir(deps.config)).toBe("/data/sessions");
   });
 });

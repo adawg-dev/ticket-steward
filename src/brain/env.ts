@@ -31,7 +31,9 @@ export const buildWorkspaceEnv = (port: number): Record<string, string> => ({
   CI: "1",
 });
 
-export const buildBrainEnv = (secrets: Secrets, brain: BrainConfig, port: number): Record<string, string> => ({
+/** The brain's env: the workspace env plus the brain's own credentials and, for claude-code, its session store. */
+export const buildBrainEnv = (secrets: Secrets, brain: BrainConfig, port: number, sessionsDir: string): Record<string, string> => ({
   ...buildWorkspaceEnv(port),
   ...credentialEnv(secrets, brain),
+  ...(brain.kind === "claude-code" ? { CLAUDE_CONFIG_DIR: sessionsDir } : {}),
 });

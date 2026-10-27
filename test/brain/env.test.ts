@@ -22,8 +22,8 @@ describe("buildBrainEnv", () => {
   });
 
   it("claude-code with an API key gets exactly the base keys plus ANTHROPIC_API_KEY", () => {
-    const env = buildBrainEnv(allSecrets, claudeCode, 4100);
-    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", ...BASE_KEYS]);
+    const env = buildBrainEnv(allSecrets, claudeCode, 4100, "/d/sessions");
+    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", ...BASE_KEYS.slice(0, 1), "CLAUDE_CONFIG_DIR", ...BASE_KEYS.slice(1)]);
     expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-anthropic-key");
     expect(env.STEWARD_PORT).toBe("4100");
     expect(env.PORT).toBe("4100");
@@ -34,27 +34,35 @@ describe("buildBrainEnv", () => {
   });
 
   it("claude-code through a gateway gets ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN", () => {
-    const env = buildBrainEnv({ ANTHROPIC_AUTH_TOKEN: "sk-cn-v1-gateway-key", ANTHROPIC_BASE_URL: "https://api.concentrate.ai", OPENAI_API_KEY: allSecrets.OPENAI_API_KEY }, claudeCode, 4100);
-    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", ...BASE_KEYS]);
+    const env = buildBrainEnv({ ANTHROPIC_AUTH_TOKEN: "sk-cn-v1-gateway-key", ANTHROPIC_BASE_URL: "https://api.concentrate.ai", OPENAI_API_KEY: allSecrets.OPENAI_API_KEY }, claudeCode, 4100, "/d/sessions");
+    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", ...BASE_KEYS.slice(0, 1), "CLAUDE_CONFIG_DIR", ...BASE_KEYS.slice(1)]);
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe("sk-cn-v1-gateway-key");
     expect(env.ANTHROPIC_BASE_URL).toBe("https://api.concentrate.ai");
   });
 
   it("claude-code without an API key falls back to CLAUDE_CODE_OAUTH_TOKEN", () => {
-    const env = buildBrainEnv({ CLAUDE_CODE_OAUTH_TOKEN: allSecrets.CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY: allSecrets.OPENAI_API_KEY }, claudeCode, 4100);
-    expect(Object.keys(env).sort()).toEqual(["CI", "CLAUDE_CODE_OAUTH_TOKEN", ...BASE_KEYS.slice(1)]);
+    const env = buildBrainEnv({ CLAUDE_CODE_OAUTH_TOKEN: allSecrets.CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY: allSecrets.OPENAI_API_KEY }, claudeCode, 4100, "/d/sessions");
+    expect(Object.keys(env).sort()).toEqual(["CI", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", ...BASE_KEYS.slice(1)]);
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat-oauth-token");
   });
 
   it("openai-agents gets exactly the base keys plus OPENAI_API_KEY and OPENAI_BASE_URL", () => {
-    const env = buildBrainEnv(allSecrets, openaiAgents, 4100);
+    const env = buildBrainEnv(allSecrets, openaiAgents, 4100, "/d/sessions");
     expect(Object.keys(env).sort()).toEqual([...BASE_KEYS.slice(0, 6), "OPENAI_API_KEY", "OPENAI_BASE_URL", ...BASE_KEYS.slice(6)]);
     expect(env.OPENAI_API_KEY).toBe("sk-openai-key");
     expect(env.OPENAI_BASE_URL).toBe("https://proxy.example.com/v1");
   });
 
+  it("claude-code keeps its sessions in the given directory", () => {
+    expect(buildBrainEnv(allSecrets, claudeCode, 4100, "/d/sessions").CLAUDE_CONFIG_DIR).toBe("/d/sessions");
+  });
+
+  it("openai-agents gets no CLAUDE_CONFIG_DIR", () => {
+    expect(buildBrainEnv(allSecrets, openaiAgents, 4100, "/d/sessions")).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+  });
+
   it("openai-agents omits OPENAI_BASE_URL when it is not configured", () => {
-    const env = buildBrainEnv({ OPENAI_API_KEY: allSecrets.OPENAI_API_KEY, ANTHROPIC_API_KEY: allSecrets.ANTHROPIC_API_KEY }, openaiAgents, 4100);
+    const env = buildBrainEnv({ OPENAI_API_KEY: allSecrets.OPENAI_API_KEY, ANTHROPIC_API_KEY: allSecrets.ANTHROPIC_API_KEY }, openaiAgents, 4100, "/d/sessions");
     expect(Object.keys(env).sort()).toEqual([...BASE_KEYS.slice(0, 6), "OPENAI_API_KEY", ...BASE_KEYS.slice(6)]);
   });
 

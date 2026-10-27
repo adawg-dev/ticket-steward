@@ -21,7 +21,13 @@ const input: BrainInput = {
 const usage = { inputTokens: 10, outputTokens: 20, costUsd: 0.5 };
 
 /** Only the fields the brain reads; the SDK type carries dozens more. */
-const resultMessage = (fields: { subtype: SDKResultMessage["subtype"]; structured_output?: unknown }): SDKResultMessage =>
+const resultMessage = (fields: {
+  subtype: SDKResultMessage["subtype"];
+  structured_output?: unknown;
+  session_id?: string;
+  total_cost_usd?: number;
+  usage?: { input_tokens: number; output_tokens: number };
+}): SDKResultMessage =>
   ({ type: "result", session_id: "sess-1", total_cost_usd: 0.5, usage: { input_tokens: 10, output_tokens: 20 }, ...fields }) as unknown as SDKResultMessage;
 
 const yielding =
@@ -49,7 +55,7 @@ describe("claude-code brain", () => {
 
     const run = await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, onMessage);
 
-    expect(run).toEqual({ ok: true, output: { summary: "done" }, usage });
+    expect(run).toEqual({ ok: true, output: { summary: "done" }, usage: { inputTokens: 20, outputTokens: 40, costUsd: 1 }, sessionId: "sess-1" });
     expect(queryMock).toHaveBeenCalledTimes(2);
     expect(queryMock.mock.calls[0]?.[0].options.maxTurns).toBe(12);
     expect(queryMock.mock.calls[0]?.[0].options.resume).toBeUndefined();
@@ -65,7 +71,7 @@ describe("claude-code brain", () => {
 
     expect(run.ok).toBe(false);
     expect(run.output).toBeUndefined();
-    expect(run.usage).toEqual(usage);
+    expect(run.usage).toEqual({ inputTokens: 20, outputTokens: 40, costUsd: 1 });
     expect(queryMock).toHaveBeenCalledTimes(2);
   });
 
@@ -107,5 +113,52 @@ describe("claude-code brain", () => {
 
     const captured = queryMock.mock.calls[0]?.[0].options;
     expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: implementResultJsonSchema });
+  });
+
+  it("returns the SDK session id of a successful run", async () => {
+    const queryMock = vi
+      .fn<QueryImpl>()
+      .mockImplementation(
+        yielding(resultMessage({ subtype: "success", structured_output: {}, session_id: "s1", usage: { input_tokens: 10, output_tokens: 2 }, total_cost_usd: 0.5 })),
+      );
+
+    const run = await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, onMessage);
+
+    expect(run.sessionId).toBe("s1");
+    expect(run.usage).toEqual({ inputTokens: 10, outputTokens: 2, costUsd: 0.5 });
+  });
+
+  it("resumes the given session", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: {} })));
+
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run({ ...input, resumeSessionId: "s0" }, onMessage);
+
+    expect(queryMock.mock.calls[0]?.[0].options.resume).toBe("s0");
+  });
+
+  it("keeps sessions past Claude Code's own transcript cleanup", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: {} })));
+
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, onMessage);
+
+    expect(queryMock.mock.calls[0]?.[0].options.settings).toEqual({ cleanupPeriodDays: 3650 });
+  });
+
+  it("sums usage over the max-turns follow-up and returns the follow-up's session id", async () => {
+    const queryMock = vi
+      .fn<QueryImpl>()
+      .mockImplementationOnce(
+        yielding(resultMessage({ subtype: "error_max_turns", session_id: "s1", usage: { input_tokens: 10, output_tokens: 2 }, total_cost_usd: 0.5 })),
+      )
+      .mockImplementationOnce(
+        yielding(resultMessage({ subtype: "success", structured_output: {}, session_id: "s2", usage: { input_tokens: 3, output_tokens: 1 }, total_cost_usd: 0.1 })),
+      );
+
+    const run = await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, onMessage);
+
+    expect(run.usage?.inputTokens).toBe(13);
+    expect(run.usage?.outputTokens).toBe(3);
+    expect(run.usage?.costUsd).toBeCloseTo(0.6);
+    expect(run.sessionId).toBe("s2");
   });
 });

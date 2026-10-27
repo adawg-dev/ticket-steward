@@ -16,7 +16,7 @@ import { alreadyCommented, buildTriageComment, buildEnrichmentSection, replaceSe
 import { isBugTicket, normalizeRepro } from "./repro.js";
 import { validateResult, type Repro, type StoredBrainResult } from "./result.js";
 import type { JobOutcome, RunContext } from "./types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, type JobPaths } from "./workspace.js";
+import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, type JobPaths } from "./workspace.js";
 
 export type { PipelineDeps } from "./deps.js";
 export { redactOutcome } from "./workspace.js";
@@ -151,7 +151,7 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainR
 const execute = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
   const { config, secrets } = deps;
   const paths = jobPaths(ctx, deps);
-  const env = buildBrainEnv(secrets, config.brain, jobPort(deps));
+  const env = buildBrainEnv(secrets, config.brain, jobPort(deps), sessionsDir(config));
   let prepared: Prepared;
   try {
     prepared = await prepare(ctx, deps, paths, env, onWorktree);

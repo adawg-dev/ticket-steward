@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -526,12 +526,14 @@ describe("runJob", () => {
     expect(input.workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
     expect(input.artifactsDir).toBe(join(repo.dataDir, "jobs", String(ctx.jobId), "artifacts"));
     expect(input.transcriptPath).toBe(join(repo.dataDir, "jobs", String(ctx.jobId), "attempt-1.jsonl"));
-    expect(input.denyPaths).toEqual([repo.mirror.path, join(repo.dataDir, "steward.db"), repo.overlayDir, repo.root]);
+    expect(input.denyPaths).toEqual([repo.mirror.path, join(repo.dataDir, "steward.db"), repo.overlayDir, repo.root, join(repo.dataDir, "sessions")]);
     expect(Object.keys(input.mcpServers).sort()).toEqual(["codehost", "playwright"]);
     expect(input.mcpServers.playwright?.args.slice(-2)).toEqual(["--console-level", "warning"]);
     expect(input.inlineSkills).toEqual([]);
     expect(input.env.ANTHROPIC_API_KEY).toBe("sk-ant-test-key-value");
     expect(input.env.STEWARD_PORT).toBe(String(port));
+    expect(input.env.CLAUDE_CONFIG_DIR).toBe(join(repo.dataDir, "sessions"));
+    expect(statSync(join(repo.dataDir, "sessions")).mode & 0o777).toBe(0o700);
   });
 
   it("tells the brain about a ticket-gateway ticket and its routing", async () => {

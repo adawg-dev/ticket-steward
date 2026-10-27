@@ -6,7 +6,7 @@ export interface McpServerSpec {
   env: Record<string, string>;
 }
 
-export type BrainOutput = "enrich" | "implement";
+export type BrainOutput = "enrich" | "implement" | "fix";
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -27,6 +27,8 @@ export interface BrainInput {
   denyPaths: string[];
   /** Which structured-output schema the run must return. */
   output: BrainOutput;
+  /** claude-code only: the SDK session to resume; openai-agents refuses a run that sets it. */
+  resumeSessionId?: string;
 }
 
 export interface BrainUsage {
@@ -40,6 +42,8 @@ export interface BrainRun {
   output: unknown;
   usage?: BrainUsage;
   error?: string;
+  /** claude-code: the SDK session id of the last result, the follow-up's after a max-turns follow-up. */
+  sessionId?: string;
 }
 
 /** `BrainRun.error` when the run was aborted through the caller's AbortSignal. */

@@ -9,7 +9,7 @@ import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
 import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, type JobPaths } from "../core/workspace.js";
+import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, type JobPaths } from "../core/workspace.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
 import { git } from "../workspace/git.js";
@@ -137,7 +137,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) }, null);
   }
 
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps));
+  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config));
   let worktree: Worktree;
   let prompt: string;
   try {
@@ -167,7 +167,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   try {
     run = await (deps.runBrain ?? runBrainDetached)(
       deps.config.brain,
-      brainInput(deps, paths, worktree, prompt, env, "implement", { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns }),
+      brainInput(deps, paths, worktree, prompt, env, "implement", { limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns } }),
       deps.redactor,
       { ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
     );

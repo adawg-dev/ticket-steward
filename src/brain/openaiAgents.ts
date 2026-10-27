@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Agent, MCPServerStdio, run } from "@openai/agents";
+import { z } from "zod";
 import { BrainResultSchema } from "../core/result.js";
 import { ImplementResultSchema } from "../implement/result.js";
 import { createBrainTools } from "./tools/index.js";
@@ -69,7 +70,10 @@ const mcpServers = (input: BrainInput): MCPServerStdio[] =>
 export const modelSettingsFor = (input: Pick<BrainInput, "reasoningEffort">): { reasoning?: { effort: ReasoningEffort } } =>
   input.reasoningEffort === undefined ? {} : { reasoning: { effort: input.reasoningEffort } };
 
-const agentFor = <TOutput extends typeof BrainResultSchema | typeof ImplementResultSchema>(
+/** Placeholder until the fix result schema lands. */
+const FixResultSchema = z.object({});
+
+const agentFor = <TOutput extends typeof BrainResultSchema | typeof ImplementResultSchema | typeof FixResultSchema>(
   input: BrainInput,
   servers: MCPServerStdio[],
   processes: BackgroundProcesses,
@@ -94,6 +98,7 @@ const agentFor = <TOutput extends typeof BrainResultSchema | typeof ImplementRes
 export const createOpenAiAgentsBrain = (): Brain => ({
   kind: "openai-agents",
   run: async (input, onMessage) => {
+    if (input.resumeSessionId !== undefined) return { ok: false, output: undefined, error: "openai-agents cannot resume a session" };
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), input.timeoutMs);
     const servers = mcpServers(input);
@@ -103,7 +108,9 @@ export const createOpenAiAgentsBrain = (): Brain => ({
       const agent =
         input.output === "implement"
           ? agentFor(input, servers, processes, ImplementResultSchema)
-          : agentFor(input, servers, processes, BrainResultSchema);
+          : input.output === "fix"
+            ? agentFor(input, servers, processes, FixResultSchema)
+            : agentFor(input, servers, processes, BrainResultSchema);
       const prompt = `${input.prompt}${await skillsText(input.workspacePath, input.inlineSkills)}`;
       const result = await run(agent, prompt, { maxTurns: input.maxTurns, signal: abortController.signal });
       for (const item of result.newItems) onMessage(JSON.stringify(item.toJSON()));

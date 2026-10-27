@@ -35,7 +35,7 @@ const liveInput = (brain: BrainConfig): BrainInput => ({
   artifactsDir: join(dir, "artifacts"),
   transcriptPath: join(dir, "attempt-1.jsonl"),
   prompt: PROMPT,
-  env: buildBrainEnv(secretsFromEnv(), brain, 4100),
+  env: buildBrainEnv(secretsFromEnv(), brain, 4100, join(tmpdir(), "steward-live-sessions")),
   timeoutMs: brain.timeoutMinutes * 60_000,
   maxTurns: brain.maxTurns,
   model: brain.model,

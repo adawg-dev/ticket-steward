@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { query, type HookCallback, type McpServerConfig, type Options, type SDKMessage, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 import { brainResultJsonSchema } from "../core/result.js";
 import { implementResultJsonSchema } from "../implement/result.js";
@@ -6,7 +7,15 @@ import type { Brain, BrainInput, BrainOutput, BrainUsage, OnMessage } from "./ty
 
 const ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*"];
 const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
-const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = { enrich: brainResultJsonSchema, implement: implementResultJsonSchema };
+/** Placeholder until the fix result schema lands. */
+const fixResultJsonSchema: Record<string, unknown> = z.toJSONSchema(z.object({}), { target: "draft-07" });
+const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = {
+  enrich: brainResultJsonSchema,
+  implement: implementResultJsonSchema,
+  fix: fixResultJsonSchema,
+};
+/** Claude Code deletes transcripts older than this; the steward's retention owns session deletion instead. */
+const CLEANUP_PERIOD_DAYS = 3650;
 const FOLLOW_UP_PROMPT = "Stop investigating and emit the final structured result now.";
 
 /** The SDK's `query`, narrowed to what the brain consumes so tests can substitute an async generator. */
@@ -36,6 +45,12 @@ const usageOf = (result: SDKResultMessage): BrainUsage => ({
   costUsd: result.total_cost_usd,
 });
 
+const addUsage = (a: BrainUsage, b: BrainUsage): BrainUsage => ({
+  inputTokens: a.inputTokens + b.inputTokens,
+  outputTokens: a.outputTokens + b.outputTokens,
+  ...(a.costUsd === undefined && b.costUsd === undefined ? {} : { costUsd: (a.costUsd ?? 0) + (b.costUsd ?? 0) }),
+});
+
 const consume = async (queryImpl: QueryImpl, prompt: string, options: Options, onMessage: OnMessage): Promise<SDKResultMessage | null> => {
   let result: SDKResultMessage | null = null;
   try {
@@ -63,22 +78,28 @@ export const createClaudeCodeBrain = (deps: { queryImpl?: QueryImpl } = {}): Bra
         permissionMode: "acceptEdits",
         allowedTools: ALLOWED_TOOLS,
         settingSources: ["project"],
+        settings: { cleanupPeriodDays: CLEANUP_PERIOD_DAYS },
         mcpServers: mcpServers(input),
         outputFormat: { type: "json_schema", schema: OUTPUT_SCHEMAS[input.output] },
         hooks: { PreToolUse: [{ matcher: POLICY_HOOK_MATCHER, hooks: [policyHook(input)] }] },
         abortController,
+        ...(input.resumeSessionId === undefined ? {} : { resume: input.resumeSessionId }),
       };
       try {
         let result = await consume(queryImpl, input.prompt, options, onMessage);
+        let usage = result === null ? undefined : usageOf(result);
         if (result?.subtype === "error_max_turns") {
           result = await consume(queryImpl, FOLLOW_UP_PROMPT, { ...options, resume: result.session_id, maxTurns: 2 }, onMessage);
+          if (result !== null && usage !== undefined) usage = addUsage(usage, usageOf(result));
         }
-        if (result === null) return { ok: false, output: undefined, error: "brain produced no result message" };
-        if (result.subtype !== "success") return { ok: false, output: undefined, usage: usageOf(result), error: result.subtype };
+        const reported = usage === undefined ? {} : { usage };
+        if (result === null) return { ok: false, output: undefined, ...reported, error: "brain produced no result message" };
+        const sessionId = result.session_id;
+        if (result.subtype !== "success") return { ok: false, output: undefined, ...reported, sessionId, error: result.subtype };
         if (result.structured_output === undefined) {
-          return { ok: false, output: undefined, usage: usageOf(result), error: "brain finished without structured output" };
+          return { ok: false, output: undefined, ...reported, sessionId, error: "brain finished without structured output" };
         }
-        return { ok: true, output: result.structured_output, usage: usageOf(result) };
+        return { ok: true, output: result.structured_output, ...reported, sessionId };
       } catch (err) {
         return { ok: false, output: undefined, error: err instanceof Error ? err.message : String(err) };
       } finally {
