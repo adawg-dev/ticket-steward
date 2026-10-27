@@ -173,7 +173,7 @@ export class JobStore {
       `INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at, kind, subject)
        VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`,
     );
-    this.selectQueued = db.prepare<[string, IssueJobKind], JobRow>(
+    this.selectQueued = db.prepare<[string, JobKind], JobRow>(
       "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' AND kind = ? ORDER BY id LIMIT 1",
     );
     this.existsSucceeded = db.prepare<[string, IssueJobKind], { found: number }>(
@@ -255,7 +255,7 @@ export class JobStore {
     return Number(lastInsertRowid);
   }
 
-  findQueued(issueId: string, kind: IssueJobKind = "enrich"): Job | null {
+  findQueued(issueId: string, kind: JobKind = "enrich"): Job | null {
     const row = this.selectQueued.get(issueId, kind);
     return row === undefined ? null : toJob(row);
   }

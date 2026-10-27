@@ -30,6 +30,7 @@ export const registerImplement = (program: Command, ctx: CliContext): void => {
         allowlist: config.tracker.teams,
         gatewayIssues: config.tracker.gatewayIssues,
         priorSuccess: false,
+        loop: null,
         hasQueuedJob: opts.dryRun ? false : jobs.findQueued(id, kind) !== null,
       });
       if (decision.action === "skip") return fail(ctx, decision.reason);

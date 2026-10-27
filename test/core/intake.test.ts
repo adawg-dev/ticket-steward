@@ -15,7 +15,7 @@ const labeled: TriggerEvent = { ...created, kind: "issue.labeled" };
 
 const cli: TriggerEvent = { kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API" };
 
-const base = { allowlist: ["API"], gatewayIssues: "enrich" as const, priorSuccess: false, hasQueuedJob: false };
+const base = { allowlist: ["API"], gatewayIssues: "enrich" as const, priorSuccess: false, hasQueuedJob: false, loop: null };
 
 const gatewayFooter = "\n\n---\n\n_Routed by ticket-gateway · class `gateway` (p=0.91, margin 0.40, auto) → API · reported by Ana via Slack /ticket_";
 
@@ -126,6 +126,23 @@ describe("implement intake", () => {
 
   it("skips an implement event when a prior implement job succeeded", () => {
     expect(shouldEnqueue({ ...base, event: implementEvent, priorSuccess: true })).toEqual({ action: "skip", reason: "API-1 was already implemented" });
+  });
+
+  it("restarts a handed-back loop even when a prior implement succeeded", () => {
+    expect(shouldEnqueue({ ...base, event: implementEvent, priorSuccess: true, loop: { state: "handed_back" } })).toEqual({ action: "restart" });
+  });
+
+  it("attaches to a queued restart instead of restarting twice", () => {
+    expect(shouldEnqueue({ ...base, event: implementEvent, hasQueuedJob: true, loop: { state: "handed_back" } })).toEqual({ action: "attach" });
+  });
+
+  it.each(["awaiting_mr", "awaiting_review", "fixing"] as const)("skips an implement event while the loop is %s", (state) => {
+    expect(shouldEnqueue({ ...base, event: implementEvent, loop: { state } })).toEqual({ action: "skip", reason: "API-1 already has a fix loop running" });
+  });
+
+  it.each(["passed", "stopped"] as const)("applies the usual rules when the latest loop is %s", (state) => {
+    expect(shouldEnqueue({ ...base, event: implementEvent, loop: { state } })).toEqual({ action: "enqueue" });
+    expect(shouldEnqueue({ ...base, event: implementEvent, priorSuccess: true, loop: { state } })).toEqual({ action: "skip", reason: "API-1 was already implemented" });
   });
 
   it("skips an implement event for a closed ticket", () => {

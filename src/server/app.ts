@@ -42,20 +42,26 @@ const parseJson = (raw: string): unknown => {
 
 const intake = (deps: ServerDeps, event: WebhookEvent): Intake =>
   transaction(deps.stores.db, () => {
-    const { jobs, deliveries } = deps.stores;
+    const { jobs, deliveries, loops } = deps.stores;
     if (!deliveries.markSeen(event.deliveryId)) return { action: "duplicate" };
     const kind = jobKindFor(event);
     if (kind === "implement" && deps.config.implement === undefined) {
       return { action: "skip", reason: "implement is not configured" };
     }
+    const loop = kind === "implement" ? loops.latestForIssue(event.issueId) : null;
+    const queuedKind = loop?.state === "handed_back" ? "restart" : kind;
     const decision = shouldEnqueue({
       event,
       allowlist: deps.config.tracker.teams,
       gatewayIssues: deps.config.tracker.gatewayIssues,
       priorSuccess: jobs.hasSucceeded(event.issueId, kind),
-      hasQueuedJob: jobs.findQueued(event.issueId, kind) !== null,
+      hasQueuedJob: jobs.findQueued(event.issueId, queuedKind) !== null,
+      loop,
     });
     if (decision.action === "enqueue") jobs.enqueue(event);
+    if (decision.action === "restart" && loop !== null) {
+      jobs.enqueue({ kind: "loop", issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, loopId: loop.id, step: "restart", labelDriven: true });
+    }
     return decision;
   });
 

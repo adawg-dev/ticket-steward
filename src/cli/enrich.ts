@@ -62,6 +62,7 @@ export const registerEnrich = (program: Command, ctx: CliContext): void => {
         gatewayIssues: config.tracker.gatewayIssues,
         priorSuccess: opts.dryRun ? false : jobs.hasSucceeded(id),
         hasQueuedJob: opts.dryRun ? false : jobs.findQueued(id) !== null,
+        loop: null,
       });
       if (decision.action === "skip") return fail(ctx, decision.reason);
       if (opts.dryRun) return dryRun(runtime, event, ctx);

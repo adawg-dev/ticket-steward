@@ -249,6 +249,41 @@ describe("buildServer", () => {
         expect(stores.jobs.list({ limit: 10 })[0]?.kind).toBe("implement");
       });
 
+      const createLoop = (state: "awaiting_review" | "handed_back"): number => {
+        const jobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
+        stores.jobs.claimById(jobId);
+        stores.jobs.finish(jobId, { status: "succeeded" });
+        const id = stores.loops.create({
+          issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: jobId, branch: "feature/api-1", baseSha: "a".repeat(40), headSha: "b".repeat(40),
+          worktreeName: "api-1", labelDriven: false, sessionId: null,
+        });
+        stores.loops.update(id, { state });
+        return id;
+      };
+
+      it("queues a restart job when ready-for-agent is added to a handed-back loop", async () => {
+        await rebuild(IMPLEMENT);
+        const loopId = createLoop("handed_back");
+        const before = stores.jobs.list({ limit: 10 }).length;
+        const response = await post("Issue", "delivery-9", readyForAgentUpdate());
+
+        expect(response.json()).toEqual({ ok: true, action: "restart" });
+        const queued = stores.jobs.list({ status: "queued", limit: 10 });
+        expect(queued).toHaveLength(1);
+        expect(stores.jobs.list({ limit: 10 })).toHaveLength(before + 1);
+        expect(queued[0]).toMatchObject({ kind: "restart", subject: `loop:${loopId}` });
+        expect(queued[0]?.trigger).toMatchObject({ kind: "loop", step: "restart", loopId, labelDriven: true });
+      });
+
+      it("skips ready-for-agent while the loop is awaiting a review", async () => {
+        await rebuild(IMPLEMENT);
+        createLoop("awaiting_review");
+        const response = await post("Issue", "delivery-9", readyForAgentUpdate());
+
+        expect(response.json()).toEqual({ ok: true, action: "skip" });
+        expect(stores.jobs.list({ status: "queued", limit: 10 })).toEqual([]);
+      });
+
       it("ignores ready-for-agent when implement is not configured", async () => {
         const response = await post("Issue", "delivery-9", readyForAgentUpdate());
 
