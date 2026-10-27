@@ -382,6 +382,78 @@ const rejectPushes = async (): Promise<() => Promise<void>> => {
   return () => rm(marker);
 };
 
+describe("the fix loop start", () => {
+  const GREPTILE = {
+    botUsername: "greptile-bot", maxRounds: 5, prompt: "/dev/null", pollSeconds: 60, mrTimeoutMinutes: 60,
+    reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 60, ciLogLines: 200,
+  };
+  const withGreptile = (): StewardConfig => ({ ...makeConfig(), greptile: GREPTILE });
+
+  /** A fake brain that edits the adapter, returns `implemented` and leaves session `session-impl`; run through `runBrain`. */
+  const sessionBrain = (): { brain: FakeBrain; runBrain: NonNullable<PipelineDeps["runBrain"]> } => {
+    const brain = new FakeBrain({ result: implemented, editWorkspace: { "src/adapter.ts": "export const adapter = 2;\n" }, sessionId: "session-impl" });
+    return { brain, runBrain: async (_config, input) => brain.run(input, () => undefined) };
+  };
+
+  const awaitJobs = () => stores.jobs.list({ limit: 50 }).filter((job) => job.kind === "await_review");
+
+  it("starts a loop on a stable worktree after a label-triggered push", async () => {
+    const { brain, runBrain } = sessionBrain();
+    const ctx = claim();
+
+    const outcome = await runImplement(ctx, makeDeps(runBrain, withGreptile()));
+
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(brain.lastInput().workspacePath).toBe(join(repo.dataDir, "work", "ticket-API-1"));
+    const job = stores.jobs.get(ctx.jobId);
+    expect(job?.sessionId).toBe("session-impl");
+    const loop = stores.loops.forImplementJob(ctx.jobId);
+    expect(loop).toMatchObject({ headSha: job?.commitSha, sessionId: "session-impl", worktreeName: "ticket-API-1", branch: "fix/API-1-adapter-drops-the-last-chunk", labelDriven: true, round: 0 });
+    expect(loop?.baseSha).toBe(await git(repo.repo, ["rev-parse", "main"]));
+    expect(awaitJobs().map((row) => row.trigger)).toEqual([{ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: loop?.id, step: "await" }]);
+  });
+
+  it("starts no loop for a cli trigger, which keeps the per-attempt worktree", async () => {
+    const { brain, runBrain } = sessionBrain();
+    const ctx = claim({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
+
+    expect(await runImplement(ctx, makeDeps(runBrain, withGreptile()))).toEqual({ status: "succeeded" });
+
+    expect(brain.lastInput().workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
+    expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
+    expect(awaitJobs()).toEqual([]);
+  });
+
+  it("starts no loop without greptile configured", async () => {
+    const { brain, runBrain } = sessionBrain();
+    const ctx = claim();
+
+    expect(await runImplement(ctx, makeDeps(runBrain))).toEqual({ status: "succeeded" });
+
+    expect(brain.lastInput().workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
+    expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
+  });
+
+  it("starts the loop exactly once when publishImplementOnly retries after a crash", async () => {
+    const { runBrain } = sessionBrain();
+    const ctx = claim();
+    vi.spyOn(stores.jobs, "markPushed").mockImplementationOnce(() => {
+      throw new Error("crashed after push");
+    });
+    expect((await runImplement(ctx, makeDeps(runBrain, withGreptile()))).status).toBe("failed");
+    expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
+
+    tracker.failNextWrite();
+    expect((await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined, withGreptile()))).status).toBe("publish_failed");
+    const retry = await publishImplementOnly({ ...ctx, attempt: 3 }, makeDeps(undefined, withGreptile()));
+
+    expect(retry).toEqual({ status: "succeeded" });
+    const job = stores.jobs.get(ctx.jobId);
+    expect(stores.loops.forImplementJob(ctx.jobId)).toMatchObject({ headSha: job?.commitSha, sessionId: "session-impl", worktreeName: "ticket-API-1", baseSha: await git(repo.repo, ["rev-parse", "main"]) });
+    expect(awaitJobs()).toHaveLength(1);
+  });
+});
+
 describe("publishImplementOnly", () => {
   it("re-publishes after a failed comment without pushing again", async () => {
     const ctx = claim();

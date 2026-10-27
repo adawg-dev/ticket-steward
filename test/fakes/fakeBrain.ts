@@ -8,6 +8,8 @@ export interface FakeBrainOptions {
   editWorkspace?: Record<string, string>;
   fail?: boolean;
   usage?: BrainUsage;
+  /** The SDK session id a successful run returns. */
+  sessionId?: string;
 }
 
 export class FakeBrain implements Brain {
@@ -41,6 +43,6 @@ export class FakeBrain implements Brain {
     }
     if (this.options.fail === true) return { ok: false, output: undefined, error: "fake brain failure" };
     const usage = this.options.usage ?? { inputTokens: 10, outputTokens: 5 };
-    return { ok: true, output: this.options.result, usage };
+    return { ok: true, output: this.options.result, usage, ...(this.options.sessionId === undefined ? {} : { sessionId: this.options.sessionId }) };
   }
 }

@@ -38,11 +38,15 @@ export const sessionsDir = (config: PipelineDeps["config"]): string => join(conf
 
 export const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-export const jobPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths => {
+/** A ticket's fix-loop worktree name: one path per ticket, so a resumed brain session finds its project by cwd. */
+export const stableWorktreeName = (identifier: string): string => `ticket-${identifier}`;
+
+/** The job's on-disk paths; `worktreeName` overrides the per-attempt worktree (a dry run always gets its own). */
+export const jobPaths = (ctx: RunContext, deps: PipelineDeps, opts: { worktreeName?: string } = {}): JobPaths => {
   const jobDir = join(deps.config.dataDir, "jobs", String(ctx.jobId));
   return {
     jobDir,
-    worktreeName: ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`,
+    worktreeName: ctx.dryRun ? `dry-${process.pid}` : (opts.worktreeName ?? `${ctx.jobId}-${ctx.attempt}`),
     workRoot: join(deps.config.dataDir, "work"),
     artifactsDir: join(jobDir, "artifacts"),
     transcriptPath: join(jobDir, `attempt-${ctx.attempt}.jsonl`),

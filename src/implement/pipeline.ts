@@ -9,7 +9,8 @@ import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
 import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, type JobPaths } from "../core/workspace.js";
+import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, stableWorktreeName, type JobPaths } from "../core/workspace.js";
+import { isLabelImplement, startLoop } from "../greptile/start.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
 import { git } from "../workspace/git.js";
@@ -82,6 +83,19 @@ const pushFromBundle = async (input: { paths: JobPaths; deps: PipelineDeps; remo
   }
 };
 
+/** With `greptile`, a label-triggered implement starts a fix loop once it pushes. */
+const startsLoop = (ctx: RunContext, deps: PipelineDeps): boolean => deps.config.greptile !== undefined && isLabelImplement(ctx.trigger);
+
+/** A loop-starting implement runs on the ticket's stable worktree, where its fix rounds resume the brain session. */
+const implementPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths =>
+  jobPaths(ctx, deps, startsLoop(ctx, deps) ? { worktreeName: stableWorktreeName(ctx.identifier) } : {});
+
+/** Starts the fix loop for the pushed job, re-read so the loop sees its push, commit and session. */
+const startLoopFor = (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, baseSha: string): void => {
+  const job = deps.stores.jobs.get(ctx.jobId);
+  if (job !== null) startLoop(deps, job, { baseSha, worktreeName: paths.worktreeName });
+};
+
 const shortRef = (ref: string): string => ref.replace(/^refs\/heads\//, "");
 
 const handback = (label: Handback["label"], reason: string, detail = ""): Handback => ({ label, reason, detail });
@@ -118,7 +132,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   const configured = settingsOf(deps);
   if (configured === null) return notConfigured;
   const { settings, remote } = configured;
-  const paths = jobPaths(ctx, deps);
+  const paths = implementPaths(ctx, deps);
 
   let bundle: TicketBundle;
   let baseSha: string;
@@ -176,6 +190,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     return { status: "failed", error: errorMessage(err), retryable: false };
   }
   patchAttempt(ctx, deps, { transcriptPath: paths.transcriptPath, ...(run.usage === undefined ? {} : { usage: run.usage }) });
+  if (run.sessionId !== undefined && !ctx.dryRun) deps.stores.jobs.recordSession(ctx.jobId, run.sessionId);
   if (!run.ok) return { status: "failed", error: run.error ?? "brain run failed", retryable: run.error === INTERRUPTED_ERROR };
 
   const validated = validateImplementResult(run.output, settings.branchTypes);
@@ -243,6 +258,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
   }
   deps.stores.jobs.markPushed(ctx.jobId);
+  startLoopFor(ctx, deps, paths, baseSha);
   return finish(ctx, deps, stored, branch);
 };
 
@@ -265,6 +281,7 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
   const job = deps.stores.jobs.get(ctx.jobId);
   const stored = job?.implementResult ?? null;
   if (job === null || stored === null) return { status: "failed", error: "no stored implement result to publish", retryable: false };
+  const paths = implementPaths(ctx, deps);
   if (stored.handback === null && job.pushedAt === null) {
     if (job.branch === null || job.commitSha === null) return { status: "failed", error: "no recorded commit to push", retryable: false };
     // Never push for a ticket closed since the failed attempt.
@@ -275,7 +292,6 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
     } catch (err) {
       return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
     }
-    const paths = jobPaths(ctx, deps);
     try {
       // A push that landed before its record was saved (crash window) is ours: the exact branch at the exact commit.
       const site = await lsRemoteSite(paths, configured.remote);
@@ -295,6 +311,14 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
       return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
     }
     deps.stores.jobs.markPushed(ctx.jobId);
+  }
+  // Also after a crash between the push record and the loop's start; startLoop returns an existing loop untouched.
+  if (stored.handback === null && startsLoop(ctx, deps) && deps.stores.loops.forImplementJob(ctx.jobId) === null) {
+    try {
+      startLoopFor(ctx, deps, paths, await bundleBase(join(paths.jobDir, BUNDLE_FILE)));
+    } catch (err) {
+      return { status: "publish_failed", error: `loop: ${errorMessage(err)}` };
+    }
   }
   return publishImplement({
     ctx,
