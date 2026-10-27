@@ -107,6 +107,7 @@ describe("tracker.labels and implement", () => {
       needsInfo: "needs-info",
       readyForHuman: "ready-for-human",
       implemented: "agent-implemented",
+      approved: "agent-approved",
     });
   });
 
@@ -137,6 +138,48 @@ describe("tracker.labels and implement", () => {
   it("rejects a branch type that is not lowercase kebab", () => {
     const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement: { ...implement, branchTypes: ["Fix"] } });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("greptile config", () => {
+  const labels = {};
+  const implement = { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } };
+  const greptile = { botUsername: "g", prompt: "./prompts/fix.md" };
+  const valid = { ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement, brain: { kind: "claude-code", model: "m", maxTurns: 1, timeoutMinutes: 1 }, codehost: { kind: "gitlab", baseUrl: "https://gitlab.example.com", project: "g/p" }, greptile };
+  const messages = (input: unknown): string[] => {
+    const result = StewardConfigSchema.safeParse(input);
+    return result.success ? [] : result.error.issues.map((issue) => issue.message);
+  };
+
+  it("parses with every default", () => {
+    const parsed = StewardConfigSchema.parse(valid);
+    expect(parsed.greptile).toEqual({
+      botUsername: "g",
+      maxRounds: 5,
+      prompt: "./prompts/fix.md",
+      pollSeconds: 60,
+      mrTimeoutMinutes: 60,
+      reviewTimeoutMinutes: 30,
+      pipelineTimeoutMinutes: 60,
+      ciLogLines: 200,
+    });
+  });
+
+  it("defaults the mcp url", () => {
+    const parsed = StewardConfigSchema.parse({ ...valid, greptile: { ...greptile, mcp: {} } });
+    expect(parsed.greptile?.mcp).toEqual({ url: "https://api.greptile.com/mcp" });
+  });
+
+  it("requires implement", () => {
+    expect(messages({ ...valid, implement: undefined })).toContain("greptile requires implement");
+  });
+
+  it("requires a gitlab code host", () => {
+    expect(messages({ ...valid, codehost: { kind: "github", owner: "o", repo: "r" } })).toContain('greptile requires codehost.kind "gitlab"');
+  });
+
+  it("requires the claude-code brain", () => {
+    expect(messages({ ...valid, brain: { kind: "openai-agents", model: "m", maxTurns: 1, timeoutMinutes: 1 } })).toContain('greptile requires brain.kind "claude-code"');
   });
 });
 

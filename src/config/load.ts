@@ -66,6 +66,7 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string }): P
         : { skillsDir: resolveFromConfigDir(configDir, parsed.workspace.skillsDir) }),
     },
     ...(parsed.implement === undefined ? {} : { implement: { ...parsed.implement, prompt: resolveFromConfigDir(configDir, parsed.implement.prompt) } }),
+    ...(parsed.greptile === undefined ? {} : { greptile: { ...parsed.greptile, prompt: resolveFromConfigDir(configDir, parsed.greptile.prompt) } }),
   };
   const secrets = await readSecrets(configDir);
   if (config.implement !== undefined && (secrets.GITLAB_PUSH_TOKEN ?? "") === "") throw new Error("implement requires GITLAB_PUSH_TOKEN in .env");

@@ -83,7 +83,7 @@ const expectedSection = (sha: string, jobId: number, extra = ""): string =>
 const expectedComment = (jobId: number): string =>
   `Triage (job ${jobId}, confidence high): ready to build; the agent brief is in the Enrichment section. The adapter truncates the final chunk.`;
 
-const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented" };
+const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 const withLabels = (config: StewardConfig): StewardConfig => ({ ...config, tracker: { ...config.tracker, labels: LABELS } });
 
 let repo: TmpRepo;

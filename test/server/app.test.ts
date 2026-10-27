@@ -16,7 +16,7 @@ let stores: Stores;
 let tracker: FakeTracker;
 let app: FastifyInstance;
 
-const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented" };
+const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const IMPLEMENT = {
   prompt: "./prompts/implement.md",

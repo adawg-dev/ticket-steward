@@ -240,9 +240,9 @@ export class GitLabMrClient implements GitLabMrApi {
   }
 }
 
-/** The loop's GitLab client; until the `greptile` config gate exists it needs a GitLab code host and `GITLAB_TOKEN`. */
+/** The loop's GitLab client; only built when `greptile` is configured, on a GitLab code host with `GITLAB_TOKEN`. */
 export const createGitLabMr = (config: StewardConfig, secrets: Secrets): GitLabMrApi | undefined => {
   const token = secrets.GITLAB_TOKEN;
-  if (config.codehost.kind !== "gitlab" || token === undefined || token === "") return undefined;
+  if (config.greptile === undefined || config.codehost.kind !== "gitlab" || token === undefined || token === "") return undefined;
   return new GitLabMrClient({ baseUrl: config.codehost.baseUrl, token });
 };

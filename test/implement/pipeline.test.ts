@@ -19,7 +19,7 @@ import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
 
 const IMPLEMENT_PROMPT = fileURLToPath(new URL("../../prompts/implement.md", import.meta.url));
-const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented" };
+const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const issue: TicketBundle = {
   id: "issue-1",

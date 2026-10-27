@@ -12,6 +12,8 @@ const LabelsSchema = z.object({
   needsInfo: z.string().min(1).default("needs-info"),
   readyForHuman: z.string().min(1).default("ready-for-human"),
   implemented: z.string().min(1).default("agent-implemented"),
+  /** Set when the fix loop ends with Greptile at 5/5 and a green pipeline. */
+  approved: z.string().min(1).default("agent-approved"),
 });
 
 const BRANCH_TYPE = /^[a-z][a-z0-9-]*$/;
@@ -59,6 +61,21 @@ const ImplementSchema = z.object({
   maxTurns: z.number().int().positive().default(150),
   /** Branches doctor expects GitLab to protect from the push token. */
   protectedBranches: z.array(z.string().min(1)).default(["main", "staging", "dev"]),
+});
+
+const GreptileSchema = z.object({
+  /** The username Greptile comments as on the MR. */
+  botUsername: z.string().min(1),
+  /** Fix rounds after the implement push (round 0). */
+  maxRounds: z.number().int().positive().default(5),
+  /** The fix prompt, resolved against the config directory. */
+  prompt: z.string(),
+  pollSeconds: z.number().positive().default(60),
+  mrTimeoutMinutes: z.number().positive().default(60),
+  reviewTimeoutMinutes: z.number().positive().default(30),
+  pipelineTimeoutMinutes: z.number().positive().default(60),
+  ciLogLines: z.number().int().positive().default(200),
+  mcp: z.object({ url: z.string().min(1).default("https://api.greptile.com/mcp") }).optional(),
 });
 
 export const StewardConfigSchema = z.object({
@@ -112,7 +129,14 @@ export const StewardConfigSchema = z.object({
   implement: ImplementSchema.optional(),
   /** Parallel jobs on fresh per-job containers; unset keeps one job at a time on workspace.port. */
   slots: SlotsSchema.optional(),
+  /** The Greptile fix loop after the implement push; GitLab and the claude-code brain only. */
+  greptile: GreptileSchema.optional(),
 }).superRefine((config, ctx) => {
+  if (config.greptile !== undefined) {
+    if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["greptile"], message: "greptile requires implement" });
+    if (config.codehost.kind !== "gitlab") ctx.addIssue({ code: "custom", path: ["greptile"], message: 'greptile requires codehost.kind "gitlab"' });
+    if (config.brain.kind !== "claude-code") ctx.addIssue({ code: "custom", path: ["greptile"], message: 'greptile requires brain.kind "claude-code"' });
+  }
   if (config.implement !== undefined && config.tracker.labels === undefined) {
     ctx.addIssue({ code: "custom", path: ["implement"], message: "implement requires tracker.labels" });
   }
@@ -131,6 +155,7 @@ export type BrainConfig = StewardConfig["brain"];
 export type CodeHostConfig = StewardConfig["codehost"];
 export type LabelsConfig = NonNullable<StewardConfig["tracker"]["labels"]>;
 export type ImplementConfig = NonNullable<StewardConfig["implement"]>;
+export type GreptileConfig = NonNullable<StewardConfig["greptile"]>;
 export type SlotsConfig = NonNullable<StewardConfig["slots"]>;
 
 /** Slot n's app port with `slots`, otherwise `workspace.port`; config load guarantees one of them. */
