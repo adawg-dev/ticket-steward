@@ -377,3 +377,59 @@ describe("claimNext with running jobs", () => {
     expect(stores.jobs.get(id)?.error).toBe(INTERRUPTED_ERROR);
   });
 });
+
+describe("loop jobs", () => {
+  const loopEvent = (step: "await" | "fix" | "restart"): TriggerEvent => ({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 3, step });
+
+  it("stores an await step as kind await_review with the loop as subject", () => {
+    const id = stores.jobs.enqueue(loopEvent("await"));
+    const job = stores.jobs.get(id);
+    expect(job?.kind).toBe("await_review");
+    expect(job?.subject).toBe("loop:3");
+    expect(job?.trigger).toEqual(loopEvent("await"));
+    expect(job?.unreadable).toEqual([]);
+  });
+
+  it("stores fix and restart steps under their own names", () => {
+    expect(stores.jobs.get(stores.jobs.enqueue(loopEvent("fix")))?.kind).toBe("fix");
+    expect(stores.jobs.get(stores.jobs.enqueue(loopEvent("restart")))?.kind).toBe("restart");
+  });
+
+  it("does not claim a queued fix while an implement for the same ticket is running", () => {
+    const implement = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
+    expect(stores.jobs.claimNext()?.id).toBe(implement);
+    const fix = stores.jobs.enqueue(loopEvent("fix"));
+
+    expect(stores.jobs.claimNext()).toBeNull();
+
+    stores.jobs.finish(implement, { status: "succeeded" });
+    expect(stores.jobs.claimNext()?.id).toBe(fix);
+  });
+
+  it("recordSession stores the session id on the job", () => {
+    const id = stores.jobs.enqueue(loopEvent("fix"));
+    expect(stores.jobs.get(id)?.sessionId).toBeNull();
+    stores.jobs.recordSession(id, "session-9");
+    expect(stores.jobs.get(id)?.sessionId).toBe("session-9");
+  });
+
+  it("defer after a claim requeues the job until the given time and gives back the attempt", () => {
+    const id = stores.jobs.enqueue(loopEvent("await"));
+    stores.jobs.claimNext();
+    stores.jobs.scheduleRetry(id, new Date(), "an earlier error");
+    const before = stores.jobs.get(id)?.attempts;
+    expect(stores.jobs.claimNext()?.attempts).toBe(2);
+    const until = new Date(Date.now() + 60_000);
+
+    stores.jobs.defer(id, until);
+
+    const job = stores.jobs.get(id);
+    expect(job?.status).toBe("queued");
+    expect(before).toBe(1);
+    expect(job?.attempts).toBe(before);
+    expect(job?.notBefore).toBe(until.toISOString());
+    expect(job?.error).toBeNull();
+    expect(job?.finishedAt).toBeNull();
+    expect(stores.jobs.claimNext()).toBeNull();
+  });
+});

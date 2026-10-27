@@ -71,6 +71,7 @@ const playwrightMcpSpec = (): McpServerSpec => {
 /** Masks secrets in the outcome's error or warning before it is stored or sent to the tracker. */
 export const redactOutcome = (outcome: JobOutcome, redactor: Redactor): JobOutcome => {
   if (outcome.status === "succeeded") return outcome.warning === undefined ? outcome : { ...outcome, warning: redactor.redact(outcome.warning) };
+  if (outcome.status === "deferred") return outcome;
   return { ...outcome, error: redactor.redact(outcome.error) };
 };
 

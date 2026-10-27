@@ -208,6 +208,40 @@ describe("startWorker", () => {
     expect(stores.attempts.forJob(jobId)[0]?.error).toBe("comment failed");
   });
 
+  it("leaves a deferred job queued until the given time, its attempt closed and given back", async () => {
+    const until = new Date(Date.now() + 3_600_000);
+    runJobMock.mockResolvedValue({ status: "deferred", until });
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    start();
+
+    await vi.waitFor(() => {
+      expect(stores.attempts.forJob(jobId)[0]?.finishedAt).toEqual(expect.any(String));
+      expect(stores.jobs.get(jobId)?.status).toBe("queued");
+    });
+
+    const job = stores.jobs.get(jobId);
+    expect(job?.notBefore).toBe(until.toISOString());
+    expect(job?.attempts).toBe(0);
+    expect(job?.error).toBeNull();
+    expect(stores.attempts.forJob(jobId)[0]?.error).toBeNull();
+    expect(runJobMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["await", "await_review"],
+    ["fix", "fix"],
+    ["restart", "restart"],
+  ] as const)("fails a loop %s job as not implemented yet without running the enrich pipeline", async (step, kind) => {
+    const jobId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 1, step });
+    start();
+
+    await waitForStatus(jobId, "failed");
+
+    expect(stores.jobs.get(jobId)?.error).toBe(`${kind} is not implemented yet`);
+    expect(stores.jobs.get(jobId)?.attempts).toBe(1);
+    expect(runJobMock).not.toHaveBeenCalled();
+  });
+
   it("retries a retryable failure after the backoff and succeeds on the second attempt", async () => {
     runJobMock.mockResolvedValueOnce(RETRYABLE).mockResolvedValueOnce(SUCCEEDED);
     const jobId = stores.jobs.enqueue(createdTrigger);

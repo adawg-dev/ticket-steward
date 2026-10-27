@@ -127,7 +127,7 @@ const publish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredBrainR
   }
   const labels = config.tracker.labels;
   // A legacy stored result (no triage) has no verdict to swap to.
-  const swap = ctx.trigger.action === "triage" && labels !== undefined && result.triage !== null ? { labels, triage: result.triage } : null;
+  const swap = ctx.trigger.kind !== "loop" && ctx.trigger.action === "triage" && labels !== undefined && result.triage !== null ? { labels, triage: result.triage } : null;
   let warning: string | undefined;
   try {
     const body = buildTriageComment(result, ctx.jobId);

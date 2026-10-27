@@ -48,6 +48,35 @@ CREATE TABLE IF NOT EXISTS attempts (
 );
 CREATE INDEX IF NOT EXISTS attempts_job ON attempts (job_id);
 
+CREATE TABLE IF NOT EXISTS loops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_id TEXT NOT NULL,
+  identifier TEXT NOT NULL,
+  team_key TEXT NOT NULL,
+  implement_job_id INTEGER NOT NULL REFERENCES jobs (id),
+  branch TEXT NOT NULL,
+  base_sha TEXT NOT NULL,
+  head_sha TEXT NOT NULL,
+  worktree_name TEXT NOT NULL,
+  label_driven INTEGER NOT NULL,
+  project_id INTEGER,
+  mr_iid INTEGER,
+  mr_url TEXT,
+  session_id TEXT,
+  round INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL,
+  history TEXT NOT NULL DEFAULT '[]',
+  wait_started_at TEXT,
+  review_count_at_trigger INTEGER,
+  adopted_from TEXT,
+  pending_push TEXT,
+  handed_back_at TEXT,
+  ended_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS loops_issue ON loops (issue_id);
+CREATE INDEX IF NOT EXISTS loops_state ON loops (state);
+
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
   seen_at TEXT NOT NULL
@@ -110,3 +139,21 @@ export const openDatabase = (dataDir: string): Database => {
 };
 
 export const nowIso = (): string => new Date().toISOString();
+
+type StoredSchema<T> = { safeParse: (value: unknown) => { success: true; data: T } | { success: false } };
+
+/** One JSON column read through its schema: JSON the schema rejects is noted in `unreadable` and read as null instead of thrown. */
+export const readStored = <T, C extends string>(raw: string | null, column: C, schema: StoredSchema<T>, unreadable: C[]): T | null => {
+  if (raw === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    unreadable.push(column);
+    return null;
+  }
+  const parsed = schema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  unreadable.push(column);
+  return null;
+};

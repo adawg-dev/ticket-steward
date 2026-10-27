@@ -12,7 +12,23 @@ export type TriggerEvent =
       /** Which configured label started this; absent when labels are not configured (every new ticket is triaged). */
       action?: LabelAction;
     }
-  | { kind: "cli"; issueId: string; identifier: string; teamKey: string; action?: LabelAction };
+  | { kind: "cli"; issueId: string; identifier: string; teamKey: string; action?: LabelAction }
+  | {
+      kind: "loop";
+      issueId: string;
+      identifier: string;
+      teamKey: string;
+      loopId: number;
+      step: LoopStep;
+      /** Restart only: the restart came from a person re-adding the implement label. */
+      labelDriven?: boolean;
+    };
+
+/** One step of a Greptile fix loop: wait for the MR's review, fix its findings, or restart a handed-back loop. */
+export type LoopStep = "await" | "fix" | "restart";
+
+/** A trigger about a ticket itself (webhook or CLI), as opposed to a step of its fix loop. */
+export type IssueTrigger = Exclude<TriggerEvent, { kind: "loop" }>;
 
 export interface TicketBundle {
   id: string;

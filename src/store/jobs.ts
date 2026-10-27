@@ -3,9 +3,10 @@ import { StoredBrainResultSchema, type BrainResult, type StoredBrainResult } fro
 import type { JobOutcome } from "../core/types.js";
 import { StoredImplementSchema, type StoredImplement } from "../implement/result.js";
 import type { TriggerEvent } from "../tracker/types.js";
-import { nowIso, type Database } from "./db.js";
+import { nowIso, readStored, type Database } from "./db.js";
 
-export type JobKind = "enrich" | "implement";
+/** Issue jobs (enrich, implement) and the fix loop's steps (await_review, fix, restart). */
+export type JobKind = "enrich" | "implement" | "await_review" | "fix" | "restart";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "publish_failed" | "skipped";
 
@@ -25,6 +26,8 @@ export interface Job {
   branch: string | null;
   commitSha: string | null;
   pushedAt: string | null;
+  /** The brain session this job's run left, for the fix loop to resume. */
+  sessionId: string | null;
   error: string | null;
   createdAt: string;
   startedAt: string | null;
@@ -55,6 +58,7 @@ interface JobRow {
   branch: string | null;
   commit_sha: string | null;
   pushed_at: string | null;
+  session_id: string | null;
   error: string | null;
   created_at: string;
   started_at: string | null;
@@ -62,25 +66,7 @@ interface JobRow {
   not_before: string | null;
 }
 
-type StoredSchema<T> = { safeParse: (value: unknown) => { success: true; data: T } | { success: false } };
-
-/** One stored-result column: JSON the schema rejects is noted in `unreadable` and read as null instead of thrown. */
-const readStored = <T>(raw: string | null, column: StoredColumn, schema: StoredSchema<T>, unreadable: StoredColumn[]): T | null => {
-  if (raw === null) return null;
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    unreadable.push(column);
-    return null;
-  }
-  const parsed = schema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  unreadable.push(column);
-  return null;
-};
-
-const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli"]);
+const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "loop"]);
 
 /** The stored trigger, or (noted in `unreadable`) a stand-in from the row's own columns when it is not a trigger object. */
 const readTrigger = (row: JobRow, unreadable: StoredColumn[]): TriggerEvent => {
@@ -114,6 +100,7 @@ const toJob = (row: JobRow): Job => {
     branch: row.branch,
     commitSha: row.commit_sha,
     pushedAt: row.pushed_at,
+    sessionId: row.session_id,
     error: row.error,
     createdAt: row.created_at,
     startedAt: row.started_at,
@@ -129,6 +116,9 @@ export const unreadableOutcome = (job: Job): JobOutcome | null =>
     ? null
     : { status: "failed", error: `stored ${job.unreadable.join(", ")} is unreadable; fix or clear the column before retrying`, retryable: false };
 
+/** A loop job kind no pipeline handles yet: it fails for good rather than fall through to another kind's pipeline. */
+export const notImplementedOutcome = (kind: JobKind): JobOutcome => ({ status: "failed", error: `${kind} is not implemented yet`, retryable: false });
+
 interface JobColumns {
   issueId: string;
   identifier: string;
@@ -137,13 +127,12 @@ interface JobColumns {
   subject: string | null;
 }
 
-const jobColumns = (event: TriggerEvent): JobColumns => ({
-  issueId: event.issueId,
-  identifier: event.identifier,
-  teamKey: event.teamKey,
-  kind: jobKindFor(event),
-  subject: null,
-});
+/** A loop step runs as its own job kind (`await` as `await_review`), with the loop as subject so its steps never overlap. */
+const jobColumns = (event: TriggerEvent): JobColumns => {
+  const ticket = { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey };
+  if (event.kind === "loop") return { ...ticket, kind: event.step === "await" ? "await_review" : event.step, subject: `loop:${event.loopId}` };
+  return { ...ticket, kind: jobKindFor(event), subject: null };
+};
 
 const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?";
 
@@ -157,8 +146,10 @@ export class JobStore {
   private readonly storeImplement;
   private readonly storeCommit;
   private readonly storePushed;
+  private readonly storeSession;
   private readonly complete;
   private readonly deferRetry;
+  private readonly deferUntil;
   private readonly unclaim;
   private readonly reopen;
   private readonly selectById;
@@ -201,11 +192,15 @@ export class JobStore {
     this.storeImplement = db.prepare<[string, number]>("UPDATE jobs SET implement_result = ? WHERE id = ?");
     this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ? WHERE id = ?");
     this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
+    this.storeSession = db.prepare<[string, number]>("UPDATE jobs SET session_id = ? WHERE id = ?");
     this.complete = db.prepare<[JobStatus, string | null, string, number]>(
       "UPDATE jobs SET status = ?, error = ?, finished_at = ?, not_before = NULL WHERE id = ?",
     );
     this.deferRetry = db.prepare<[string, string, number]>(
       "UPDATE jobs SET status = 'queued', not_before = ?, error = ?, finished_at = NULL WHERE id = ?",
+    );
+    this.deferUntil = db.prepare<[string, number]>(
+      "UPDATE jobs SET status = 'queued', attempts = MAX(attempts - 1, 0), not_before = ?, error = NULL, finished_at = NULL WHERE id = ?",
     );
     this.unclaim = db.prepare<[string, number]>(
       "UPDATE jobs SET status = 'queued', attempts = MAX(attempts - 1, 0), not_before = NULL, error = ?, finished_at = NULL WHERE id = ?",
@@ -274,6 +269,10 @@ export class JobStore {
     this.storePushed.run(nowIso(), id);
   }
 
+  recordSession(id: number, sessionId: string): void {
+    this.storeSession.run(sessionId, id);
+  }
+
   claimNext(): Job | null {
     const now = nowIso();
     const row = this.claimOldest.get(now, now);
@@ -289,7 +288,12 @@ export class JobStore {
     this.storeResult.run(JSON.stringify(result), sha, id);
   }
 
+  /** Ends the job with its outcome; a deferred one is not an end, so it goes back to the queue through `defer`. */
   finish(id: number, outcome: JobOutcome): void {
+    if (outcome.status === "deferred") {
+      this.defer(id, outcome.until);
+      return;
+    }
     const error = outcome.status === "succeeded" ? null : outcome.error;
     this.complete.run(outcome.status, error, nowIso(), id);
   }
@@ -297,6 +301,11 @@ export class JobStore {
   /** Puts the job back in the queue, invisible to claimNext until `notBefore` (ISO). */
   scheduleRetry(id: number, notBefore: Date, error: string): void {
     this.deferRetry.run(notBefore.toISOString(), error, id);
+  }
+
+  /** A deferred outcome: back in the queue until `until`, with the claimed attempt given back, since waiting is not a failure. */
+  defer(id: number, until: Date): void {
+    this.deferUntil.run(until.toISOString(), id);
   }
 
   /** Puts a claimed job back in the queue and gives back the attempt the claim counted. */

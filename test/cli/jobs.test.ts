@@ -1,6 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
+import { jobLine } from "../../src/cli/jobs.js";
 import { localHealthUrl } from "../../src/cli/probe.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { CliFactories } from "../../src/cli/context.js";
@@ -71,7 +72,7 @@ const serveIsUp: typeof fetch = async (input) => {
 };
 
 describe("steward jobs", () => {
-  it("lists jobs newest first with status, identifier, trigger and attempts", async () => {
+  it("lists jobs newest first with status, identifier, kind and attempts", async () => {
     const first = stores.jobs.enqueue(createdEvent);
     const second = stores.jobs.enqueue(cliEvent);
     stores.jobs.claimById(second);
@@ -82,8 +83,15 @@ describe("steward jobs", () => {
     await done;
 
     expect(stdout()).toBe(
-      [`${second}\trunning\tAPI-2\tcli\tattempts=1\t${secondRow?.createdAt}`, `${first}\tqueued\tAPI-1\tissue.created\tattempts=0\t${firstRow?.createdAt}`, ""].join("\n"),
+      [`${second}\trunning\tAPI-2\tenrich\tattempts=1\t${secondRow?.createdAt}`, `${first}\tqueued\tAPI-1\tenrich\tattempts=0\t${firstRow?.createdAt}`, ""].join("\n"),
     );
+  });
+
+  it("prints the job kind, so loop jobs show as await_review, fix or restart", () => {
+    const id = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 3, step: "await" });
+    const job = stores.jobs.get(id);
+    if (job === null) throw new Error("job missing");
+    expect(jobLine(job)).toBe(`${id}\tqueued\tAPI-1\tawait_review\tattempts=0\t${job.createdAt}`);
   });
 
   it("filters by status and honours the limit", async () => {
@@ -96,7 +104,7 @@ describe("steward jobs", () => {
     await done;
 
     expect(second).toBeLessThan(third);
-    expect(stdout()).toBe(`${third}\tqueued\tAPI-2\tcli\tattempts=0\t${thirdRow?.createdAt}\n`);
+    expect(stdout()).toBe(`${third}\tqueued\tAPI-2\tenrich\tattempts=0\t${thirdRow?.createdAt}\n`);
   });
 
   it("shows the row, attempts, transcript, artifacts and stored result", async () => {

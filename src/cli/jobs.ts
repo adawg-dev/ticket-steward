@@ -29,11 +29,12 @@ const parseId = (value: string): number => {
 };
 
 export const jobLine = (job: Job): string =>
-  [job.id, job.status, job.identifier, job.trigger.kind, `attempts=${job.attempts}`, job.createdAt].join("\t");
+  [job.id, job.status, job.identifier, job.kind, `attempts=${job.attempts}`, job.createdAt].join("\t");
 
 /** What a retry will do, matching the worker's dispatch. */
 const retryMode = (job: Job): string => {
   if (job.unreadable.length > 0) return `job ${job.id}: fails (stored ${job.unreadable.join(", ")} is unreadable)`;
+  if (job.kind === "await_review" || job.kind === "fix" || job.kind === "restart") return `job ${job.id}: ${job.kind} step of ${job.subject ?? "its loop"}`;
   if (job.kind === "implement") {
     const stored = job.implementResult;
     if (stored === null) return `job ${job.id}: full run`;

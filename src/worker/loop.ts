@@ -5,7 +5,7 @@ import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/p
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
-import { unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
+import { notImplementedOutcome, unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 
 export interface WorkerOptions {
@@ -53,13 +53,21 @@ const HELPER_SLOTS = 9;
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-const isRetryable = (outcome: JobOutcome): outcome is Exclude<JobOutcome, { status: "succeeded" }> =>
+const isRetryable = (outcome: JobOutcome): outcome is Extract<JobOutcome, { status: "failed" | "publish_failed" }> =>
   outcome.status === "publish_failed" || (outcome.status === "failed" && outcome.retryable);
 
 const isInterrupted = (outcome: JobOutcome): boolean => outcome.status === "failed" && outcome.error === INTERRUPTED_ERROR;
 
 const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
+  if (outcome.status === "deferred") return {};
   if (outcome.status === "succeeded") return outcome.warning === undefined ? {} : { error: outcome.warning };
+  return { error: outcome.error };
+};
+
+/** What the log line adds to the status: the warning, the error, or when a deferred job runs again. */
+const outcomeDetail = (outcome: JobOutcome): Record<string, string> => {
+  if (outcome.status === "deferred") return { until: outcome.until.toISOString() };
+  if (outcome.status === "succeeded") return outcome.warning === undefined ? {} : { warning: outcome.warning };
   return { error: outcome.error };
 };
 
@@ -191,9 +199,8 @@ class Worker {
       lane.inFlight = { job, attempt };
       const outcome = redactOutcome(await this.run(lane, job, runContext(job, attempt)), redactor);
       await this.record(job, attempt, outcome);
-      const detail = outcome.status === "succeeded" ? (outcome.warning === undefined ? {} : { warning: outcome.warning }) : { error: outcome.error };
-      const fields = { jobId: job.id, slot: lane.slot, kind: job.kind, identifier: job.identifier, attempt: attempt.number, status: outcome.status, ...detail };
-      if (outcome.status === "succeeded") logger.info(fields, "job finished");
+      const fields = { jobId: job.id, slot: lane.slot, kind: job.kind, identifier: job.identifier, attempt: attempt.number, status: outcome.status, ...outcomeDetail(outcome) };
+      if (outcome.status === "succeeded" || outcome.status === "deferred") logger.info(fields, "job finished");
       else logger.warn(fields, "job finished");
     } catch (err) {
       logger.error({ jobId: job.id, err: errorMessage(err) }, "job bookkeeping failed");
@@ -210,16 +217,30 @@ class Worker {
     const unreadable = unreadableOutcome(job);
     if (unreadable !== null) return unreadable;
     try {
-      if (job.kind === "implement") return job.implementResult === null ? await this.implement(ctx, deps) : await this.republishImplement(ctx, deps);
-      return job.result === null ? await this.execute(ctx, deps) : await this.republish(ctx, deps);
+      switch (job.kind) {
+        case "enrich":
+          return job.result === null ? await this.execute(ctx, deps) : await this.republish(ctx, deps);
+        case "implement":
+          return job.implementResult === null ? await this.implement(ctx, deps) : await this.republishImplement(ctx, deps);
+        case "await_review":
+        case "fix":
+        case "restart":
+          return notImplementedOutcome(job.kind);
+      }
     } catch (err) {
       return { status: "failed", error: errorMessage(err), retryable: false };
     }
   }
 
-  /** Persists the outcome: interrupted runs stay queued, a run that hit a rejected API key goes back to the queue with its attempt refunded, retryable ones wait out the backoff in the queue, the rest are terminal. */
+  /** Persists the outcome: deferred and interrupted runs stay queued, a run that hit a rejected API key goes back to the queue with its attempt refunded, retryable ones wait out the backoff in the queue, the rest are terminal. */
   private async record(job: Job, attempt: Attempt, outcome: JobOutcome): Promise<void> {
     const { jobs, attempts } = this.deps.stores;
+    if (outcome.status === "deferred") {
+      // Waiting is not a failure: no retry accounting, and the claimed attempt is given back.
+      attempts.finish(attempt.id, {});
+      jobs.defer(job.id, outcome.until);
+      return;
+    }
     if (isInterrupted(outcome)) {
       // This job only: another slot's job may still be running.
       jobs.requeueInterruptedJob(job.id, this.maxAttempts);

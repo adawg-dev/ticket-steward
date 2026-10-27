@@ -15,4 +15,6 @@ export interface RunContext {
 export type JobOutcome =
   | { status: "succeeded"; warning?: string }
   | { status: "failed"; error: string; retryable: boolean }
-  | { status: "publish_failed"; error: string };
+  | { status: "publish_failed"; error: string }
+  /** Not done yet and not a failure: the job goes back to the queue until `until`, with its attempt given back. */
+  | { status: "deferred"; until: Date };

@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import type { LabelAction, TriggerEvent } from "../types.js";
+import type { IssueTrigger, LabelAction } from "../types.js";
 
 export const verifySignature = (rawBody: string | Buffer, signatureHex: string | undefined, secret: string): boolean => {
   if (signatureHex === undefined || !/^[0-9a-f]+$/i.test(signatureHex)) return false;
@@ -51,7 +51,7 @@ export const parseEvent = (
   headers: { event: string | undefined; delivery: string | undefined },
   body: unknown,
   opts: { labels?: TriggerLabels | undefined } = {},
-): TriggerEvent | null => {
+): IssueTrigger | null => {
   const { event, delivery } = headers;
   if (delivery === undefined || event !== "Issue") return null;
   const parsed = IssueSchema.safeParse(body);

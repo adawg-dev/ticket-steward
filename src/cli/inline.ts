@@ -2,7 +2,7 @@ import { acquireRunLock } from "../core/lock.js";
 import { publishOnly, redactOutcome, runJob } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
-import { unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
+import { notImplementedOutcome, unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
 import { errorMessage, fail, println, type CliContext } from "./context.js";
 import { sleep } from "./probe.js";
 import type { Runtime } from "./runtime.js";
@@ -11,6 +11,7 @@ const POLL_MS = 2_000;
 const LOCK_HELD = "another steward process holds run.lock; if `steward serve` is running, let it pick the job up";
 
 const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
+  if (outcome.status === "deferred") return {};
   if (outcome.status === "succeeded") return outcome.warning === undefined ? {} : { error: outcome.warning };
   return { error: outcome.error };
 };
@@ -19,8 +20,16 @@ const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
 const dispatch = (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutcome> => {
   const unreadable = unreadableOutcome(job);
   if (unreadable !== null) return Promise.resolve(unreadable);
-  if (job.kind === "implement") return job.implementResult === null ? runImplement(ctx, runtime.deps) : publishImplementOnly(ctx, runtime.deps);
-  return job.result === null ? runJob(ctx, runtime.deps) : publishOnly(ctx, runtime.deps);
+  switch (job.kind) {
+    case "enrich":
+      return job.result === null ? runJob(ctx, runtime.deps) : publishOnly(ctx, runtime.deps);
+    case "implement":
+      return job.implementResult === null ? runImplement(ctx, runtime.deps) : publishImplementOnly(ctx, runtime.deps);
+    case "await_review":
+    case "fix":
+    case "restart":
+      return Promise.resolve(notImplementedOutcome(job.kind));
+  }
 };
 
 const execute = async (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutcome> => {
@@ -79,13 +88,20 @@ export const runInline = (runtime: Runtime, jobId: number, ctx: CliContext): Pro
       { jobId, attempt: attempt.number, issueId: job.issueId, identifier: job.identifier, teamKey: job.teamKey, trigger: job.trigger, dryRun: false },
       runtime,
     );
+    if (outcome.status === "deferred") {
+      stores.attempts.finish(attempt.id, {});
+      stores.jobs.defer(jobId, outcome.until);
+      println(ctx, `job ${jobId} waiting until ${outcome.until.toISOString()}`);
+      return outcome;
+    }
     stores.jobs.finish(jobId, outcome);
     stores.attempts.finish(attempt.id, attemptPatch(outcome));
     return outcome;
   });
 
-/** Prints the outcome and exits non-zero unless the job succeeded. */
+/** Prints the outcome and exits non-zero unless the job succeeded or is waiting (deferred, already reported by `runInline`). */
 export const reportOutcome = (ctx: CliContext, jobId: number, outcome: JobOutcome): void => {
+  if (outcome.status === "deferred") return;
   if (outcome.status === "succeeded") {
     println(ctx, outcome.warning === undefined ? `job ${jobId} succeeded` : `job ${jobId} succeeded with warning: ${outcome.warning}`);
     return;
