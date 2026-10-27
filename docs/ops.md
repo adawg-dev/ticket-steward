@@ -343,6 +343,61 @@ checked at intake, when a job starts, after the agent finishes and before every 
 or push; a closed ticket fails the job without retry. This applies to `steward enrich` and
 `steward implement` too.
 
+### 1.7b Greptile fix loop (optional)
+
+With a `greptile` block the steward does not stop at the push. It waits for the pipeline to open the merge request, waits for
+Greptile's review, resumes the implementing brain session to fix or decline each finding, pushes one commit per round and
+repeats until the review passes or it hands the ticket back. It needs `implement`, `codehost.kind: "gitlab"` and
+`brain.kind: "claude-code"`.
+
+```ts
+greptile: {
+  botUsername: "greptile-apple",          // the username Greptile comments as on the MR (required)
+  prompt: "./prompts/fix.md",             // required; `steward init` writes prompts/fix.md
+  maxRounds: 5,                           // fix rounds after the implement push (round 0)
+  pollSeconds: 60,
+  mrTimeoutMinutes: 60,                   // wait for the pipeline to open the MR
+  reviewTimeoutMinutes: 30,               // wait for Greptile to review the head
+  pipelineTimeoutMinutes: 60,             // wait for the head pipeline to finish
+  ciLogLines: 200,                        // failed-job log lines given to the brain
+  mcp: { url: "https://api.greptile.com/mcp" },
+},
+tracker: { labels: { approved: "agent-approved" } },   // applied when the loop passes
+```
+
+Waits are counted from the first poll of the wait, not from the push.
+
+**Passing.** For the MR's current head SHA: Greptile's summary says `Confidence Score: 5/5`, no Greptile discussion is
+unresolved, and the head pipeline is `success`. 4/5 never passes. A pass applies the `approved` label
+(`agent-approved`) and comments on the ticket; people still merge.
+
+**Token.** `GITLAB_TOKEN` needs the `api` scope (not just `read_api`): the loop reads the MR and pipelines, replies to
+Greptile's threads and resolves them. `steward doctor` checks the scope, that `botUsername` exists, that the `approved`
+label exists in Linear and that the prompt file exists.
+
+**Kickoff side.**
+
+- `.greptile/config.json` must have `"autoReview": ["open", "push"]` so every push is reviewed.
+- `excludeAuthors` must not match the steward's GitLab user, or Greptile never reviews its pushes.
+- CI's `open:dev-mr` must open non-draft MRs; Greptile skips drafts.
+
+**States.** `awaiting_mr` (waiting for the pipeline to open the MR), `awaiting_review` (waiting for Greptile and the
+pipeline), `fixing` (a fix job is running), then an end state: `passed`, `handed_back` or `stopped` (the ticket was closed
+or the MR was merged or closed; the steward says so and leaves labels alone).
+
+**Hand-back reasons.** The ticket becomes `ready-for-human` with the reason in a comment, and the MR gets a note. Reasons:
+no MR was opened; a person pushed to the branch; Greptile failed or never reviewed the head; no finished pipeline, or it
+failed or was canceled; the fix could not be verified (checks, secret guard, no single commit); or the score is still
+below 5/5 after `maxRounds` fix rounds. The brain can also hand back itself when it cannot fix a finding.
+
+**Restart.** Re-add `ready-for-agent` to the ticket, or run `steward fix <KEY>` (leaves labels alone). Comments newer than
+the hand-back are given to the restarted loop. `steward jobs show <id>` prints the loop and one line per round
+(`round 1: 3/5 ...`) for the loop's jobs and for the implement job.
+
+**Sessions.** The brain's sessions live in `dataDir/sessions` (`CLAUDE_CONFIG_DIR`), one per ticket, and the loop's worktree
+is the stable `ticket-<KEY>`. Both are kept for active loops and for `retention.days` after a loop ends; `steward jobs gc`
+and the hourly sweep then remove them. The brain never receives GitLab, Linear or Greptile credentials.
+
 ### 1.8 Doctor, then start the service
 
 ```bash
@@ -565,6 +620,10 @@ steward jobs show 42
    `attachments`, `confidence`). Present when the brain finished; its presence is what
    makes `steward jobs retry <id>` publish-only.
 
+6. **Loop.** For `await_review`, `fix` and `restart` jobs, and for an implement job that
+   started a fix loop (§1.7b): the loop's state and one line per round, such as
+   `round 1: 3/5 head abc1234 pipeline success fixed 2 declined 1 changed`.
+
 Which failures retry on their own (§5 of the spec): ticket fetch, mirror fetch, worktree,
 overlay and setup errors are retried up to 3 attempts. Brain timeout, exhausted turns and
 invalid output are terminal (`failed`). Tracker write failures after a result was saved
@@ -583,8 +642,7 @@ Failed jobs keep their worktree under `dataDir/work/<id>-<attempt>` when
 
 **Reproduction recipes.** When the brain reproduces a bug ticket, the recipe is part of
 the job's stored result and of the ticket's Enrichment section; the steward keeps no copy
-of the recipe's files, which go with the worktree. Review jobs left over from the removed
-MR reviewer fail with "MR review was removed" when the steward starts.
+of the recipe's files, which go with the worktree.
 
 ## 5. Linear API key rejected
 

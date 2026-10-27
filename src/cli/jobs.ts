@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import type { Command } from "commander";
 import { z } from "zod";
-import { openStores, type Job, type JobStatus } from "../store/index.js";
+import { openStores, type Job, type JobStatus, type Loop } from "../store/index.js";
 import { sessionsDir } from "../core/workspace.js";
 import { loopProtection, sweep } from "../workspace/retention.js";
 import { fail, loadFromProgram, println, type CliContext } from "./context.js";
@@ -47,6 +47,22 @@ const retryMode = (job: Job): string => {
 };
 
 const pretty = (value: unknown): string => JSON.stringify(value, null, 2);
+
+/** One line per review round: `round 1: 3/5 ...`; an unscored round shows `?/5`. */
+export const roundLines = (loop: Loop): string[] =>
+  loop.history.map(
+    (round) =>
+      `round ${round.round}: ${round.score ?? "?"}/5 head ${round.headSha.slice(0, 7)} pipeline ${round.pipeline ?? "-"} fixed ${round.fixed} declined ${round.declined} ${round.outcome}`,
+  );
+
+const loopHeader = (loop: Loop): string => `loop ${loop.id}: ${loop.state}, round ${loop.round}, ${loop.mrUrl ?? "no MR yet"}`;
+
+/** The loop a job belongs to: loop steps carry `loop:<id>` as subject, an implement job is the loop's origin. */
+const loopOf = (stores: ReturnType<typeof openStores>, job: Job): Loop | null => {
+  if (job.kind === "implement") return stores.loops.forImplementJob(job.id);
+  const id = job.subject?.startsWith("loop:") === true ? Number.parseInt(job.subject.slice("loop:".length), 10) : Number.NaN;
+  return Number.isInteger(id) ? stores.loops.get(id) : null;
+};
 
 const listArtifacts = async (dir: string): Promise<string[]> => (existsSync(dir) ? (await readdir(dir)).sort() : []);
 
@@ -95,6 +111,8 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
       println(ctx, `# transcripts\n${attempts.map((attempt) => attempt.transcriptPath ?? "(none)").join("\n")}`);
       println(ctx, `# artifacts (${artifactsDir(config.dataDir, id)})\n${(await listArtifacts(artifactsDir(config.dataDir, id))).join("\n")}`);
       println(ctx, `# result\n${pretty(result)}`);
+      const loop = loopOf(stores, job);
+      if (loop !== null) println(ctx, [`# loop`, loopHeader(loop), ...roundLines(loop)].join("\n"));
     });
 
   jobs

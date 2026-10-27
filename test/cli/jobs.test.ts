@@ -95,6 +95,24 @@ describe("steward jobs", () => {
     expect(jobLine(job)).toBe(`${id}\tqueued\tAPI-1\tawait_review\tattempts=0\t${job.createdAt}`);
   });
 
+  it("shows the loop and its rounds for a fix job", async () => {
+    const implementId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
+    const loopId = stores.loops.create({
+      issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: implementId, branch: "fix/API-1-a", baseSha: "a".repeat(40),
+      headSha: "b".repeat(40), worktreeName: "ticket-API-1", labelDriven: true, sessionId: null,
+    });
+    stores.loops.appendRound(loopId, { round: 1, headSha: "c".repeat(40), score: 3, pipeline: "success", fixed: 2, declined: 1, outcome: "changed" });
+    const fixId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "fix" });
+    const { ctx, stdout } = makeContext();
+
+    await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "jobs", "show", String(fixId)]);
+    expect(stdout()).toContain("round 1: 3/5 head ccccccc pipeline success fixed 2 declined 1 changed");
+
+    const implement = makeContext();
+    await buildProgram(implement.ctx).parseAsync(["node", "steward", "--config", configPath, "jobs", "show", String(implementId)]);
+    expect(implement.stdout()).toContain("round 1: 3/5");
+  });
+
   it("filters by status and honours the limit", async () => {
     stores.jobs.enqueue(createdEvent);
     const second = stores.jobs.enqueue(cliEvent);

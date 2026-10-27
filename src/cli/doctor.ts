@@ -8,6 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { Command } from "commander";
 import { z } from "zod";
 import { listProtectedBranches, protectionProblems } from "../codehost/gitlabProtection.js";
+import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { LoadedConfig } from "../config/load.js";
 import { appPortOf, type SlotsConfig, type StewardConfig } from "../config/schema.js";
@@ -173,7 +174,7 @@ const implementChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
       name: "linear labels",
       run: async () => {
         const apiKey = secrets.LINEAR_API_KEY ?? "";
-        const names = [labels.triage, labels.implement, labels.needsInfo, labels.readyForHuman, labels.implemented];
+        const names = [labels.triage, labels.implement, labels.needsInfo, labels.readyForHuman, labels.implemented, ...(config.greptile === undefined ? [] : [labels.approved])];
         const response = await ctx.fetchImpl(LINEAR_GRAPHQL_URL, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: apiKey },
@@ -213,6 +214,37 @@ const implementChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
     });
   }
   return checks;
+};
+
+/** Only with `greptile`: the GitLab token can write notes and resolve threads, the bot user exists, and the fix prompt is there. */
+const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Check[] => {
+  const settings = config.greptile;
+  if (settings === undefined) return [];
+  const gitlab = ctx.factories?.gitlab ?? createGitLabMr(config, secrets);
+  const unavailable = (): CheckResult => warn("GITLAB_TOKEN is missing; cannot reach GitLab");
+  return [
+    {
+      name: "gitlab token scope",
+      run: async () => {
+        if (gitlab === undefined) return unavailable();
+        const scopes = await gitlab.tokenScopes();
+        return scopes.includes("api") ? ok("GITLAB_TOKEN has the api scope") : flunk(`gitlab token lacks api scope (has ${scopes.join(", ") || "none"}); the loop replies to and resolves threads`);
+      },
+    },
+    {
+      name: "greptile bot",
+      run: async () => {
+        if (gitlab === undefined) return unavailable();
+        return (await gitlab.userExists(settings.botUsername))
+          ? ok(`${settings.botUsername} exists`)
+          : flunk(`greptile bot user ${settings.botUsername} not found; check greptile.botUsername`);
+      },
+    },
+    {
+      name: "greptile prompt",
+      run: async () => (existsSync(settings.prompt) ? ok(settings.prompt) : flunk(`${settings.prompt} does not exist; copy prompts/fix.md there`)),
+    },
+  ];
 };
 
 /** Where the install puts the helper; ops/steward-slot@.service runs it from here. */
@@ -348,6 +380,7 @@ const configChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => [
   ...workspaceChecks(loaded),
   ...linearChecks(loaded, ctx),
   ...implementChecks(loaded, ctx),
+  ...greptileChecks(loaded, ctx),
   ...serviceChecks(loaded, ctx),
 ];
 

@@ -62,8 +62,8 @@ steward enrich KEY-123 --dry-run
 
 | Command | What it does |
 | --- | --- |
-| `steward init [dir]` | Writes `steward.config.ts`, `.env.example`, `prompts/enrich.md`, `skills/` into `dir` (default: current directory). Refuses to overwrite. |
-| `steward doctor` | Runs every health check (config, secrets, user, modes, mirror, overlay, skills, Linear API key, public URL, codehost MCP, Playwright, port), reports all, exits non-zero if any fails. |
+| `steward init [dir]` | Writes `steward.config.ts`, `.env.example`, `prompts/enrich.md`, `prompts/fix.md` (when absent), `skills/` into `dir` (default: current directory). Refuses to overwrite. |
+| `steward doctor` | Runs every health check (config, secrets, user, modes, mirror, overlay, skills, Linear API key, Greptile loop (when configured), public URL, codehost MCP, Playwright, port), reports all, exits non-zero if any fails. |
 | `steward mirror init` \| `fetch` | Create or refresh the bare mirror. |
 | `steward overlay sync --from <path> [--allow-pattern <re>]` | Copy gitignored `.env*` files from a checkout into the overlay; refuses prod-looking values unless allowed. |
 | `steward serve` | Webhook server and worker; takes `run.lock`. |
@@ -127,6 +127,8 @@ With `tracker.labels` set, two Linear labels drive the steward, both added by a 
 - `ready-for-agent` runs an agent against a fresh checkout. The steward verifies the change (secret guard, checks, hooks), commits it and pushes a new `<type>/<KEY>-<slug>` branch; the pipeline opens the merge request. The ticket ends as `agent-implemented`, or is handed back as `ready-for-human` or `needs-info`.
 
 Setup (labels, `GITLAB_PUSH_TOKEN`, branch protection, the `implement` block) and the flows are in `docs/ops.md` §1.7a.
+
+With a `greptile` block the steward then runs a fix loop on the merge request: it fixes or declines Greptile's findings round by round until the review is 5/5 on a green pipeline (`agent-approved`) or hands the ticket back; restart with `ready-for-agent` or `steward fix <KEY>`. See `docs/ops.md` §1.7b.
 
 ## Security posture
 

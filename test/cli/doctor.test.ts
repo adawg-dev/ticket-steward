@@ -5,6 +5,7 @@ import { buildProgram } from "../../src/cli/program.js";
 import type { McpServerSpec } from "../../src/brain/types.js";
 import type { SlotPorts } from "../../src/workspace/slots.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
+import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { ExitSignal, makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
 
@@ -184,6 +185,46 @@ describe("steward doctor", () => {
 
     expect(stdout()).toContain("[fail] linear labels: missing in Linear: ready-for-agent, needs-info, ready-for-human, agent-implemented");
     expect(stdout()).toContain("[ok] push token: GITLAB_PUSH_TOKEN reaches");
+  });
+});
+
+describe("greptile checks", () => {
+  const run = async (gitlab: FakeGitLabMr, prompt: string): Promise<string> => {
+    const port = await freeTcpPort();
+    const serverPort = await freeTcpPort();
+    const configPath = await writeConfig(dir, {
+      dataDir: repo.dataDir, overlayDir: repo.overlayDir, promptPath: repo.promptPath, fetchUrl: repo.repo, port, serverPort,
+      implement: { prompt: repo.promptPath }, greptile: { prompt },
+    });
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (String(input) === LINEAR_GRAPHQL_URL && body.includes("issueLabels")) {
+        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [{ name: "agent-approved" }] } } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { viewer: { id: "u", name: "Bot" } } }), { status: 200 });
+    };
+    const { ctx, stdout } = makeContext({ fetchImpl, factories: { codehostMcpSpec: fakeCodehostMcpSpec, gitlab } });
+    await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toBeInstanceOf(ExitSignal);
+    return stdout();
+  };
+
+  it("fails when the token lacks the api scope, the bot is unknown and the prompt is missing", async () => {
+    const gitlab = new FakeGitLabMr();
+    gitlab.scopes = ["read_api"];
+    const out = await run(gitlab, join(dir, "missing-fix.md"));
+    expect(out).toContain("[fail] gitlab token scope: gitlab token lacks api scope");
+    expect(out).toContain("[fail] greptile bot: greptile bot user greptile-bot not found");
+    expect(out).toContain(`[fail] greptile prompt: ${join(dir, "missing-fix.md")} does not exist`);
+    expect(out).toContain("[fail] linear labels: missing in Linear:");
+  });
+
+  it("passes when the scope, the bot and the prompt are right", async () => {
+    const gitlab = new FakeGitLabMr();
+    gitlab.users.add("greptile-bot");
+    const out = await run(gitlab, repo.promptPath);
+    expect(out).toContain("[ok] gitlab token scope: GITLAB_TOKEN has the api scope");
+    expect(out).toContain("[ok] greptile bot: greptile-bot exists");
+    expect(out).toContain(`[ok] greptile prompt: ${repo.promptPath}`);
   });
 });
 

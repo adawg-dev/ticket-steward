@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
 import { ExitSignal, makeContext, tmpConfigDir } from "./helpers.js";
@@ -24,12 +24,13 @@ describe("steward init", () => {
     expect(existsSync(join(dir, ".env.example"))).toBe(true);
     expect(existsSync(join(dir, "skills", "README.md"))).toBe(true);
     expect(await readFile(join(dir, "prompts", "enrich.md"), "utf8")).toBe(await readFile(resolve("prompts/enrich.md"), "utf8"));
+    expect(await readFile(join(dir, "prompts", "fix.md"), "utf8")).toBe(await readFile(resolve("prompts/fix.md"), "utf8"));
     expect(await readFile(join(dir, ".env.example"), "utf8")).toBe(await readFile(resolve(".env.example"), "utf8"));
     expect(await readFile(join(dir, ".env.example"), "utf8")).toMatch(/^LINEAR_API_KEY=$/m);
     expect(await readFile(join(dir, ".env.example"), "utf8")).not.toContain("LINEAR_CLIENT_");
     expect((await readFile(join(dir, "steward.config.ts"), "utf8")).startsWith('import { defineConfig } from "ticket-steward";')).toBe(true);
     expect(stdout()).toBe(
-      [`wrote ${join(dir, "steward.config.ts")}`, `wrote ${join(dir, ".env.example")}`, `wrote ${join(dir, "prompts", "enrich.md")}`, `wrote ${join(dir, "skills", "README.md")}`, ""].join("\n"),
+      [`wrote ${join(dir, "steward.config.ts")}`, `wrote ${join(dir, ".env.example")}`, `wrote ${join(dir, "prompts", "enrich.md")}`, `wrote ${join(dir, "skills", "README.md")}`, `wrote ${join(dir, "prompts", "fix.md")}`, ""].join("\n"),
     );
   });
 
@@ -49,6 +50,15 @@ describe("steward init", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  it("keeps an existing prompts/fix.md instead of refusing", async () => {
+    await mkdir(join(dir, "prompts"), { recursive: true });
+    await writeFile(join(dir, "prompts", "fix.md"), "mine");
+
+    await buildProgram(makeContext().ctx).parseAsync(["node", "steward", "init", dir]);
+
+    expect(await readFile(join(dir, "prompts", "fix.md"), "utf8")).toBe("mine");
   });
 
   it("generates a config that loads", async () => {

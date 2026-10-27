@@ -3,7 +3,7 @@ import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
 import { fail, println, type CliContext } from "./context.js";
-import { defaultPromptPath, envExamplePath } from "./paths.js";
+import { defaultPromptPath, envExamplePath, fixPromptPath } from "./paths.js";
 
 const CONFIG_TEMPLATE = `import { defineConfig } from "ticket-steward";
 
@@ -45,6 +45,11 @@ interface Target {
   write: () => Promise<void>;
 }
 
+/** Written when absent and never a reason to refuse: the fix prompt only matters once `greptile` is configured. */
+const optionalTargets = (dir: string): Target[] => [
+  { path: join(dir, "prompts", "fix.md"), write: (): Promise<void> => copyFile(fixPromptPath, join(dir, "prompts", "fix.md")) },
+];
+
 const targets = (dir: string): Target[] => [
   { path: join(dir, "steward.config.ts"), write: (): Promise<void> => writeFile(join(dir, "steward.config.ts"), CONFIG_TEMPLATE) },
   { path: join(dir, ".env.example"), write: (): Promise<void> => copyFile(envExamplePath, join(dir, ".env.example")) },
@@ -55,7 +60,7 @@ const targets = (dir: string): Target[] => [
 export const registerInit = (program: Command, ctx: CliContext): void => {
   program
     .command("init")
-    .description("write steward.config.ts, .env.example, prompts/enrich.md and skills/ into a directory")
+    .description("write steward.config.ts, .env.example, prompts/enrich.md, prompts/fix.md and skills/ into a directory")
     .argument("[dir]", "target directory", process.cwd())
     .action(async (dir: string) => {
       const files = targets(resolve(dir));
@@ -63,7 +68,7 @@ export const registerInit = (program: Command, ctx: CliContext): void => {
       if (existing.length > 0) {
         return fail(ctx, ["refusing to overwrite existing files:", ...existing.map((file) => `  ${file.path}`)].join("\n"));
       }
-      for (const file of files) {
+      for (const file of [...files, ...optionalTargets(resolve(dir)).filter((file) => !existsSync(file.path))]) {
         await mkdir(dirname(file.path), { recursive: true });
         await file.write();
         println(ctx, `wrote ${file.path}`);

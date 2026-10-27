@@ -28,6 +28,9 @@ export default defineConfig({
     checks: ["pnpm turbo check-types lint --filter='...[{{baseSha}}]'"],
     commitAuthor: { name: "Ticket Steward", email: "steward@concentrate.ai" },
   },
+  // Greptile fix loop after the implement push (docs/ops.md §1.7b). Needs GITLAB_TOKEN with the api scope and
+  // /etc/ticket-steward/prompts/fix.md (copy <ticket-steward>/prompts/fix.md). Kickoff's .greptile/config.json needs autoReview: ["open", "push"].
+  // greptile: { botUsername: "greptile-apple", prompt: "./prompts/fix.md" },
   // Parallel jobs, each on fresh local Postgres+TimescaleDB, Redis and RabbitMQ containers (docs/ops.md §1.10).
   // Without this block, put `port: 4100` back in workspace and jobs run one at a time against the overlay's services.
   slots: {

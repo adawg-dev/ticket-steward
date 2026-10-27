@@ -8,6 +8,7 @@ export const binPath = join(packageRoot, "bin", "steward.js");
 
 export const defaultPromptPath = join(packageRoot, "prompts", "enrich.md");
 
+export const fixPromptPath = join(packageRoot, "prompts", "fix.md");
 export const envExamplePath = join(packageRoot, ".env.example");
 
 export const mirrorPath = (dataDir: string): string => join(dataDir, "repo.git");
