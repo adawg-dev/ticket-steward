@@ -1,6 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
+import { acquireRunLock } from "../../src/core/lock.js";
 import { jobLine } from "../../src/cli/jobs.js";
 import { localHealthUrl } from "../../src/cli/probe.js";
 import { openStores, type Stores } from "../../src/store/index.js";
@@ -220,7 +221,16 @@ describe("steward jobs", () => {
     const { stdout, done } = run(["jobs", "gc"]);
     await done;
 
-    expect(stdout()).toBe("removed 0 worktrees, 0 job directories, 0 deliveries\n");
+    expect(stdout()).toBe("removed 0 worktrees, 0 job directories, 0 session directories, 0 deliveries\n");
+  });
+
+  it("gc refuses to run while another steward process holds run.lock", async () => {
+    const lock = acquireRunLock(dataDir);
+    const { stderr, done } = run(["jobs", "gc"]);
+
+    await expect(done).rejects.toEqual(new ExitSignal(1));
+    expect(stderr()).toMatch(/holds run\.lock/);
+    lock?.release();
   });
 
   it("prints the running slots first when serve is up", async () => {

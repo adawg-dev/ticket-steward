@@ -147,4 +147,14 @@ describe("LoopStore", () => {
 
     expect(stores.loops.active().map((loop) => loop.id)).toEqual([awaitingMr, awaitingReview, fixing]);
   });
+
+  it("keptWithin returns active loops and loops ended inside the window", () => {
+    const active = stores.loops.create(newLoop({ worktreeName: "a" }));
+    const recent = stores.loops.create(newLoop({ worktreeName: "b" }));
+    const old = stores.loops.create(newLoop({ worktreeName: "c" }));
+    stores.loops.update(recent, { state: "passed" });
+    stores.loops.update(old, { state: "stopped", endedAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString() });
+
+    expect(stores.loops.keptWithin(30).map((loop) => loop.id)).toEqual([active, recent]);
+  });
 });

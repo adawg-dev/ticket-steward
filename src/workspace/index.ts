@@ -6,4 +6,4 @@ export type { Worktree } from "./worktree.js";
 export { copyOverlay, syncOverlayFromCheckout } from "./overlay.js";
 export { copySkills } from "./skills.js";
 export { runSetup } from "./setup.js";
-export { sweep, freePort, isPortFree } from "./retention.js";
+export { sweep, freePort, isPortFree, sessionProjectDir, loopProtection } from "./retention.js";

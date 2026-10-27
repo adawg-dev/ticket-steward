@@ -3,9 +3,10 @@ import { readdir } from "node:fs/promises";
 import type { Command } from "commander";
 import { z } from "zod";
 import { openStores, type Job, type JobStatus } from "../store/index.js";
-import { sweep } from "../workspace/retention.js";
+import { sessionsDir } from "../core/workspace.js";
+import { loopProtection, sweep } from "../workspace/retention.js";
 import { fail, loadFromProgram, println, type CliContext } from "./context.js";
-import { reportOutcome, runInline, tailJob } from "./inline.js";
+import { reportOutcome, runInline, tailJob, withRunLock } from "./inline.js";
 import { artifactsDir, jobsDir, workRoot } from "./paths.js";
 import { answers, localHealthUrl } from "./probe.js";
 import { buildRuntime } from "./runtime.js";
@@ -118,16 +119,24 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .command("gc")
     .description("run retention now: worktrees, job directories, deliveries")
     .action(async () => {
-      const { config } = await loadFromProgram(program, ctx);
-      const stores = openStores(config.dataDir);
-      const removed = await sweep({
-        workRoot: workRoot(config.dataDir),
-        jobsDir: jobsDir(config.dataDir),
-        keptWorktrees: config.retention.keptWorktrees,
-        days: config.retention.days,
-        protect: [],
+      const loaded = await loadFromProgram(program, ctx);
+      const { config } = loaded;
+      await withRunLock({ loaded }, ctx, async () => {
+        const stores = openStores(config.dataDir);
+        const root = workRoot(config.dataDir);
+        const removed = await sweep({
+          workRoot: root,
+          jobsDir: jobsDir(config.dataDir),
+          keptWorktrees: config.retention.keptWorktrees,
+          days: config.retention.days,
+          ...loopProtection(root, stores.loops.keptWithin(config.retention.days)),
+          sessionsDir: sessionsDir(config),
+        });
+        const deliveries = stores.deliveries.prune(DELIVERY_RETENTION_DAYS);
+        println(
+          ctx,
+          `removed ${removed.removedWorktrees.length} worktrees, ${removed.removedJobDirs.length} job directories, ${removed.removedSessionDirs.length} session directories, ${deliveries} deliveries`,
+        );
       });
-      const deliveries = stores.deliveries.prune(DELIVERY_RETENTION_DAYS);
-      println(ctx, `removed ${removed.removedWorktrees.length} worktrees, ${removed.removedJobDirs.length} job directories, ${deliveries} deliveries`);
     });
 };

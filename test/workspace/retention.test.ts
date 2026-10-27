@@ -3,7 +3,7 @@ import { mkdir, readdir, utimes, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 
-import { freePort, isPortFree, sweep } from "../../src/workspace/index.js";
+import { freePort, isPortFree, sessionProjectDir, sweep } from "../../src/workspace/index.js";
 import { removeDir, tmpDir } from "./helpers.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -26,16 +26,30 @@ const listen = (port: number): Promise<{ port: number; close: () => Promise<void
     });
   });
 
+describe("sessionProjectDir", () => {
+  it("turns every non-alphanumeric character into a dash, as the Claude SDK does", () => {
+    expect(sessionProjectDir("/var/lib/ticket-steward/work/API-1_x.y")).toBe("-var-lib-ticket-steward-work-API-1-x-y");
+  });
+
+  it("truncates a long path to 200 characters plus a hash suffix, as the SDK does", () => {
+    const name = sessionProjectDir(`/${"a".repeat(250)}`);
+    expect(name.startsWith(`-${"a".repeat(199)}-`)).toBe(true);
+    expect(name.length).toBeGreaterThan(201);
+  });
+});
+
 describe("sweep", () => {
   let root: string;
   let workRoot: string;
   let jobsDir: string;
+  let sessionsDir: string;
 
   beforeEach(async () => {
     vi.restoreAllMocks();
     root = await tmpDir();
     workRoot = join(root, "work");
     jobsDir = join(root, "jobs");
+    sessionsDir = join(root, "sessions");
     await mkdir(workRoot);
     await mkdir(jobsDir);
   });
@@ -50,9 +64,9 @@ describe("sweep", () => {
     await makeDir(join(workRoot, "3-1"), 3);
     await makeDir(join(workRoot, "4-1"), 2);
 
-    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 2, days: 30, protect: [] });
+    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 2, days: 30, protect: [], sessionsDir, protectSessionPaths: [] });
 
-    expect(result).toEqual({ removedWorktrees: [join(workRoot, "1-1"), join(workRoot, "2-1")], removedJobDirs: [] });
+    expect(result).toEqual({ removedWorktrees: [join(workRoot, "1-1"), join(workRoot, "2-1")], removedJobDirs: [], removedSessionDirs: [] });
     expect(await readdir(workRoot)).toEqual(["3-1", "4-1"]);
   });
 
@@ -61,9 +75,9 @@ describe("sweep", () => {
     await makeDir(join(workRoot, "2-1"), 4);
     await makeDir(join(workRoot, "3-1"), 3);
 
-    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 1, days: 30, protect: [join(workRoot, "1-1")] });
+    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 1, days: 30, protect: [join(workRoot, "1-1")], sessionsDir, protectSessionPaths: [] });
 
-    expect(result).toEqual({ removedWorktrees: [join(workRoot, "2-1")], removedJobDirs: [] });
+    expect(result).toEqual({ removedWorktrees: [join(workRoot, "2-1")], removedJobDirs: [], removedSessionDirs: [] });
     expect(await readdir(workRoot)).toEqual(["1-1", "3-1"]);
   });
 
@@ -71,16 +85,43 @@ describe("sweep", () => {
     await makeDir(join(jobsDir, "7"), 31);
     await makeDir(join(jobsDir, "8"), 29);
 
-    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 3, days: 30, protect: [] });
+    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 3, days: 30, protect: [], sessionsDir, protectSessionPaths: [] });
 
-    expect(result).toEqual({ removedWorktrees: [], removedJobDirs: [join(jobsDir, "7")] });
+    expect(result).toEqual({ removedWorktrees: [], removedJobDirs: [join(jobsDir, "7")], removedSessionDirs: [] });
     expect(await readdir(jobsDir)).toEqual(["8"]);
   });
 
   it("tolerates missing work and jobs directories", async () => {
-    const result = await sweep({ workRoot: join(root, "nope"), jobsDir: join(root, "nada"), keptWorktrees: 3, days: 30, protect: [] });
+    const result = await sweep({ workRoot: join(root, "nope"), jobsDir: join(root, "nada"), keptWorktrees: 3, days: 30, protect: [], sessionsDir, protectSessionPaths: [] });
 
-    expect(result).toEqual({ removedWorktrees: [], removedJobDirs: [] });
+    expect(result).toEqual({ removedWorktrees: [], removedJobDirs: [], removedSessionDirs: [] });
+  });
+
+  it("removes Claude session dirs older than the retention days", async () => {
+    await makeDir(join(sessionsDir, "projects", "-old"), 31);
+    await makeDir(join(sessionsDir, "projects", "-new"), 29);
+
+    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 3, days: 30, protect: [], sessionsDir, protectSessionPaths: [] });
+
+    expect(result.removedSessionDirs).toEqual([join(sessionsDir, "projects", "-old")]);
+    expect(await readdir(join(sessionsDir, "projects"))).toEqual(["-new"]);
+  });
+
+  it("keeps an old session dir of an active loop", async () => {
+    const active = sessionProjectDir(join(workRoot, "API-1-loop"));
+    await makeDir(join(sessionsDir, "projects", active), 60);
+    await makeDir(join(sessionsDir, "projects", "-other"), 60);
+
+    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 3, days: 30, protect: [], sessionsDir, protectSessionPaths: [active] });
+
+    expect(result.removedSessionDirs).toEqual([join(sessionsDir, "projects", "-other")]);
+    expect(await readdir(join(sessionsDir, "projects"))).toEqual([active]);
+  });
+
+  it("tolerates a missing sessions directory", async () => {
+    const result = await sweep({ workRoot, jobsDir, keptWorktrees: 3, days: 30, protect: [], sessionsDir, protectSessionPaths: [] });
+
+    expect(result.removedSessionDirs).toEqual([]);
   });
 });
 

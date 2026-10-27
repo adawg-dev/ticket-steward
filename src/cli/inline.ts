@@ -54,7 +54,7 @@ const terminalOutcome = (status: JobStatus, error: string | null): JobOutcome | 
 };
 
 /** Runs `fn` under run.lock; fails the command when another steward process holds it. */
-export const withRunLock = async <T>(runtime: Runtime, ctx: CliContext, fn: () => Promise<T>): Promise<T> => {
+export const withRunLock = async <T>(runtime: Pick<Runtime, "loaded">, ctx: CliContext, fn: () => Promise<T>): Promise<T> => {
   const lock = acquireRunLock(runtime.loaded.config.dataDir);
   if (lock === null) return fail(ctx, LOCK_HELD);
   try {

@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { acquireRunLock } from "../core/lock.js";
+import { sessionsDir } from "../core/workspace.js";
 import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { runAwaitReview } from "../greptile/await.js";
@@ -9,7 +10,7 @@ import { runRestart } from "../greptile/start.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
 import { unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
-import { sweep } from "../workspace/retention.js";
+import { loopProtection, sweep } from "../workspace/retention.js";
 
 export interface WorkerOptions {
   pollMs?: number;
@@ -291,14 +292,16 @@ class Worker {
 
   private async sweep(): Promise<void> {
     const { config, stores } = this.deps;
+    const workRoot = join(config.dataDir, "work");
     this.sweeping = true;
     try {
       const removed = await sweep({
-        workRoot: join(config.dataDir, "work"),
+        workRoot,
         jobsDir: join(config.dataDir, "jobs"),
         keptWorktrees: config.retention.keptWorktrees,
         days: config.retention.days,
-        protect: [],
+        ...loopProtection(workRoot, stores.loops.keptWithin(config.retention.days)),
+        sessionsDir: sessionsDir(config),
       });
       const deliveries = stores.deliveries.prune(DELIVERY_RETENTION_DAYS);
       logger.info({ ...removed, deliveries }, "retention sweep complete");

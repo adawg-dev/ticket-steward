@@ -176,6 +176,7 @@ export class LoopStore {
   private readonly selectByImplementJob;
   private readonly selectLatestForIssue;
   private readonly selectActive;
+  private readonly selectKept;
   private readonly storeHistory;
 
   constructor(private readonly db: Database) {
@@ -190,6 +191,7 @@ export class LoopStore {
     this.selectActive = db.prepare<string[], LoopRow>(
       `SELECT * FROM loops WHERE state IN (${ACTIVE_LOOP_STATES.map(() => "?").join(", ")}) ORDER BY id`,
     );
+    this.selectKept = db.prepare<[string], LoopRow>("SELECT * FROM loops WHERE ended_at IS NULL OR ended_at >= ? ORDER BY id");
     this.storeHistory = db.prepare<[string, number]>("UPDATE loops SET history = ? WHERE id = ?");
   }
 
@@ -252,6 +254,12 @@ export class LoopStore {
   }
 
   /** Adds a round to the history; throws rather than overwrite a stored history it cannot read. */
+  /** Loops not ended, or ended within the last `days`: the ones whose worktree and sessions retention keeps. */
+  keptWithin(days: number): Loop[] {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    return this.selectKept.all(cutoff.toISOString()).map((row) => toLoop(row).loop);
+  }
+
   appendRound(id: number, round: LoopRound): void {
     this.db.transaction(() => {
       const row = this.selectById.get(id);
