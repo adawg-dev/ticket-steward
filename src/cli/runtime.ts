@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createBrain } from "../brain/index.js";
 import type { Brain, BrainInput, BrainRun } from "../brain/types.js";
+import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { createCodeHost } from "../codehost/index.js";
 import type { LoadedConfig } from "../config/load.js";
 import type { PipelineDeps } from "../core/pipeline.js";
@@ -45,6 +46,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promi
   const tracker = openTracker(loaded, ctx);
   const injectedBrain = ctx.factories?.brain;
   const codehost = ctx.factories?.codehost ?? createCodeHost(config.codehost, secrets);
+  const gitlab = ctx.factories?.gitlab ?? createGitLabMr(config, secrets);
   const deps: PipelineDeps = {
     config,
     secrets,
@@ -53,6 +55,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promi
     tracker,
     brain: injectedBrain ?? createBrain(config.brain),
     codehost,
+    ...(gitlab === undefined ? {} : { gitlab }),
     mirror: openMirror(loaded),
     stores,
     redactor: await buildRedactor(loaded),

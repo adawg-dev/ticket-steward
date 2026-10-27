@@ -1,5 +1,6 @@
 import type { runBrainDetached } from "../brain/index.js";
 import type { Brain } from "../brain/types.js";
+import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { CodeHost } from "../codehost/types.js";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
@@ -17,6 +18,8 @@ export interface PipelineDeps {
   tracker: Tracker;
   brain: Brain;
   codehost: CodeHost;
+  /** Set when the Greptile fix loop can talk to GitLab (GitLab code host and token). */
+  gitlab?: GitLabMrApi;
   mirror: Mirror;
   stores: Stores;
   redactor: Redactor;

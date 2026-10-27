@@ -1,6 +1,7 @@
 import type { Writable } from "node:stream";
 import type { Command } from "commander";
 import type { Brain } from "../brain/types.js";
+import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { codehostMcpSpec } from "../codehost/server.js";
 import type { CodeHost } from "../codehost/types.js";
 import { loadConfig, type LoadedConfig } from "../config/load.js";
@@ -22,6 +23,7 @@ export interface CliFactories {
   tracker?: Tracker;
   brain?: Brain;
   codehost?: CodeHost;
+  gitlab?: GitLabMrApi;
   codehostMcpSpec?: typeof codehostMcpSpec;
   templates?: TemplateLister;
   /** Stands in for the slot helper's socket; tests never reach systemd or Docker. */
