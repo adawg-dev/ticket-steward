@@ -207,7 +207,7 @@ export class JobStore {
     );
     this.storeImplement = db.prepare<[string, number]>("UPDATE jobs SET implement_result = ? WHERE id = ?");
     this.storeFix = db.prepare<[string, number]>("UPDATE jobs SET fix_result = ? WHERE id = ?");
-    this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ? WHERE id = ?");
+    this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ?, pushed_at = NULL WHERE id = ?");
     this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
     this.storeSession = db.prepare<[string, number]>("UPDATE jobs SET session_id = ? WHERE id = ?");
     this.complete = db.prepare<[JobStatus, string | null, string, number]>(
@@ -293,6 +293,7 @@ export class JobStore {
     this.storeFix.run(JSON.stringify(stored), id);
   }
 
+  /** The commit about to be pushed; clears `pushedAt` until `markPushed`, so a push that never lands is not read as pushed. */
   recordCommit(id: number, branch: string, sha: string): void {
     this.storeCommit.run(branch, sha, id);
   }

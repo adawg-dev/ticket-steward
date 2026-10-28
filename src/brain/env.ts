@@ -31,9 +31,27 @@ export const buildWorkspaceEnv = (port: number): Record<string, string> => ({
   CI: "1",
 });
 
-/** The brain's env: the workspace env plus the brain's own credentials and, for claude-code, its session store. */
-export const buildBrainEnv = (secrets: Secrets, brain: BrainConfig, port: number, sessionsDir: string): Record<string, string> => ({
+/** The identity the agent's own commits carry; git has no global config to take one from. */
+const authorEnv = (author: { name: string; email: string }): Record<string, string> => ({
+  GIT_AUTHOR_NAME: author.name,
+  GIT_AUTHOR_EMAIL: author.email,
+  GIT_COMMITTER_NAME: author.name,
+  GIT_COMMITTER_EMAIL: author.email,
+});
+
+/**
+ * The brain's env: the workspace env plus the brain's own credentials, for claude-code its session store, and with
+ * `author` (`implement.commitAuthor`) the identity its commits carry.
+ */
+export const buildBrainEnv = (
+  secrets: Secrets,
+  brain: BrainConfig,
+  port: number,
+  sessionsDir: string,
+  author?: { name: string; email: string },
+): Record<string, string> => ({
   ...buildWorkspaceEnv(port),
   ...credentialEnv(secrets, brain),
   ...(brain.kind === "claude-code" ? { CLAUDE_CONFIG_DIR: sessionsDir } : {}),
+  ...(author === undefined ? {} : authorEnv(author)),
 });

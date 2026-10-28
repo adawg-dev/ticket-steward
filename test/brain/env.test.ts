@@ -66,6 +66,17 @@ describe("buildBrainEnv", () => {
     expect(Object.keys(env).sort()).toEqual([...BASE_KEYS.slice(0, 6), "OPENAI_API_KEY", ...BASE_KEYS.slice(6)]);
   });
 
+  it("gives the agent's commits the configured author only when one is given", () => {
+    const env = buildBrainEnv(allSecrets, claudeCode, 4100, "/d/sessions", { name: "Ticket Steward", email: "steward@example.com" });
+    expect(env).toMatchObject({
+      GIT_AUTHOR_NAME: "Ticket Steward",
+      GIT_AUTHOR_EMAIL: "steward@example.com",
+      GIT_COMMITTER_NAME: "Ticket Steward",
+      GIT_COMMITTER_EMAIL: "steward@example.com",
+    });
+    expect(Object.keys(buildBrainEnv(allSecrets, claudeCode, 4100, "/d/sessions")).filter((key) => key.startsWith("GIT_AUTHOR"))).toEqual([]);
+  });
+
   it("builds a workspace env without any credentials", () => {
     const env = buildWorkspaceEnv(4100);
     expect(env.STEWARD_PORT).toBe("4100");

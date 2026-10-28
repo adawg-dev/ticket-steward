@@ -297,7 +297,7 @@ const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Wor
     return { status: "failed", error: errorMessage(err), retryable: true };
   }
 
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config));
+  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config), deps.config.implement?.commitAuthor);
   let worktree: Worktree;
   let prompt: string;
   try {

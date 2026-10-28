@@ -3,6 +3,7 @@ import { openDatabase, type Database } from "./db.js";
 import { DeliveryStore } from "./deliveries.js";
 import { JobStore } from "./jobs.js";
 import { LoopStore } from "./loops.js";
+import { PushStore } from "./pushes.js";
 
 export type { Database } from "./db.js";
 export { openDatabase } from "./db.js";
@@ -18,6 +19,7 @@ export {
 } from "./loops.js";
 export { AttemptStore, type Attempt, type AttemptPatch } from "./attempts.js";
 export { DeliveryStore } from "./deliveries.js";
+export { PushStore, type NewPush, type Push } from "./pushes.js";
 
 export interface Stores {
   db: Database;
@@ -25,6 +27,7 @@ export interface Stores {
   attempts: AttemptStore;
   deliveries: DeliveryStore;
   loops: LoopStore;
+  pushes: PushStore;
 }
 
 export const openStores = (dataDir: string): Stores => {
@@ -35,6 +38,7 @@ export const openStores = (dataDir: string): Stores => {
     attempts: new AttemptStore(db),
     deliveries: new DeliveryStore(db),
     loops: new LoopStore(db),
+    pushes: new PushStore(db),
   };
 };
 

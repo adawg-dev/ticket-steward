@@ -25,6 +25,22 @@ describe("evaluateTool", () => {
     expect(evaluate("Bash", { command: "git  push" }).allow).toBe(false);
   });
 
+  it("lets the agent stage, commit and amend its own commits", () => {
+    expect(evaluate("Bash", { command: "git add -A" })).toEqual({ allow: true });
+    expect(evaluate("Bash", { command: "git commit -m x" })).toEqual({ allow: true });
+    expect(evaluate("Bash", { command: "git commit --amend --no-edit" })).toEqual({ allow: true });
+  });
+
+  it("keeps git push, remote, worktree, gc and update-ref denied", () => {
+    for (const command of ["git push", "git remote -v", "git worktree add ../x", "git gc", "git update-ref refs/heads/x HEAD"]) {
+      expect(evaluate("Bash", { command }).allow).toBe(false);
+    }
+  });
+
+  it("allows the steward's push tool", () => {
+    expect(evaluate("mcp__push__push", { branchType: "fix" })).toEqual({ allow: true });
+  });
+
   it("denies git config", () => {
     expect(evaluate("Bash", { command: "git config --get remote.origin.url" }).allow).toBe(false);
   });

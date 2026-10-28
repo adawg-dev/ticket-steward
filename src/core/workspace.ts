@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { INTERRUPTED_ERROR, type BrainInput, type BrainOutput, type McpServerSpec } from "../brain/types.js";
 import { codehostMcpSpec } from "../codehost/server.js";
+import { pushMcpSpec, type PushTarget } from "../push/target.js";
 import { appPortOf } from "../config/schema.js";
 import { logger } from "../log.js";
 import { DB_FILENAME } from "../store/db.js";
@@ -41,9 +42,12 @@ export const errorMessage = (err: unknown): string => (err instanceof Error ? er
 /** A ticket's fix-loop worktree name: one path per ticket, so a resumed brain session finds its project by cwd. */
 export const stableWorktreeName = (identifier: string): string => `ticket-${identifier}`;
 
+/** The steward-owned directory for one job's bundles, transcripts and artifacts. */
+export const jobDirOf = (dataDir: string, jobId: number): string => join(dataDir, "jobs", String(jobId));
+
 /** The job's on-disk paths; `worktreeName` overrides the per-attempt worktree (a dry run always gets its own). */
 export const jobPaths = (ctx: RunContext, deps: PipelineDeps, opts: { worktreeName?: string } = {}): JobPaths => {
-  const jobDir = join(deps.config.dataDir, "jobs", String(ctx.jobId));
+  const jobDir = jobDirOf(deps.config.dataDir, ctx.jobId);
   return {
     jobDir,
     worktreeName: ctx.dryRun ? `dry-${process.pid}` : (opts.worktreeName ?? `${ctx.jobId}-${ctx.attempt}`),
@@ -147,7 +151,7 @@ export const brainInput = (
   prompt: string,
   env: Record<string, string>,
   output: BrainOutput,
-  opts: { limits?: { timeoutMinutes: number; maxTurns: number }; resumeSessionId?: string } = {},
+  opts: { limits?: { timeoutMinutes: number; maxTurns: number }; resumeSessionId?: string; push?: PushTarget } = {},
 ): BrainInput => {
   const { config, mirror } = deps;
   const { limits } = opts;
@@ -164,6 +168,8 @@ export const brainInput = (
     mcpServers: {
       codehost: codehostMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path, sha: worktree.sha }),
       playwright: playwrightMcpSpec(),
+      // Only a run that may push gets the push tool; its target is fixed here, never chosen by the agent.
+      ...(opts.push === undefined ? {} : { push: pushMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, target: opts.push }) }),
     },
     inlineSkills: stewardSkillNames(config.workspace.skillsDir),
     denyPaths: [mirror.path, join(config.dataDir, DB_FILENAME), config.workspace.overlayDir, dirname(deps.configPath), sessionsDir(config)],

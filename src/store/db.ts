@@ -79,6 +79,19 @@ CREATE TABLE IF NOT EXISTS loops (
 CREATE INDEX IF NOT EXISTS loops_issue ON loops (issue_id);
 CREATE INDEX IF NOT EXISTS loops_state ON loops (state);
 
+CREATE TABLE IF NOT EXISTS pushes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs (id),
+  loop_id INTEGER REFERENCES loops (id),
+  branch TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  previous_sha TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  pushed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS pushes_job ON pushes (job_id);
+
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
   seen_at TEXT NOT NULL

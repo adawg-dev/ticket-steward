@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BranchExistsError, type PushMode, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
+import { BranchExistsError, type PushMode, bundleBase, commitWithHooks, guardCommit, guardRange, installHookWrappers, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
 import { gitEnvRecord } from "../../src/workspace/git.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
@@ -221,6 +221,54 @@ describe("guardCommit", () => {
   });
 });
 
+describe("guardRange", () => {
+  const guard = { stewardFiles: [".env"], secretValues: ["sk-live-abcdef123456"] };
+  const commit = async (content: string, message: string): Promise<string> => {
+    await writeFile(join(worktree.path, "src/a.ts"), content);
+    await git(worktree.path, ["add", "src/a.ts"]);
+    await git(worktree.path, ["commit", "--quiet", "--no-gpg-sign", "-m", message]);
+    return git(worktree.path, ["rev-parse", "HEAD"]);
+  };
+
+  it("passes several clean commits on the base", async () => {
+    await commit("export const a = 2;\n", "API-1: one");
+    const head = await commit("export const a = 3;\n", "API-1: two");
+    expect(await guardRange({ worktreePath: worktree.path, baseSha: base, headSha: head, ...guard })).toEqual({ ok: true, paths: ["src/a.ts"] });
+  });
+
+  it("refuses a secret added in one commit even when a later one removes it", async () => {
+    const leaking = await commit("export const a = 'sk-live-abcdef123456';\n", "API-1: one");
+    const head = await commit("export const a = 3;\n", "API-1: two");
+    // The combined diff no longer shows it, but the first commit still carries it to the remote.
+    expect(await guardRange({ worktreePath: worktree.path, baseSha: base, headSha: head, ...guard })).toEqual({
+      ok: false,
+      reason: "the change contains a secret value",
+      detail: `commit ${leaking.slice(0, 7)}: src/a.ts`,
+    });
+  });
+
+  it("refuses any commit message in the range that carries a secret, naming the commit", async () => {
+    const leaking = await commit("export const a = 2;\n", "API-1: one\n\nsk-live-abcdef123456");
+    const head = await commit("export const a = 3;\n", "API-1: two");
+    expect(await guardRange({ worktreePath: worktree.path, baseSha: base, headSha: head, ...guard })).toEqual({
+      ok: false,
+      reason: "the commit message contains a secret value",
+      detail: `commit ${leaking.slice(0, 7)}`,
+    });
+  });
+});
+
+describe("linearRangeProblem", () => {
+  it("accepts a linear series and names a merge or a missing base", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await git(worktree.path, ["commit", "--quiet", "-am", "one"]);
+    const one = await git(worktree.path, ["rev-parse", "HEAD"]);
+    expect(await linearRangeProblem(worktree.path, base, one)).toBeNull();
+    expect(await linearRangeProblem(worktree.path, base, base)).toBe(`there are no commits on top of ${base.slice(0, 7)}`);
+    expect(await linearRangeProblem(worktree.path, one, base)).toBe(`${base.slice(0, 7)} does not descend from ${one.slice(0, 7)}`);
+  });
+});
+
 describe("installHookWrappers", () => {
   it("skips post-commit and clears wrappers left by an earlier attempt", async () => {
     const hooksDir = join(root, "hooks");
@@ -272,9 +320,9 @@ describe("push", () => {
     await expect(push(sha, { branch: "main" })).rejects.toThrow("refusing to push to refs/heads/main");
   });
 
-  it("refuses a commit that is not directly on the base", async () => {
+  it("refuses a commit that does not descend from the base", async () => {
     const sha = await commitChange();
-    await expect(push(sha, { baseSha: "b".repeat(40) })).rejects.toThrow("is not a single commit on top of");
+    await expect(push(sha, { baseSha: "b".repeat(40) })).rejects.toThrow("does not descend from bbbbbbb");
   });
 
   it("refuses when any branch already carries the ticket", async () => {
@@ -326,9 +374,18 @@ describe("push", () => {
       expect(await git(source, ["rev-parse", REF])).toBe(base);
     });
 
-    it("refuses a commit whose parent is not the previous head", async () => {
+    it("refuses a commit that does not descend from the previous head", async () => {
       const { first, second } = await pushedThenChild();
-      await expect(push(second, { branch: BRANCH, baseSha: base, mode: { kind: "fastForward", previousHead: first } })).rejects.toThrow("not a single commit on top of");
+      await expect(push(first, { branch: BRANCH, baseSha: first, mode: { kind: "fastForward", previousHead: second } })).rejects.toThrow(`${first.slice(0, 7)} does not descend from ${second.slice(0, 7)}`);
+    });
+
+    it("fast-forwards several linear commits at once", async () => {
+      const { first, second } = await pushedThenChild();
+      await git(source, ["branch", "-f", BRANCH, base]);
+      await saveBundle(worktree.path, base, join(root, "implement.bundle"));
+      await push(second, { branch: BRANCH, baseSha: base, mode: { kind: "fastForward", previousHead: base } });
+      expect(await git(source, ["rev-list", "--count", `${base}..${REF}`])).toBe("2");
+      expect(await git(source, ["rev-parse", `${REF}~1`])).toBe(first);
     });
   });
 

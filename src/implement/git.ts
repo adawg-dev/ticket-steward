@@ -58,9 +58,9 @@ const scanDiff = async (cwd: string, args: string[], env: Record<string, string>
  * The shared path guard and secret scan, over `git diff <range>`: `--cached` for the index, `<base> <sha>` for a commit.
  * Refuses an empty change, steward-copied files (overlay, skills) and added lines carrying a secret value.
  */
-const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: Record<string, string> = {}): Promise<GuardResult> => {
+const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: Record<string, string> = {}, allowEmpty = false): Promise<GuardResult> => {
   const paths = (await gitOrThrow(["diff", "--name-only", "-z", ...range], cwd, env)).split("\0").filter((path) => path !== "");
-  if (paths.length === 0) return { ok: false, reason: "the agent reported the work as implemented but changed nothing", detail: "" };
+  if (paths.length === 0 && !allowEmpty) return { ok: false, reason: "the agent reported the work as implemented but changed nothing", detail: "" };
   const steward = new Set(input.stewardFiles);
   const copied = paths.filter((path) => steward.has(path));
   if (copied.length > 0) return { ok: false, reason: "the change would commit files the steward copied in", detail: copied.join("\n") };
@@ -88,28 +88,66 @@ export const stageAndGuard = async (input: GuardInput & { worktreePath: string }
   return guardDiff(input.worktreePath, ["--cached"], input);
 };
 
+const NO_REPLACE = { GIT_NO_REPLACE_OBJECTS: "1" };
+
+/** The message part of a raw commit object. */
+const messageOf = (raw: string): string => {
+  const headerEnd = raw.indexOf("\n\n");
+  return headerEnd === -1 ? "" : raw.slice(headerEnd + 2);
+};
+
+/**
+ * The guard over everything `baseSha..headSha` would push. Each commit is guarded on its own, since every commit reaches
+ * the remote: a secret added in one commit and removed in the next still leaks. The range must change something overall,
+ * and no commit message may carry a secret value. The caller has checked the range is linear on the base.
+ * Replace refs are ignored, so the diffs are of the real objects that get pushed.
+ */
+export const guardRange = async (input: GuardInput & { worktreePath: string; baseSha: string; headSha: string }): Promise<GuardResult> => {
+  const overall = await guardDiff(input.worktreePath, [input.baseSha, input.headSha], input, NO_REPLACE);
+  if (!overall.ok) return overall;
+  const secrets = usableSecrets(input.secretValues);
+  const commits = (await gitOrThrow(["rev-list", "--reverse", "--parents", `${input.baseSha}..${input.headSha}`], input.worktreePath, NO_REPLACE))
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => line.split(" "));
+  for (const [sha = "", parent = ""] of commits) {
+    if (commits.length > 1) {
+      const own = await guardDiff(input.worktreePath, [parent, sha], input, NO_REPLACE, true);
+      if (!own.ok) return { ...own, detail: own.detail === "" ? `commit ${sha.slice(0, 7)}` : `commit ${sha.slice(0, 7)}: ${own.detail}` };
+    }
+    // The agent wrote the messages and its commit hooks could rewrite them: they are pushed too, so they get the same scan.
+    const message = messageOf(await gitOrThrow(["cat-file", "commit", sha], input.worktreePath, NO_REPLACE));
+    if (secrets.some((secret) => message.includes(secret))) return { ok: false, reason: "the commit message contains a secret value", detail: `commit ${sha.slice(0, 7)}` };
+  }
+  return overall;
+};
+
 /**
  * Re-checks what was actually committed, since the repo's hooks (which the agent can edit) run between the staged
- * guard and the commit: the commit must sit directly on `baseSha`, `baseSha..sha` must pass the same guard, and the
- * commit message must carry no secret value.
- * Replace refs are ignored, so the diff is of the real objects that get pushed.
+ * guard and the commit: the commit must sit directly on `baseSha` and pass `guardRange`.
  */
 export const guardCommit = async (input: GuardInput & { worktreePath: string; baseSha: string; sha: string }): Promise<GuardResult> => {
-  const env = { GIT_NO_REPLACE_OBJECTS: "1" };
-  const parents = (await gitOrThrow(["rev-list", "--parents", "-n", "1", input.sha], input.worktreePath, env)).split(" ").slice(1);
+  const parents = (await gitOrThrow(["rev-list", "--parents", "-n", "1", input.sha], input.worktreePath, NO_REPLACE)).split(" ").slice(1);
   if (parents.length !== 1 || parents[0] !== input.baseSha) {
     return { ok: false, reason: "the commit is not a single commit on top of the base", detail: `parents: ${parents.join(" ") || "(none)"}` };
   }
-  const diffed = await guardDiff(input.worktreePath, [input.baseSha, input.sha], input, env);
-  if (!diffed.ok) return diffed;
-  // The agent wrote the message and its commit hooks could rewrite it: it is pushed too, so it gets the same scan.
-  const raw = await gitOrThrow(["cat-file", "commit", input.sha], input.worktreePath, env);
-  const headerEnd = raw.indexOf("\n\n");
-  const message = headerEnd === -1 ? "" : raw.slice(headerEnd + 2);
-  if (usableSecrets(input.secretValues).some((secret) => message.includes(secret))) {
-    return { ok: false, reason: "the commit message contains a secret value", detail: "commit message" };
-  }
-  return diffed;
+  const guarded = await guardRange({ ...input, headSha: input.sha });
+  if (!guarded.ok && guarded.reason === "the commit message contains a secret value") return { ...guarded, detail: "commit message" };
+  return guarded;
+};
+
+/**
+ * Why `baseSha..sha` is not a non-empty, merge-free series of commits on top of `baseSha`, or null when it is.
+ * The range is what a fast-forward from `baseSha` would push.
+ */
+export const linearRangeProblem = async (cwd: string, baseSha: string, sha: string): Promise<string | null> => {
+  const ancestor = await git(["merge-base", "--is-ancestor", baseSha, sha], cwd, NO_REPLACE);
+  if (ancestor.exitCode !== 0) return `${sha.slice(0, 7)} does not descend from ${baseSha.slice(0, 7)}`;
+  const lines = (await gitOrThrow(["rev-list", "--parents", `${baseSha}..${sha}`], cwd, NO_REPLACE)).split("\n").filter((line) => line !== "");
+  if (lines.length === 0) return `there are no commits on top of ${baseSha.slice(0, 7)}`;
+  const merge = lines.find((line) => line.split(" ").length !== 2);
+  if (merge !== undefined) return `${merge.slice(0, 7)} is a merge commit; the history on top of ${baseSha.slice(0, 7)} must be linear`;
+  return null;
 };
 
 /**
@@ -211,7 +249,8 @@ export class BranchExistsError extends Error {
 export type PushMode = { kind: "create" } | { kind: "fastForward"; previousHead: string };
 
 /**
- * Pushes `sha` after checking the ref pattern, the ancestry, and (create) that no branch carries the ticket. Never a plain force.
+ * Pushes `sha` after checking the ref pattern, that it is a linear series of commits on `baseSha` (create) or on the previous
+ * head (fast-forward), and (create) that no branch carries the ticket. Never a plain force. `baseSha` is the bundle's base.
  * Runs in a fresh scratch repo (never the worktree or mirror, whose config the agent may have set) with hooks disabled, so the
  * push credentials only reach git itself. Objects come from the bundle plus the mirror's objects (via alternates) for the base.
  */
@@ -234,8 +273,10 @@ export const pushCommit = async (input: {
   await mkdir(join(input.scratchDir, "objects", "info"), { recursive: true });
   await writeFile(join(input.scratchDir, "objects", "info", "alternates"), `${input.objectsDir}\n`);
   await restoreFromBundle(input.scratchDir, input.bundlePath, input.sha);
-  const parents = (await gitOrThrow(["rev-list", "--parents", "-n", "1", input.sha], input.scratchDir)).split(" ").slice(1);
-  if (parents.length !== 1 || parents[0] !== input.baseSha) throw new Error(`refusing to push: ${input.sha.slice(0, 7)} is not a single commit on top of ${input.baseSha.slice(0, 7)}`);
+  // A fast-forward checks from the head the lease expects, so nothing on the branch is ever dropped.
+  const from = input.mode.kind === "create" ? input.baseSha : input.mode.previousHead;
+  const problem = await linearRangeProblem(input.scratchDir, from, input.sha);
+  if (problem !== null) throw new Error(`refusing to push: ${problem}`);
   if (input.mode.kind === "create") {
     const existing = await remoteTicketBranches(input.remote, input.scratchDir, input.identifier);
     if (existing[0] !== undefined) throw new BranchExistsError(existing[0].ref);

@@ -6,10 +6,11 @@ export type PolicyDecision = { allow: true } | { allow: false; reason: string };
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "write_file"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "read_file", "list_dir"]);
 const SHELL_TOOLS = new Set(["Bash", "run_shell", "start_process"]);
-const ALLOWED_MCP_PREFIXES = ["mcp__codehost__", "mcp__playwright__"];
+/** `push` is the steward's push tool, the agent's only way to publish its commits. */
+const ALLOWED_MCP_PREFIXES = ["mcp__codehost__", "mcp__playwright__", "mcp__push__"];
+/** The agent commits (and adds, amends) itself; publishing goes through the push tool, never git. */
 const DENIED_COMMANDS: RegExp[] = [
   /git\s+push/,
-  /git\s+commit/,
   /git\s+remote/,
   /git\s+worktree/,
   /git\s+gc/,

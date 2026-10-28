@@ -67,6 +67,14 @@ describe("brainInput", () => {
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement").denyPaths).toContain("/data/sessions");
   });
 
+  it("adds the push server, with its target and no secrets, only for a run that may push", () => {
+    const target = { jobId: 12, worktreePath: worktree.path, identifier: "API-1", issueId: "issue-1", mode: "create" as const, branch: null, baseSha: "b".repeat(40), loopId: null, port: 4100 };
+    const push = brainInput(fullDeps, paths, worktree, "prompt", {}, "implement", { push: target }).mcpServers.push;
+    expect(push?.args).toEqual(["/bin/steward", "mcp", "push", "--config", "/etc/steward/config.json", "--target", JSON.stringify(target)]);
+    expect(Object.keys(push?.env ?? {}).sort()).toEqual(["HOME", "PATH"]);
+    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement").mcpServers).not.toHaveProperty("push");
+  });
+
   it("passes the session to resume only when given", () => {
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "fix", { resumeSessionId: "s0" }).resumeSessionId).toBe("s0");
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement")).not.toHaveProperty("resumeSessionId");

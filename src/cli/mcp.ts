@@ -1,6 +1,11 @@
 import type { Command } from "commander";
 import { createCodeHost, startCodeHostMcpServer } from "../codehost/index.js";
-import { fail, type CliContext } from "./context.js";
+import { pushFromWorktree, type PushResult } from "../push/service.js";
+import { startPushMcpServer } from "../push/server.js";
+import { PushTargetSchema, type PushTarget } from "../push/target.js";
+import { openStores } from "../store/index.js";
+import { errorMessage, fail, type CliContext } from "./context.js";
+import { buildRedactor, openMirror, openTracker } from "./runtime.js";
 
 export const registerMcp = (program: Command, ctx: CliContext): void => {
   const mcp = program.command("mcp").description("internal MCP servers spawned for the brain");
@@ -15,5 +20,29 @@ export const registerMcp = (program: Command, ctx: CliContext): void => {
       if (configPath === undefined) return fail(ctx, "mcp codehost requires --config <absolute path to steward.config.ts>");
       const { config, secrets } = await ctx.loadConfig({ configPath });
       await startCodeHostMcpServer({ codehost: createCodeHost(config.codehost, secrets), worktreePath: opts.workspace, sha: opts.sha });
+    });
+
+  mcp
+    .command("push")
+    .description("stdio MCP server exposing push for one run's worktree; loads the push token from the config's .env")
+    .requiredOption("--target <json>", "the run's push target (job, worktree, ticket, branch, base)")
+    .action(async (opts: { target: string }) => {
+      const { config: configPath } = program.opts<{ config?: string }>();
+      if (configPath === undefined) return fail(ctx, "mcp push requires --config <absolute path to steward.config.ts>");
+      let target: PushTarget;
+      try {
+        target = PushTargetSchema.parse(JSON.parse(opts.target));
+      } catch (err) {
+        return fail(ctx, `mcp push: invalid --target: ${errorMessage(err)}`);
+      }
+      const loaded = await ctx.loadConfig({ configPath });
+      const redactor = await buildRedactor(loaded);
+      const deps = { config: loaded.config, secrets: loaded.secrets, stores: openStores(loaded.config.dataDir), mirror: openMirror(loaded), tracker: openTracker(loaded, ctx), redactor };
+      await startPushMcpServer({
+        push: (request) =>
+          pushFromWorktree({ deps, target, branchType: request.branchType ?? null, ...(request.note === undefined ? {} : { note: request.note }) }).catch(
+            (err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: redactor.redact(errorMessage(err)) }),
+          ),
+      });
     });
 };

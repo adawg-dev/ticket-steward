@@ -4,7 +4,7 @@ import { implementResultJsonSchema } from "../implement/result.js";
 import { evaluateTool } from "./policy.js";
 import type { Brain, BrainInput, BrainOutput, BrainUsage, OnMessage } from "./types.js";
 
-const ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*"];
+const ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*", "mcp__push__*"];
 const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
 const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = {
   implement: implementResultJsonSchema,

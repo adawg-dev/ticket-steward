@@ -46,7 +46,7 @@ const notConfigured: JobOutcome = { status: "failed", error: "implement is not c
 type Settings = { settings: ImplementConfig; remote: RemoteCredentials };
 
 /** The implement settings and the push remote (with GITLAB_PUSH_TOKEN), or null when implement is not configured. */
-export const settingsOf = (deps: PipelineDeps): Settings | null => {
+export const settingsOf = (deps: Pick<PipelineDeps, "config" | "secrets">): Settings | null => {
   const settings = deps.config.implement;
   const token = deps.secrets.GITLAB_PUSH_TOKEN;
   if (settings === undefined || token === undefined || token === "") return null;
@@ -57,7 +57,7 @@ export const settingsOf = (deps: PipelineDeps): Settings | null => {
  * A fresh, empty, steward-made directory for token-carrying `ls-remote`. The ceiling stops git's repository discovery
  * from reaching the job dir (where an earlier attempt's agent could have planted repo files), so no repo config applies.
  */
-const lsRemoteSite = async (paths: JobPaths, remote: RemoteCredentials): Promise<{ cwd: string; remote: RemoteCredentials }> => {
+export const lsRemoteSite = async (paths: Pick<JobPaths, "jobDir">, remote: RemoteCredentials): Promise<{ cwd: string; remote: RemoteCredentials }> => {
   await mkdir(paths.jobDir, { recursive: true, mode: 0o700 });
   const cwd = join(paths.jobDir, LS_REMOTE_DIR);
   await rm(cwd, { recursive: true, force: true });
@@ -148,7 +148,7 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) }, null);
   }
 
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config));
+  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config), deps.config.implement?.commitAuthor);
   let worktree: Worktree;
   let prompt: string;
   try {
