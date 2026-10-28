@@ -142,6 +142,29 @@ describe("runAwaitReview", () => {
     expect(loopOf(id)).toMatchObject({ waitStartedAt: NOW.toISOString(), mrIid: null, state: "awaiting_mr" });
   });
 
+  it("polls at the wait's deadline when it comes before the next poll, and hands back right after it", async () => {
+    const id = knownMrLoop();
+    gitlab.mr = fakeMergeRequest({ sha: SHA });
+    const deadline = new Date(NOW.getTime() + 20_000);
+    stores.loops.update(id, { waitStartedAt: new Date(deadline.getTime() - 30 * 60_000).toISOString() });
+
+    expect(await runAwaitReview(claim(id), makeDeps())).toEqual({ status: "deferred", until: new Date(deadline.getTime() + 1) });
+
+    const atDeadline = { ...makeDeps(), now: () => deadline };
+    expect(await runAwaitReview(claim(id), atDeadline)).toEqual({ status: "deferred", until: new Date(deadline.getTime() + 1) });
+
+    const after = { ...makeDeps(), now: () => new Date(deadline.getTime() + 1) };
+    expect((await runAwaitReview(claim(id), after)).status).toBe("succeeded");
+    expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("defers a full poll interval while the deadline is far off", async () => {
+    const id = knownMrLoop();
+    gitlab.mr = fakeMergeRequest({ sha: SHA });
+
+    expect(await runAwaitReview(claim(id), makeDeps())).toEqual({ status: "deferred", until: new Date(NOW.getTime() + 60_000) });
+  });
+
   it("stores the MR once found and moves to awaiting_review", async () => {
     const id = createLoop();
     gitlab.openMr = fakeMergeRequest({ sha: SHA });

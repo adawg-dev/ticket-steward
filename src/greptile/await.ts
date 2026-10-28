@@ -44,6 +44,12 @@ const observe = async (deps: PipelineDeps, loop: Loop, project: string, now: Dat
   return { ticketClosed, mr, discussions };
 };
 
+/** The next poll: one interval out, but no later than just past the wait's deadline, so a timeout never overruns by a poll. */
+const nextPoll = (now: Date, pollSeconds: number, deadline: Date | null): Date => {
+  const interval = now.getTime() + pollSeconds * 1000;
+  return new Date(deadline === null ? interval : Math.min(interval, deadline.getTime() + 1));
+};
+
 /** The await-review job: polls the MR, its Greptile review and its pipeline, then waits, passes, queues a fix or ends the loop. */
 export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   const { config, stores } = deps;
@@ -81,7 +87,7 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
 
   switch (decision.kind) {
     case "wait":
-      return { status: "deferred", until: new Date(now.getTime() + settings.pollSeconds * 1000) };
+      return { status: "deferred", until: nextPoll(now, settings.pollSeconds, decision.deadline) };
     case "passed": {
       const head = mr?.sha ?? loop.headSha;
       const last = loop.history.at(-1);

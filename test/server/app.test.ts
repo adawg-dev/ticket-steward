@@ -495,6 +495,17 @@ describe("buildServer", () => {
       expect(isDue(jobId)).toBe(true);
     });
 
+    it("reports no_loop when the matching loop has no await job to wake", async () => {
+      const { jobId } = waitingLoop("awaiting_review", { projectId: 42, mrIid: 7 });
+      stores.jobs.claimById(jobId);
+      stores.jobs.finish(jobId, { status: "failed", error: "boom", retryable: false });
+
+      const response = await postGitlab("Pipeline Hook", pipelineEvent());
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ok: true, action: "no_loop" });
+    });
+
     it("reports no_loop when no waiting loop matches", async () => {
       const { jobId } = waitingLoop("fixing");
 

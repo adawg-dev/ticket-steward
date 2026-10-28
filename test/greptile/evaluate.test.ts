@@ -38,9 +38,18 @@ describe("evaluateRound", () => {
   it("1: stops silently when the ticket is closed", () => {
     expect(evaluateRound(baseInput({ ticketClosed: true }))).toEqual({ kind: "stop", reason: expect.any(String), comment: false });
   });
+  it("gives each wait the deadline of the timeout it is bounded by", () => {
+    const started = new Date(NOW.getTime() - 5 * 60_000);
+    const at = (minutes: number): Date => new Date(started.getTime() + minutes * 60_000);
+    const waiting = (over: Partial<RoundInput>) => evaluateRound(baseInput({ loop: loop({ waitStartedAt: started.toISOString() }), ...over }));
+    expect(waiting({ mr: null })).toEqual({ kind: "wait", waitingFor: "mr", deadline: at(60) });
+    expect(waiting({ summary: null })).toEqual({ kind: "wait", waitingFor: "review", deadline: at(30) });
+    expect(waiting({ mr: fakeMergeRequest({ sha: SHA }) })).toEqual({ kind: "wait", waitingFor: "pipeline", deadline: at(60) });
+    expect(evaluateRound(baseInput({ mr: null, loop: loop({ waitStartedAt: null }) }))).toEqual({ kind: "wait", waitingFor: "mr", deadline: null });
+  });
   it("2: waits for the MR, then hands back past the timeout", () => {
     const fresh = baseInput({ mr: null, loop: loop({ waitStartedAt: minutesAgo(5) }) });
-    expect(evaluateRound(fresh)).toEqual({ kind: "wait", waitingFor: "mr" });
+    expect(evaluateRound(fresh)).toMatchObject({ kind: "wait", waitingFor: "mr" });
     const stale = baseInput({ mr: null, loop: loop({ waitStartedAt: minutesAgo(61) }) });
     expect(evaluateRound(stale)).toEqual({ kind: "handback", reason: "no merge request was opened for api-1-fix" });
   });
@@ -60,26 +69,26 @@ describe("evaluateRound", () => {
     }
   });
   it("6: waits for the review, then hands back past the timeout", () => {
-    expect(evaluateRound(baseInput({ summary: null }))).toEqual({ kind: "wait", waitingFor: "review" });
-    expect(evaluateRound(baseInput({ summary: summary({ lastReviewedSha: "d".repeat(7) }) }))).toEqual({ kind: "wait", waitingFor: "review" });
+    expect(evaluateRound(baseInput({ summary: null }))).toMatchObject({ kind: "wait", waitingFor: "review" });
+    expect(evaluateRound(baseInput({ summary: summary({ lastReviewedSha: "d".repeat(7) }) }))).toMatchObject({ kind: "wait", waitingFor: "review" });
     const stale = baseInput({ summary: null, loop: loop({ waitStartedAt: minutesAgo(31) }) });
     expect(evaluateRound(stale)).toEqual({ kind: "handback", reason: "Greptile did not review ccccccc" });
   });
   it("6: a review count equal to the count at trigger is not finished", () => {
     const input = baseInput({ loop: loop({ reviewCountAtTrigger: 2 }), summary: summary({ reviewCount: 2 }) });
-    expect(evaluateRound(input)).toEqual({ kind: "wait", waitingFor: "review" });
+    expect(evaluateRound(input)).toMatchObject({ kind: "wait", waitingFor: "review" });
     expect(evaluateRound({ ...input, summary: summary({ reviewCount: 3 }) })).toMatchObject({ kind: "passed" });
   });
   it("7: waits for an unfinished pipeline, then hands back past the timeout", () => {
     for (const status of ["created", "pending", "running", "waiting_for_resource", "preparing"]) {
-      expect(evaluateRound(baseInput({ mr: withPipeline(status) }))).toEqual({ kind: "wait", waitingFor: "pipeline" });
+      expect(evaluateRound(baseInput({ mr: withPipeline(status) }))).toMatchObject({ kind: "wait", waitingFor: "pipeline" });
     }
-    expect(evaluateRound(baseInput({ mr: fakeMergeRequest({ sha: SHA }) }))).toEqual({ kind: "wait", waitingFor: "pipeline" });
+    expect(evaluateRound(baseInput({ mr: fakeMergeRequest({ sha: SHA }) }))).toMatchObject({ kind: "wait", waitingFor: "pipeline" });
     const stale = baseInput({ mr: withPipeline("running"), loop: loop({ waitStartedAt: minutesAgo(61) }) });
     expect(evaluateRound(stale)).toEqual({ kind: "handback", reason: "no finished pipeline for ccccccc" });
   });
   it("7: a pipeline for an older sha counts as no pipeline", () => {
-    expect(evaluateRound(baseInput({ mr: withPipeline("success", "d".repeat(40)) }))).toEqual({ kind: "wait", waitingFor: "pipeline" });
+    expect(evaluateRound(baseInput({ mr: withPipeline("success", "d".repeat(40)) }))).toMatchObject({ kind: "wait", waitingFor: "pipeline" });
   });
   it("7: hands back on canceled, skipped or manual pipelines", () => {
     for (const status of ["canceled", "skipped", "manual"]) {

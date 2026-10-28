@@ -367,7 +367,8 @@ tracker: { labels: { approved: "agent-approved" } },   // applied when the loop 
 
 Waits are counted from the first poll of the wait, not from the push. Per round there are up to 30 minutes for the MR
 to open, then 30 minutes for Greptile's review and the pipeline together (they run in parallel and share one clock);
-every fix round starts its waits over. On kickoff MR pipelines take 7.3 minutes at the median (14.4 at most) and Greptile's
+every fix round starts its waits over. The last poll of a wait is moved up to its deadline, so a wait that runs out
+hands back right then, not one poll interval later. On kickoff MR pipelines take 7.3 minutes at the median (14.4 at most) and Greptile's
 first review 3.2 (12.3 at most).
 
 **Webhooks.** GitLab webhooks are the loop's primary wake signal; polling every `pollSeconds` (5 minutes) is only the
