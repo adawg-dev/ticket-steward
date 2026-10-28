@@ -1,8 +1,11 @@
 import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { execa } from "execa";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { Redactor } from "../../src/core/redact.js";
+import { orbitRemote, runOrbitTool } from "../../src/orbit/server.js";
+import type { OrbitExec } from "../../src/orbit/run.js";
 import { guardRange, unpushedWork } from "../../src/implement/git.js";
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree } from "../../src/push/service.js";
@@ -68,6 +71,7 @@ const poison = async (): Promise<void> => {
   await git(worktree.path, ["config", "filter.x.process", `touch ${marker}-process; true`]);
   await git(worktree.path, ["config", "filter.x.required", "true"]);
   await git(worktree.path, ["config", "diff.x.textconv", `touch ${marker}-textconv; cat`]);
+  await git(worktree.path, ["config", "diff.x.command", `touch ${marker}-command; true`]);
   await git(worktree.path, ["config", "log.showSignature", "true"]);
   await git(worktree.path, ["config", `url.${evil}.insteadOf`, repo.repo]);
   const common = await git(worktree.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
@@ -75,7 +79,8 @@ const poison = async (): Promise<void> => {
   await writeFile(join(common, "info", "attributes"), "* filter=x diff=x\n");
 };
 
-const markers = (): string[] => ["fsmonitor", "clean", "process", "textconv"].filter((name) => existsSync(`${marker}-${name}`));
+const MARKERS = ["fsmonitor", "clean", "process", "textconv", "command"];
+const markers = (): string[] => MARKERS.filter((name) => existsSync(`${marker}-${name}`));
 
 beforeEach(async () => {
   repo = await tmpRepo("unused");
@@ -111,7 +116,7 @@ describe("git on an agent's worktree", () => {
     // The attack is real: plain git runs the agent's programs.
     await git(worktree.path, ["diff", "--name-only", "HEAD"]).catch(() => "");
     expect(markers().length).toBeGreaterThan(0);
-    for (const name of ["fsmonitor", "clean", "process", "textconv"]) await rm(`${marker}-${name}`, { force: true });
+    for (const name of MARKERS) await rm(`${marker}-${name}`, { force: true });
 
     const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: repo.sha, stewardFiles: [] });
     expect(work.uncommitted).toEqual(["src/adapter.ts"]);
@@ -135,5 +140,32 @@ describe("git on an agent's worktree", () => {
     expect(await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(sha);
     expect(await git(evil, ["for-each-ref"])).toBe("");
     expect(markers()).toEqual([]);
+  });
+});
+
+describe("Orbit on an agent's worktree", () => {
+  it("runs git with every driver the worktree's config names switched off, read when the tool is called", async () => {
+    await mkdir(join(worktree.path, "src"), { recursive: true });
+    await writeFile(join(worktree.path, "src", "adapter.ts"), "export const adapter = 2;\n");
+    await git(worktree.path, ["add", "--", "src/adapter.ts"]);
+    await git(worktree.path, ["commit", "-q", "-m", "API-1: keep the last chunk"]);
+    // Orbit runs git itself; this stand-in runs what Orbit 0.161.0 runs (status) and what a later one might (diff, log -p).
+    const gitRuns: Array<Record<string, string>> = [];
+    const exec: OrbitExec = async (_args, opts) => {
+      gitRuns.push(opts.env);
+      for (const args of [["status", "--porcelain", "-z", "--untracked-files=all"], ["diff"], ["diff", "HEAD"], ["log", "-p", "-1"]]) {
+        await execa("git", args, { cwd: opts.cwd, env: opts.env, extendEnv: false, reject: false, stdin: "ignore" });
+      }
+      return { exitCode: 0, stdout: "ok", stderr: "", timedOut: false };
+    };
+    const remote = orbitRemote({ exec, dataDir: repo.dataDir, worktreePath: worktree.path, codehost: config().codehost, secrets: { GITLAB_TOKEN: "glpat-fake-orbit-token" } });
+    // Poisoned after the remote is built: the overrides come from the config as it stands at each call.
+    await poison();
+    await writeFile(join(worktree.path, "src", "adapter.ts"), "export const adapter = 3;\n");
+
+    expect(await runOrbitTool(remote, ["context", "--", "mr:1"])).toEqual({ content: [{ type: "text", text: "ok" }] });
+    expect(markers()).toEqual([]);
+    expect(gitRuns[0]).toMatchObject({ GIT_CONFIG_NOSYSTEM: "1" });
+    expect(Object.values(gitRuns[0] ?? {})).toEqual(expect.arrayContaining(["filter.x.clean", "diff.x.textconv", "diff.x.command"]));
   });
 });

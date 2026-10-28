@@ -34,33 +34,54 @@ export const safeGitArgs = (): string[] => asArgs(SAFE_CONFIG);
 /** No system or global config or attributes, and no replace refs, so git reads the real objects. */
 export const safeGitEnv = (): Record<string, string> => ({ GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_REPLACE_OBJECTS: "1", GIT_ATTR_NOSYSTEM: "1" });
 
-/**
- * The same overrides as environment (`GIT_CONFIG_COUNT`), for a program that runs git itself in the worktree (Orbit).
- * Filters are not covered: their driver names are only known by reading the worktree's config.
- */
-export const safeGitConfigEnv = (): Record<string, string> => ({
-  ...safeGitEnv(),
-  GIT_CONFIG_COUNT: String(SAFE_CONFIG.length),
-  ...Object.fromEntries(SAFE_CONFIG.flatMap(([key, value], index) => [[`GIT_CONFIG_KEY_${index}`, key], [`GIT_CONFIG_VALUE_${index}`, value]])),
-});
+/** Diff driver keys an empty value makes git refuse rather than run: `git diff` then fails instead of running the agent's program. */
+const DIFF_DRIVER_KEYS: Array<[string, string]> = [
+  ["textconv", ""],
+  ["command", ""],
+];
 
-/**
- * Overrides switching off every filter driver the worktree's config defines (attributes can name one for any path, and git
- * runs its clean command when it compares a changed file). Read fresh on each call: the agent can add one at any time.
- * Reading config runs nothing.
- */
-export const filterOverrides = async (cwd: string): Promise<string[]> => {
-  const listed = await git([...safeGitArgs(), "config", "--null", "--name-only", "--get-regexp", "^filter\\."], cwd, safeGitEnv());
-  // Exit 1: no filter is configured.
+/** The driver names the worktree's config defines under `section` (`filter`, `diff`). Reading config runs nothing. */
+const configuredDrivers = async (cwd: string, section: string): Promise<string[]> => {
+  const listed = await git([...safeGitArgs(), "config", "--null", "--name-only", "--get-regexp", `^${section}\\.`], cwd, safeGitEnv());
+  // Exit 1: nothing is configured.
   if (listed.exitCode !== 0) return [];
   const drivers = new Set(
     listed.stdout
       .split("\0")
       .filter((name) => name !== "")
-      .map((name) => name.slice("filter.".length, name.lastIndexOf(".")))
+      .map((name) => name.slice(section.length + 1, name.lastIndexOf(".")))
       .filter((driver) => driver !== ""),
   );
-  return [...drivers].flatMap((driver) => asArgs(FILTER_KEYS.map(([key, value]) => [`filter.${driver}.${key}`, value])));
+  return [...drivers];
+};
+
+const driverPairs = (section: string, drivers: string[], keys: Array<[string, string]>): Array<[string, string]> =>
+  drivers.flatMap((driver) => keys.map(([key, value]): [string, string] => [`${section}.${driver}.${key}`, value]));
+
+/**
+ * Overrides switching off every filter driver the worktree's config defines (attributes can name one for any path, and git
+ * runs its clean command when it compares a changed file). Read fresh on each call: the agent can add one at any time.
+ */
+export const filterOverrides = async (cwd: string): Promise<string[]> => asArgs(driverPairs("filter", await configuredDrivers(cwd, "filter"), FILTER_KEYS));
+
+/**
+ * The same overrides as environment (`GIT_CONFIG_COUNT`), for a program that runs git itself in the worktree (Orbit runs
+ * `git status`, which applies clean filters). Read fresh on each call, like `filterOverrides`; it also disables every diff
+ * driver's textconv and command, since the steward does not control the flags that program passes to `git diff`.
+ * Remote URLs cannot be pinned this way (a `-c remote.origin.url` adds a URL after the worktree's own, and `insteadOf`
+ * still rewrites it); Orbit takes its API host from `GITLAB_URL` and refuses a remote on another host.
+ */
+export const safeGitConfigEnv = async (cwd: string): Promise<Record<string, string>> => {
+  const pairs = [
+    ...SAFE_CONFIG,
+    ...driverPairs("filter", await configuredDrivers(cwd, "filter"), FILTER_KEYS),
+    ...driverPairs("diff", await configuredDrivers(cwd, "diff"), DIFF_DRIVER_KEYS),
+  ];
+  return {
+    ...safeGitEnv(),
+    GIT_CONFIG_COUNT: String(pairs.length),
+    ...Object.fromEntries(pairs.flatMap(([key, value], index) => [[`GIT_CONFIG_KEY_${index}`, key], [`GIT_CONFIG_VALUE_${index}`, value]])),
+  };
 };
 
 /** `git` on an agent's worktree: the safe overrides, every configured filter off, and the safe env under `extraEnv`. */

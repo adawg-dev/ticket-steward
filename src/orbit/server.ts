@@ -37,8 +37,7 @@ export interface OrbitRemote {
 
 /** The remote's env and reason it is unavailable, from the config's code host and `.env`. */
 export const orbitRemote = (p: { exec: OrbitExec; dataDir: string; worktreePath: string; codehost: CodeHostConfig; secrets: Secrets }): OrbitRemote => {
-  // Orbit runs git in the agent's worktree with the token in its env: the worktree's config must run nothing there.
-  const base: OrbitRemote = { exec: p.exec, cwd: p.worktreePath, env: { ...orbitEnv(p.dataDir), ...safeGitConfigEnv() }, secrets: [] };
+  const base: OrbitRemote = { exec: p.exec, cwd: p.worktreePath, env: orbitEnv(p.dataDir), secrets: [] };
   if (p.codehost.kind !== "gitlab") return { ...base, unavailable: "the code host is not GitLab" };
   const token = p.secrets.GITLAB_TOKEN;
   if (token === undefined || token === "") return { ...base, unavailable: "GITLAB_TOKEN is not set" };
@@ -59,7 +58,10 @@ const unavailable = (reason: string): ToolText => ({ content: [{ type: "text", t
 export const runOrbitTool = async (remote: OrbitRemote, args: string[]): Promise<ToolText> => {
   if (remote.unavailable !== undefined) return unavailable(remote.unavailable);
   try {
-    const run = await remote.exec(args, { cwd: remote.cwd, env: remote.env, timeoutMs: ORBIT_TOOL_TIMEOUT_MS });
+    // Orbit runs git in the agent's worktree (`git status` among others) with the token in its env: the worktree's config
+    // must run nothing there. Read per call, since the agent can add a filter or diff driver at any time.
+    const env = { ...remote.env, ...(await safeGitConfigEnv(remote.cwd)) };
+    const run = await remote.exec(args, { cwd: remote.cwd, env, timeoutMs: ORBIT_TOOL_TIMEOUT_MS });
     if (run.timedOut) return unavailable(`timed out after ${ORBIT_TOOL_TIMEOUT_MS / 1000} s`);
     if (run.exitCode !== 0) {
       const detail = (run.stderr.trim() || run.stdout.trim() || `orbit exited ${run.exitCode ?? "without a code"}`).slice(0, REASON_CHARS);
