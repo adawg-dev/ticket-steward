@@ -123,7 +123,7 @@ const pushLanded = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, 
 };
 
 /** The spec's run id: the job's attempt, or the dry run's process. */
-const runIdOf = (ctx: RunContext): string => (ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`);
+export const runIdOf = (ctx: RunContext): string => (ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`);
 
 /**
  * The prepare half: the closed check, the base, the ticket-branch checks and the prompt. Either a spec to execute, or the

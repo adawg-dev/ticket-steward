@@ -40,10 +40,20 @@ export const setupTailOf = (report: Pick<RunReport, "error">): string => {
   return error.startsWith(SETUP_FAILED_PREFIX) ? error.slice(SETUP_FAILED_PREFIX.length) : error;
 };
 
+/** Each commit on its own line; a marker after a line prefix (a list's `- `) repeats that prefix for every commit. */
 const withPersonCommits = async (spec: RunSpec, workspacePath: string): Promise<string> => {
   if (!spec.prompt.includes(PERSON_COMMITS_MARKER)) return spec.prompt;
-  const commits = spec.personCommits === null ? "" : await gitOrThrow(["log", "--format=%h %an %s", `${spec.personCommits.from}..${spec.personCommits.to}`], workspacePath);
-  return spec.prompt.replaceAll(PERSON_COMMITS_MARKER, commits);
+  const log = spec.personCommits === null ? "" : await gitOrThrow(["log", "--format=%h %an %s", `${spec.personCommits.from}..${spec.personCommits.to}`], workspacePath);
+  const commits = log.split("\n").filter((line) => line !== "");
+  return spec.prompt
+    .split("\n")
+    .map((line) => {
+      const at = line.indexOf(PERSON_COMMITS_MARKER);
+      if (at === -1) return line;
+      const prefix = line.slice(0, at);
+      return line.replaceAll(PERSON_COMMITS_MARKER, commits.join(`\n${prefix}`));
+    })
+    .join("\n");
 };
 
 const brainInputOf = (spec: RunSpec, env: ExecuteEnv, prompt: string): BrainInput => ({

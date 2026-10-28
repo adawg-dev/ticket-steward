@@ -105,6 +105,17 @@ describe("executeRun", () => {
     expect(brain.lastInput().prompt).toBe(`People pushed:\n${await short(second)} Test add b.txt\n${await short(first)} Test add a.txt\nEnd.`);
   });
 
+  it("repeats a list item's prefix for each person commit", async () => {
+    const first = await commitFile(repo, "a.txt", "a\n");
+    const second = await commitFile(repo, "b.txt", "b\n");
+    const brain = new FakeBrain({ result: {} });
+
+    await executeRun(specFor({ prompt: `People pushed:\n  - ${PERSON_COMMITS_MARKER}\nEnd.`, personCommits: { from: base, to: second } }), envFor(brain));
+
+    const short = async (sha: string): Promise<string> => git(repo, ["rev-parse", "--short", sha]);
+    expect(brain.lastInput().prompt).toBe(`People pushed:\n  - ${await short(second)} Test add b.txt\n  - ${await short(first)} Test add a.txt\nEnd.`);
+  });
+
   it("drops the marker when the spec has no person commits", async () => {
     const brain = new FakeBrain({ result: {} });
 

@@ -16,6 +16,9 @@ import type { FixResult } from "../../src/greptile/result.js";
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
+import { PERSON_COMMITS_MARKER } from "../../src/run/execute.js";
+import type { RunExecutor } from "../../src/run/executor.js";
+import { RunSpecSchema, type RunReport, type RunSpec, type WorkReport } from "../../src/run/protocol.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
@@ -391,7 +394,7 @@ describe("runFix", () => {
     const outcome = await runFix(claim(id), makeDeps(brain));
 
     expect(outcome).toEqual({ status: "succeeded" });
-    expect(brain.lastInput().prompt).toContain("- add docs/notes.md");
+    expect(brain.lastInput().prompt).toContain(`- ${personHead.slice(0, 7)} Test add docs/notes.md`);
     expect(loopOf(id).adoptedFrom).toBeNull();
   });
 
@@ -422,7 +425,7 @@ describe("runFix", () => {
     const outcome = await runFix(claim(id), fixDeps);
 
     expect(outcome).toEqual({ status: "succeeded" });
-    expect(brain.lastInput().prompt).toContain("- add docs/notes.md");
+    expect(brain.lastInput().prompt).toContain(`- ${personHead.slice(0, 7)} Test add docs/notes.md`);
     expect(brain.lastInput().prompt).toContain("Keep the old buffer size when you fix it");
     expect(loopOf(id)).toMatchObject({ round: 1, adoptedFrom: null });
   });
@@ -636,5 +639,97 @@ describe("runFix", () => {
 
     expect(outcome.status).toBe("succeeded");
     expect(brain.runs).toBe(0);
+  });
+});
+
+describe("runFix through an executor", () => {
+  const reportOf = (spec: RunSpec, patch: Partial<RunReport> = {}): RunReport => ({
+    runId: spec.runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-x", output: declined(finding), usage: { inputTokens: 1, outputTokens: 1 }, ...patch,
+  });
+
+  /** An executor that records the specs it is handed and reports `patch` and `work` for each. */
+  const executing = (patch: Partial<RunReport> = {}, work: Partial<WorkReport> = {}): RunExecutor & { specs: RunSpec[] } => {
+    const specs: RunSpec[] = [];
+    return {
+      specs,
+      execute: async (spec) => {
+        specs.push(spec);
+        return { report: reportOf(spec, patch), work: { runId: spec.runId, unpushed: "", pushedSha: null, ...work } };
+      },
+    };
+  };
+
+  it("hands back the unpushed work the executor found, with its detail", async () => {
+    const id = createLoop();
+    const executor = executing({}, { unpushed: "a1b2c3d API-1: wip" });
+
+    const outcome = await runFix(claim(id), { ...makeDeps(new FakeBrain()), executor });
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent left unpushed work" });
+    expect(gitlab.notes.join("\n")).toContain("a1b2c3d API-1: wip");
+    expect(gitlab.replies).toEqual([]);
+    expect(loopOf(id).state).toBe("handed_back");
+    expect(loopOf(id).sessionId).toBe("session-x");
+  });
+
+  it("hands the executor a fix spec on the loop's head that resumes its session and carries no secret", async () => {
+    const id = createLoop();
+    stores.loops.update(id, { adoptedFrom: baseSha });
+    const executor = executing();
+    const ctx = claim(id);
+
+    await runFix(ctx, { ...makeDeps(new FakeBrain()), executor });
+
+    const worktreePath = join(repo.dataDir, "work", "ticket-API-1");
+    expect(executor.specs).toHaveLength(1);
+    expect(RunSpecSchema.parse(JSON.parse(JSON.stringify(executor.specs[0])))).toMatchObject({
+      runId: `${ctx.jobId}-1`,
+      kind: "fix",
+      output: "fix",
+      checkout: { ref: BRANCH, sha: headSha },
+      baseSha,
+      worktreePath,
+      personCommits: { from: baseSha, to: headSha },
+      resumeSessionId: "session-1",
+      limits: { timeoutMinutes: 2, maxTurns: 7 },
+      push: { jobId: ctx.jobId, mode: "fastForward", branch: BRANCH, baseSha, loopId: id, worktreePath },
+      interactive: false,
+    });
+    expect(executor.specs[0]?.prompt).toContain(`- ${PERSON_COMMITS_MARKER}`);
+    expect(JSON.stringify(executor.specs[0])).not.toContain("glpat-push-token-value");
+  });
+
+  it("gives a loop with no adopted head no person commits", async () => {
+    const id = createLoop();
+    const executor = executing();
+
+    await runFix(claim(id), { ...makeDeps(new FakeBrain()), executor });
+
+    expect(executor.specs[0]?.personCommits).toBeNull();
+    expect(executor.specs[0]?.prompt).not.toContain(PERSON_COMMITS_MARKER);
+  });
+
+  it("retries an interrupted run, and hands back one whose session could not be resumed", async () => {
+    const first = createLoop();
+    const interrupted = executing({ ok: false, error: "interrupted", interrupted: true, sessionId: null, output: null });
+    expect(await runFix(claim(first), { ...makeDeps(new FakeBrain()), executor: interrupted })).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+    expect(loopOf(first).state).toBe("fixing");
+
+    const lost = executing({ ok: false, error: "No conversation found with session ID: session-1", sessionId: null, output: null });
+    expect(await runFix(claim(first), { ...makeDeps(new FakeBrain()), executor: lost })).toEqual({ status: "succeeded", warning: "handed back: the agent's session could not be resumed" });
+    expect(loopOf(first).state).toBe("handed_back");
+  });
+
+  it("fails retryably and keeps the tail when setup fails, and when the executor cannot start the run", async () => {
+    const id = createLoop();
+    const setup = executing({ ok: false, error: "setup failed:\npnpm: not found\n", setupFailed: true, sessionId: null, output: null });
+    const ctx = claim(id);
+
+    expect(await runFix(ctx, { ...makeDeps(new FakeBrain()), executor: setup })).toEqual({ status: "failed", error: "setup failed:\npnpm: not found\n", retryable: true });
+    expect(stores.attempts.forJob(ctx.jobId)[0]?.setupTail).toBe("pnpm: not found\n");
+    expect(loopOf(id).state).toBe("fixing");
+
+    const failing: RunExecutor = { execute: () => Promise.reject(new Error("cannot create the run's Job")) };
+    expect(await runFix(claim(id), { ...makeDeps(new FakeBrain()), executor: failing })).toEqual({ status: "failed", error: "cannot create the run's Job", retryable: true });
   });
 });

@@ -1,27 +1,24 @@
 import { readFile } from "node:fs/promises";
-import { buildBrainEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
-import type { BrainRun } from "../brain/types.js";
+import { join } from "node:path";
+import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { BOT_USER, type GitLabMrApi, type MergeRequestInfo, type MrDiscussion } from "../codehost/gitlabMr.js";
 import type { GreptileConfig } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, type JobPaths } from "../core/workspace.js";
-import { unpushedWork } from "../implement/git.js";
-import { guardSecrets, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
-import { settleUnfinished } from "../push/ledger.js";
-import { remoteHeadOf } from "../push/service.js";
+import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, type JobPaths } from "../core/workspace.js";
+import { runIdOf, settingsOf, stewardChecks } from "../implement/pipeline.js";
 import type { PushTarget } from "../push/target.js";
-import { transaction, type Loop, type LoopPatch, type LoopRound, type Push } from "../store/index.js";
+import { PERSON_COMMITS_MARKER, setupTailOf } from "../run/execute.js";
+import { localExecutor } from "../run/local.js";
+import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
+import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
-import { gitOrThrow } from "../workspace/git.js";
-import type { RemoteCredentials } from "../workspace/mirror.js";
-import type { Worktree } from "../workspace/worktree.js";
 import { collectCiFailures, type CiFailure } from "./ci.js";
 import { renderFixPrompt } from "./prompt.js";
 import { publishHandback, publishStop, publishThreads, requestReview } from "./publish.js";
 import { validateFixResult, type FixResult, type StoredFix } from "./result.js";
-import { findSummary, openFindings } from "./summary.js";
+import { findSummary, openFindings, type Finding } from "./summary.js";
 
 const LOOP_MARKER_TEXT = "ticket-steward:loop";
 const SESSION_LOST = "the agent's session could not be resumed";
@@ -37,7 +34,6 @@ interface Fix {
   gitlab: GitLabMrApi;
   greptile: GreptileConfig;
   settings: NonNullable<PipelineDeps["config"]["implement"]>;
-  remote: RemoteCredentials;
   loop: Loop;
   paths: JobPaths;
 }
@@ -92,12 +88,8 @@ const newNotes = (loop: Loop, discussions: MrDiscussion[], skipAuthors: string[]
     .map(({ author, body }) => ({ author, body }));
 };
 
-/** The subjects of a person's commits between the adopted head and the loop's head. */
-const personCommits = async (loop: Loop, worktree: Worktree): Promise<string[]> => {
-  if (loop.adoptedFrom === null) return [];
-  const log = await gitOrThrow(["log", "--format=%s", `${loop.adoptedFrom}..${loop.headSha}`], worktree.path);
-  return log.split("\n").filter((line) => line !== "");
-};
+/** A person's commits between the adopted head and the loop's head, listed by the executor from the worktree's history. */
+const personCommits = (loop: Loop): RunSpec["personCommits"] => (loop.adoptedFrom === null ? null : { from: loop.adoptedFrom, to: loop.headSha });
 
 /**
  * The head the round started from. The push tool moves the loop's head mid-run, so once this job pushed, the head it
@@ -190,43 +182,20 @@ const handingBack = (facts: RoundFacts, result: FixResult | null, reason: string
   handback: { reason, detail },
 });
 
-/** What the agent pushed in this job through the push tool, and what it left behind that never reached the branch. */
-interface AgentPushes {
-  pushed: Push | null;
-  /** Uncommitted paths and commits after the last push (or the round's head), as a `git status`-like summary. */
-  leftover: string;
-}
-
-const agentPushes = async (fix: Fix, worktree: Worktree, target: PushTarget): Promise<AgentPushes> => {
-  const { ctx, deps } = fix;
-  // A push the tool recorded but stopped before marking counts when the remote branch is at its commit.
-  await settleUnfinished(deps, target, remoteHeadOf(deps, target, fix.remote));
-  const pushed = deps.stores.pushes.latestPushed(ctx.jobId);
-  const { files: overlayFiles } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
-  const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
-  const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: pushed?.sha ?? fix.loop.headSha, stewardFiles });
-  return { pushed, leftover: deps.redactor.redact(work.summary) };
-};
-
 /**
  * The decision for a valid result: hand back, or publish a `changed` or `no_changes` round. The steward never commits or
- * pushes for the agent: a change counts only once the push tool pushed it, and leftover work hands back.
+ * pushes for the agent: a change counts only once the push tool pushed it, and work the executor found unpushed hands back.
  */
-const handleResult = async (fix: Fix, worktree: Worktree, target: PushTarget, facts: RoundFacts, result: FixResult, open: number, mr: MergeRequestInfo): Promise<JobOutcome> => {
+const handleResult = (fix: Fix, work: WorkReport, facts: RoundFacts, result: FixResult, open: number, mr: MergeRequestInfo): Promise<JobOutcome> => {
   if (result.outcome === "failed") return decide(fix, handingBack(facts, result, "the agent could not finish", result.failureDetail ?? ""), mr);
-  let agent: AgentPushes;
-  try {
-    agent = await agentPushes(fix, worktree, target);
-  } catch (err) {
-    return decide(fix, handingBack(facts, result, "the agent's push could not be confirmed", errorMessage(err)), mr);
-  }
+  const leftover = fix.deps.redactor.redact(work.unpushed);
   if (result.outcome === "changed") {
-    if (agent.pushed === null) return decide(fix, handingBack(facts, result, "the agent did not push its change", agent.leftover), mr);
-    if (agent.leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", agent.leftover), mr);
+    if (work.pushedSha === null) return decide(fix, handingBack(facts, result, "the agent did not push its change", leftover), mr);
+    if (leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", leftover), mr);
     return decide(fix, { ...facts, result, handback: null }, mr);
   }
-  if (agent.pushed !== null) return decide(fix, handingBack(facts, result, "the agent pushed a change but reported no changes", agent.pushed.sha), mr);
-  if (agent.leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", agent.leftover), mr);
+  if (work.pushedSha !== null) return decide(fix, handingBack(facts, result, "the agent pushed a change but reported no changes", work.pushedSha), mr);
+  if (leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", leftover), mr);
   if (open === 0 && facts.pipeline !== "failed") {
     return decide(fix, handingBack(facts, result, `Greptile scored ${facts.score}/5 with nothing open and the agent changed nothing`), mr);
   }
@@ -236,17 +205,26 @@ const handleResult = async (fix: Fix, worktree: Worktree, target: PushTarget, fa
   return decide(fix, { ...facts, result, handback: null }, mr);
 };
 
-/** A fresh round: the workspace at the loop's head, the resumed brain with the review's findings, then its result. */
-const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
+/** A prepared round: the spec to execute, and what its finish judges the result against. */
+interface PreparedRound {
+  spec: RunSpec;
+  facts: RoundFacts;
+  findings: Finding[];
+}
+
+/**
+ * The prepare half of a fresh round: the review's findings, CI failures and people's notes, the prompt, and a spec that
+ * resumes the loop's session on its head with the push tool. Either a spec to execute, or the job's outcome.
+ */
+const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound | { outcome: JobOutcome }> => {
   const { ctx, deps, gitlab, greptile, settings, loop, paths } = fix;
   const { mr, discussions } = observed;
   const summary = findSummary(mr, discussions, greptile.botUsername);
-  if (summary === null) return publishHandback(deps, loop, `Greptile has no summary for ${mr.sha.slice(0, 7)}`);
+  if (summary === null) return { outcome: await publishHandback(deps, loop, `Greptile has no summary for ${mr.sha.slice(0, 7)}`) };
   const findings = openFindings(discussions, greptile.botUsername);
   const pipeline = mr.headPipeline !== null && mr.headPipeline.sha === mr.sha ? mr.headPipeline : null;
   const facts: RoundFacts = { score: summary.score, reviewCount: summary.reviewCount, pipeline: pipeline?.status ?? null };
-  if (loop.sessionId === null) return decide(fix, handingBack(facts, null, SESSION_LOST, "the loop has no stored session"), mr);
-  const sessionId = loop.sessionId;
+  if (loop.sessionId === null) return { outcome: await decide(fix, handingBack(facts, null, SESSION_LOST, "the loop has no stored session"), mr) };
 
   let ciFailures: CiFailure[] = [];
   // Only a restarted loop reads people's notes, so only it needs to know which account is the steward's.
@@ -256,14 +234,13 @@ const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Wor
     if (loop.handedBackAt !== null) stewardUser = [(await gitlab.currentUser()).username];
     await deps.mirror.fetch();
   } catch (err) {
-    return { status: "failed", error: errorMessage(err), retryable: true };
+    return { outcome: { status: "failed", error: errorMessage(err), retryable: true } };
   }
 
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config), deps.config.implement?.commitAuthor);
-  let worktree: Worktree;
+  const worktreePath = join(paths.workRoot, paths.worktreeName);
+  const commits = personCommits(loop);
   let prompt: string;
   try {
-    worktree = await prepareWorkspace(ctx, deps, paths, env, loop.headSha, onWorktree);
     prompt = renderFixPrompt(await readFile(greptile.prompt, "utf8"), {
       identifier: loop.identifier,
       round: loop.round + 1,
@@ -272,9 +249,10 @@ const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Wor
       summary: summary.body,
       findings,
       ciFailures,
-      personCommits: await personCommits(loop, worktree),
+      // The executor lists the commits in place of the marker, from the worktree it builds.
+      personCommits: commits === null ? [] : [PERSON_COMMITS_MARKER],
       newComments: newNotes(loop, discussions, [greptile.botUsername, ...stewardUser]),
-      workspacePath: worktree.path,
+      workspacePath: worktreePath,
       headSha: loop.headSha,
       stewardPort: jobPort(deps),
       artifactsDir: paths.artifactsDir,
@@ -282,43 +260,81 @@ const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Wor
       hasChecks: settings.checks.length > 0,
     });
   } catch (err) {
-    return prepareFailed(deps, err);
+    return { outcome: prepareFailed(deps, err) };
   }
 
   // The agent pushes onto the loop's head through the push tool; the target is fixed here, never chosen by the agent.
   const push: PushTarget = {
-    jobId: ctx.jobId, worktreePath: worktree.path, identifier: loop.identifier, issueId: loop.issueId,
+    jobId: ctx.jobId, worktreePath, identifier: loop.identifier, issueId: loop.issueId,
     mode: "fastForward", branch: loop.branch, baseSha: loop.baseSha, loopId: loop.id, port: jobPort(deps),
   };
-  let run: BrainRun;
-  try {
-    run = await (deps.runBrain ?? runBrainDetached)(
-      deps.config.brain,
-      brainInput(deps, paths, worktree, prompt, env, "fix", { limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns }, resumeSessionId: sessionId, push }),
-      deps.redactor,
-      { ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
-    );
-  } catch (err) {
-    return decide(fix, handingBack(facts, null, "the agent's run failed", errorMessage(err)), mr);
+  const spec: RunSpec = {
+    version: 1,
+    runId: runIdOf(ctx),
+    jobId: ctx.jobId,
+    kind: "fix",
+    identifier: loop.identifier,
+    issueId: loop.issueId,
+    checkout: { ref: loop.branch, sha: loop.headSha },
+    baseSha: loop.baseSha,
+    worktreePath,
+    artifactsDir: paths.artifactsDir,
+    transcriptPath: paths.transcriptPath,
+    prompt,
+    personCommits: commits,
+    output: "fix",
+    resumeSessionId: loop.sessionId,
+    limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns, setupTimeoutMinutes: deps.config.workspace.setupTimeoutMinutes },
+    push,
+    setup: deps.config.workspace.setup,
+    checks: stewardChecks(settings.checks, loop.baseSha),
+    interactive: false,
+  };
+  return { spec, facts, findings };
+};
+
+/** The finish half, from the executor's report and the work it found: retry, hand back, or judge the agent's result. */
+const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: RunReport; work: WorkReport }, mr: MergeRequestInfo): Promise<JobOutcome> => {
+  const { ctx, deps, loop } = fix;
+  const { spec, facts, findings } = prepared;
+  const { report, work } = executed;
+  if (report.setupFailed) {
+    patchAttempt(ctx, deps, { setupTail: setupTailOf(report) });
+    return report.interrupted ? { status: "failed", error: INTERRUPTED_ERROR, retryable: true } : { status: "failed", error: report.error ?? "setup failed", retryable: true };
   }
-  patchAttempt(ctx, deps, { transcriptPath: paths.transcriptPath, ...(run.usage === undefined ? {} : { usage: run.usage }) });
+  patchAttempt(ctx, deps, { transcriptPath: spec.transcriptPath, ...(report.usage === null ? {} : { usage: report.usage }) });
   // An interrupted run resumes from the session it started from; the partial turn is lost.
-  if (!run.ok && run.error === INTERRUPTED_ERROR) return { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
-  if (run.sessionId !== undefined) {
-    deps.stores.loops.update(loop.id, { sessionId: run.sessionId });
-    deps.stores.jobs.recordSession(ctx.jobId, run.sessionId);
+  if (report.interrupted) return { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
+  if (report.sessionId !== null) {
+    deps.stores.loops.update(loop.id, { sessionId: report.sessionId });
+    deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
   }
-  if (!run.ok) {
-    const error = run.error ?? "brain run failed";
+  if (!report.ok) {
+    const error = report.error ?? "brain run failed";
     return decide(fix, SESSION_ERROR.test(error) ? handingBack(facts, null, SESSION_LOST, error) : handingBack(facts, null, `the agent's run failed: ${error}`), mr);
   }
 
-  const validated = validateFixResult(run.output, findings);
+  const validated = validateFixResult(report.output, findings);
   if (!validated.ok) return decide(fix, handingBack(facts, null, "the agent's result was invalid", validated.error), mr);
-  return handleResult(fix, worktree, push, facts, validated.result, findings.length, mr);
+  return handleResult(fix, work, facts, validated.result, findings.length, mr);
 };
 
-const executeFix = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
+/** A fresh round: prepare, execute (in-process or in a run pod), finish. */
+const runRound = async (fix: Fix, observed: Observed): Promise<JobOutcome> => {
+  const prepared = await prepareFix(fix, observed);
+  if ("outcome" in prepared) return prepared.outcome;
+  const { ctx, deps } = fix;
+  let executed: { report: RunReport; work: WorkReport };
+  try {
+    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal);
+  } catch (err) {
+    if (err instanceof SetupError) patchAttempt(ctx, deps, { setupTail: err.tail });
+    return prepareFailed(deps, err);
+  }
+  return finishFix(fix, prepared, executed, observed.mr);
+};
+
+const executeFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   if (ctx.trigger.kind !== "loop") return fail("fix needs a loop trigger");
   const configured = settingsOf(deps);
   const greptile = deps.config.greptile;
@@ -332,7 +348,7 @@ const executeFix = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (work
   if (loop.state !== "fixing") return { status: "succeeded", warning: `loop ${loop.id} is ${loop.state}, not fixing` };
   if (loop.projectId === null || loop.mrIid === null) return fail(`loop ${loop.id} has no merge request`);
   const fix: Fix = {
-    ctx, deps, gitlab, greptile, settings: configured.settings, remote: configured.remote, loop,
+    ctx, deps, gitlab, greptile, settings: configured.settings, loop,
     paths: jobPaths(ctx, deps, { worktreeName: loop.worktreeName }),
   };
 
@@ -349,18 +365,8 @@ const executeFix = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (work
   // A rerun after the agent pushed (the attempt was interrupted later) never runs the brain again over its own push.
   const earlier = deps.stores.pushes.latest(ctx.jobId);
   if (earlier !== null) return publishHandback(deps, reload(fix), "an earlier attempt stopped after the agent pushed", earlier.sha);
-  return runRound(fix, observed, onWorktree);
+  return runRound(fix, observed);
 };
 
 /** The fix job: resumes the loop's brain session on the review's findings with the push tool, then replies and resolves, or hands back. */
-export const runFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
-  const workspace: { worktree: Worktree | null } = { worktree: null };
-  const outcome = redactOutcome(
-    await executeFix(ctx, deps, (created) => {
-      workspace.worktree = created;
-    }).catch(crashed),
-    deps.redactor,
-  );
-  await cleanupWorkspace(deps, workspace.worktree, outcome);
-  return outcome;
-};
+export const runFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => redactOutcome(await executeFix(ctx, deps).catch(crashed), deps.redactor);
