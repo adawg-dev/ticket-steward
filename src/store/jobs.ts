@@ -165,6 +165,9 @@ const jobColumns = (event: TriggerEvent): JobColumns => {
   return { ...ticket, kind: "implement", subject: null };
 };
 
+/** The slot inline runs (`steward implement`, `fix` and `jobs retry` without serve) claim on. */
+export const INLINE_SLOT = 1;
+
 const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, wake_requested = 0, started_at = ?, slot = ?";
 
 export class JobStore {
@@ -233,7 +236,14 @@ export class JobStore {
          ORDER BY q.id LIMIT 1)
        RETURNING *`,
     );
-    this.claimOne = db.prepare<[string, number, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
+    // An inline claim takes slot 1 under run.lock, which `steward chat` never takes, so the lease guard here is what keeps an
+    // inline run off a chatting ticket and off the slot a chat holds.
+    this.claimOne = db.prepare<[string, number, number, string, number], JobRow>(
+      `${CLAIM} WHERE id = ? AND status != 'running'
+         AND NOT EXISTS (
+           SELECT 1 FROM chat_leases l WHERE l.heartbeat_at >= ? AND (l.issue_id = jobs.issue_id OR l.slot = ?))
+       RETURNING *`,
+    );
     this.selectRunningForIssue = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE issue_id = ? AND status = 'running' ORDER BY id LIMIT 1");
     this.selectRunningSlots = db.prepare<[], { slot: number }>("SELECT DISTINCT slot FROM jobs WHERE status = 'running' AND slot IS NOT NULL ORDER BY slot");
     this.failRetired = db.prepare<[string, string]>(
@@ -393,9 +403,13 @@ export class JobStore {
     return row === undefined ? null : toJob(row);
   }
 
-  /** Claims one job for an inline run, which uses slot 1 under run.lock. */
+  /**
+   * Claims one job for an inline run, which uses slot 1 under run.lock; null when it is running, or while a `steward chat`
+   * lease holds its ticket or slot 1.
+   */
   claimById(id: number): Job | null {
-    const row = this.claimOne.get(nowIso(), 1, id);
+    const now = new Date();
+    const row = this.claimOne.get(now.toISOString(), INLINE_SLOT, id, leaseCutoff(now), INLINE_SLOT);
     return row === undefined ? null : toJob(row);
   }
 

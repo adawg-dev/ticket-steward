@@ -6,7 +6,7 @@ import { runAwaitReview } from "../greptile/await.js";
 import { runFix } from "../greptile/fix.js";
 import { runRestart } from "../greptile/start.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
-import { RETIRED_KIND_ERROR, unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
+import { INLINE_SLOT, RETIRED_KIND_ERROR, unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
 import { errorMessage, fail, println, type CliContext } from "./context.js";
 import { sleep } from "./probe.js";
 import type { Runtime } from "./runtime.js";
@@ -83,12 +83,28 @@ export const tailJob = async (stores: Stores, jobId: number, ctx: CliContext): P
   }
 };
 
+/**
+ * Why an inline claim of the job is refused when a `steward chat` lease holds its ticket or the inline slot; null when no
+ * lease does (the job is running, or gone). The job stays queued, so serve or a later retry runs it once the chat ends.
+ */
+const chatHolding = (stores: Stores, jobId: number): string | null => {
+  const job = stores.jobs.get(jobId);
+  if (job === null) return null;
+  const leases = stores.leases.active();
+  const onTicket = leases.find((lease) => lease.issueId === job.issueId);
+  const onSlot = leases.find((lease) => lease.slot === INLINE_SLOT);
+  const queued = `job ${jobId} stays queued for \`steward serve\`, or run \`steward jobs retry ${jobId}\` once the chat ends`;
+  if (onTicket !== undefined) return `steward chat (pid ${onTicket.pid}) holds ${job.identifier}; ${queued}`;
+  if (onSlot !== undefined) return `steward chat (pid ${onSlot.pid}) holds slot ${INLINE_SLOT}, which inline runs use; ${queued}`;
+  return null;
+};
+
 /** Claims the job and runs it in this process under run.lock, the way the worker would. */
 export const runInline = (runtime: Runtime, jobId: number, ctx: CliContext): Promise<JobOutcome> =>
   withRunLock(runtime, ctx, async () => {
     const { stores } = runtime;
     const job = stores.jobs.claimById(jobId);
-    if (job === null) return fail(ctx, `job ${jobId} is already running`);
+    if (job === null) return fail(ctx, chatHolding(stores, jobId) ?? `job ${jobId} is already running`);
     const attempt = stores.attempts.start(jobId);
     println(ctx, `job ${jobId} running (attempt ${attempt.number})`);
     const outcome = await execute(

@@ -8,7 +8,7 @@ import { PushStore } from "./pushes.js";
 
 export type { Database } from "./db.js";
 export { openDatabase } from "./db.js";
-export { JobStore, loopSubject, RETIRED_KIND_ERROR, unreadableOutcome, type Job, type JobKind, type JobStatus, type StoredJobKind } from "./jobs.js";
+export { INLINE_SLOT, JobStore, loopSubject, RETIRED_KIND_ERROR, unreadableOutcome, type Job, type JobKind, type JobStatus, type StoredJobKind } from "./jobs.js";
 export {
   ACTIVE_LOOP_STATES,
   LoopStore,

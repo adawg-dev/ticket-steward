@@ -1,5 +1,5 @@
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
-import { openStores, type Stores } from "../../src/store/index.js";
+import { LEASE_STALE_MS, openStores, type Stores } from "../../src/store/index.js";
 import type { TriggerEvent } from "../../src/tracker/types.js";
 import { createdEvent, freshDataDir, secondEvent } from "./helpers.js";
 
@@ -170,6 +170,29 @@ describe("JobStore", () => {
     expect(reclaimed?.attempts).toBe(2);
     expect(stores.jobs.claimById(id)).toBeNull();
     expect(stores.jobs.claimById(999)).toBeNull();
+  });
+
+  it("claimById refuses while an active chat lease holds the job's ticket or slot 1, and ignores a stale one", () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    const onTicket = stores.leases.create({ issueId: "issue-1", worktreeName: "ticket-API-1", slot: null, pid: 4242 });
+
+    expect(stores.jobs.claimById(id)).toBeNull();
+    expect(stores.jobs.get(id)?.status).toBe("queued");
+
+    stores.leases.release(onTicket);
+    const onSlot = stores.leases.create({ issueId: "issue-2", worktreeName: "ticket-API-2", slot: 1, pid: 4242 });
+    expect(stores.jobs.claimById(id)).toBeNull();
+
+    const old = new Date(Date.now() - LEASE_STALE_MS - 1_000).toISOString();
+    stores.db.prepare("UPDATE chat_leases SET heartbeat_at = ? WHERE id = ?").run(old, onSlot);
+    expect(stores.jobs.claimById(id)?.status).toBe("running");
+  });
+
+  it("claimById claims beside a chat lease on another ticket and slot", () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.leases.create({ issueId: "issue-2", worktreeName: "ticket-API-2", slot: 2, pid: 4242 });
+
+    expect(stores.jobs.claimById(id)).toMatchObject({ status: "running", slot: 1 });
   });
 
   it("scheduleRetry keeps the job queued but hidden from claimNext until not_before", () => {

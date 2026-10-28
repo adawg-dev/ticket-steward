@@ -129,4 +129,24 @@ describe("steward fix", () => {
     }
     expect(tracker.labelSwaps()).toEqual([]);
   });
+
+  it("leaves the restart queued while a steward chat holds the ticket", async () => {
+    seedLoop("handed_back");
+    const seeded = openStores(repo.dataDir);
+    try {
+      seeded.leases.create({ issueId: "issue-1", worktreeName: "ticket-API-1", slot: null, pid: 4242 });
+    } finally {
+      seeded.db.close();
+    }
+    const { parse, stderr } = run(await config(true));
+
+    await expect(parse()).rejects.toEqual(new ExitSignal(1));
+    expect(stderr()).toMatch(/steward chat \(pid 4242\) holds API-1; job \d+ stays queued/);
+    const stores = openStores(repo.dataDir);
+    try {
+      expect(stores.jobs.list({ limit: 50 }).filter((job) => job.kind === "restart").map((job) => job.status)).toEqual(["queued"]);
+    } finally {
+      stores.db.close();
+    }
+  });
 });
