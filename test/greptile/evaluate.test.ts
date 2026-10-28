@@ -36,7 +36,7 @@ describe("evaluateRound", () => {
     expect(evaluateRound(baseInput())).toMatchObject({ kind: "passed" });
   });
   it("1: stops silently when the ticket is closed", () => {
-    expect(evaluateRound(baseInput({ ticketClosed: true }))).toEqual({ kind: "stop", reason: expect.any(String), comment: false });
+    expect(evaluateRound(baseInput({ ticketClosed: true }))).toEqual({ kind: "stop", reason: expect.any(String), note: false });
   });
   it("gives each wait the deadline of the timeout it is bounded by", () => {
     const started = new Date(NOW.getTime() - 5 * 60_000);
@@ -53,10 +53,10 @@ describe("evaluateRound", () => {
     const stale = baseInput({ mr: null, loop: loop({ waitStartedAt: minutesAgo(61) }) });
     expect(evaluateRound(stale)).toEqual({ kind: "handback", reason: "no merge request was opened for api-1-fix" });
   });
-  it("3: stops with a comment when the MR is merged or closed", () => {
+  it("3: stops with an MR note when the MR is merged or closed", () => {
     for (const state of ["merged", "closed"]) {
       const d = evaluateRound(baseInput({ mr: fakeMergeRequest({ sha: SHA, state }) }));
-      expect(d).toMatchObject({ kind: "stop", comment: true });
+      expect(d).toMatchObject({ kind: "stop", note: true });
     }
   });
   it("4: hands back when a person pushed", () => {

@@ -188,15 +188,17 @@ steward itself listens on plain HTTP on `127.0.0.1:3020`. Only `/health` and
 
 ### 1.7 Linear API key and webhook
 
-The steward authenticates to Linear with a personal API key. Every description edit,
-comment and upload appears as the user who owns the key, so give it a user of its own.
+The steward authenticates to Linear with a personal API key. It reads tickets and changes
+their labels, nothing else; every label change appears as the user who owns the key, so give it
+a user of its own.
 
 1. Create a dedicated Linear user for the steward (for example "Ticket Steward",
    `steward@example.com`) and add it to every allowlisted team (`tracker.teams`).
 2. Signed in as that user, open Settings → Account → Security & access → Personal API
-   keys and create a key named "ticket-steward". Grant **Read**, **Write**, **Create
-   comments** and **File uploads** (nothing else), and restrict it to the allowlisted
-   teams.
+   keys and create a key named "ticket-steward". Grant **Read** and **Write** (nothing
+   else; label changes need Write), and restrict it to the allowlisted teams. A key made
+   before 2026-10-28 with **Create comments** and **File uploads** still works; those two
+   are no longer used.
 3. Put it in `.env` as `LINEAR_API_KEY`. The steward sends it as a raw
    `Authorization: <key>` header, not as a Bearer token.
 4. As a workspace admin, open Settings → API → Webhooks and create a webhook with the URL
@@ -215,9 +217,16 @@ treated like any other ticket: nothing happens until a person adds `ready-for-ag
 
 **Enrich was removed on 2026-10-28.** The steward no longer triages tickets or writes an
 Enrichment section; `ready-for-agent` covers it, and implement still reads the agent brief of
-tickets enriched before then. The steward no longer rewrites descriptions or uploads files;
-its Linear writes are labels plus the implement and fix-loop comments, which move to the MR
-next, leaving Linear labels-only. A config still carrying the enrich keys
+tickets enriched before then.
+
+**Linear is labels-only (2026-10-28).** The steward never comments on, rewrites or uploads to a
+Linear ticket; its only Linear writes are label changes. Everything it has to say goes on the
+merge request: the implement summary (once the loop finds the MR), the fix loop's pass,
+hand-back and stop notes, and restart notices. A hand-back before any MR exists (implement
+needs info, failed, or found a branch already there) sets the label only; the reason, the
+agent's questions and any detail stay in the job record, so read them with
+`steward jobs show <id>`. Without a `greptile` block there is no loop, so nothing is posted on
+the MR and the `agent-implemented` label is the signal. A config still carrying the enrich keys
 fails to load with "`<key>` was removed with enrich": delete top-level `prompt`,
 `tracker.gatewayIssues`, `tracker.bugLabels` and `tracker.labels.triage`, and the
 `prompts/enrich.md` file. `implement` (with `tracker.labels` and `GITLAB_PUSH_TOKEN`) is
@@ -237,12 +246,12 @@ Create four labels in Linear at the workspace level, plus `agent-approved` with 
 block (names match case-insensitively; override any of them under `tracker.labels`:
 `implement`, `needsInfo`, `readyForHuman`, `implemented`, `approved`). Putting them in one
 Linear label group is fine and keeps a ticket on one stage at a time: the steward swaps a label
-in a single update, and a retried publish does not post its comment twice):
+in a single update):
 
 | Label | Applied by | Meaning |
 | --- | --- | --- |
 | `ready-for-agent` | person | Implement this ticket. |
-| `needs-info` | steward | Something only a person can supply is missing; the questions are in a comment. |
+| `needs-info` | steward | Something only a person can supply is missing; the questions are in `steward jobs show <id>`. |
 | `ready-for-human` | steward | An agent tried and handed back. |
 | `agent-implemented` | steward | An agent pushed a branch for this ticket. |
 
@@ -298,7 +307,7 @@ diff; stages everything except the files the steward copied in (overlay files an
 `.claude/skills/` copies, left out whether or not the repo gitignores them; the repo's own
 tracked skills can still be edited), and refuses if a staged diff (read as text, binary and `-diff` files included) adds a line containing
 the value of a secret-looking overlay variable or one of the steward's own secrets (hand-back
-"the change contains a secret value"; the comment names paths, never values); runs
+"the change contains a secret value"; the hand-back detail names paths, never values); runs
 `implement.checks` (`{{baseSha}}` is the job's base commit); commits as `commitAuthor` with
 kickoff's Husky hooks enabled for that one commit; re-checks what was committed (the hooks can
 change it): a single commit on the base, the same path and secret guard over its diff, and no
@@ -321,9 +330,9 @@ are the overlay-file guard, a `write_repository`-only push token and human revie
 
 **Hand-backs are successes.** An empty diff, a guard hit, failing checks or hooks, an
 existing branch, or the agent reporting `failed` or `needs_info` end the job `succeeded` with
-the warning `handed back: <reason>` (see it in `steward jobs show`). The ticket gets a comment
-and `ready-for-human` or `needs-info`; they are the answer, not an error. Only a push or
-Linear write failure is `publish_failed`.
+the warning `handed back: <reason>` (see it, with the detail and the agent's questions, in
+`steward jobs show`). The ticket gets `ready-for-human` or `needs-info` and no comment; they
+are the answer, not an error. Only a push or label-change failure is `publish_failed`.
 
 **`steward implement KEY [--dry-run]`.** Enqueues when `serve` is running, otherwise runs
 inline under `run.lock`. It never swaps labels and re-runs even after a prior success; the
@@ -334,12 +343,13 @@ writes to Linear.
 One implement job can hold the worker for about 90 minutes (setup, up to 60 of brain,
 checks); other heavy jobs queue behind it unless `slots` gives the worker more lanes.
 
-To smoke-test, label a throwaway ticket `ready-for-agent` and watch for the pushed branch,
-the comment and the swap to `agent-implemented`. The first real push is also what proves the
+To smoke-test, label a throwaway ticket `ready-for-agent` and watch for the pushed branch
+and the swap to `agent-implemented` (and, with a `greptile` block, the implement summary note
+on the MR once the pipeline opens it). The first real push is also what proves the
 token's Developer access: doctor's `push token` line only runs `ls-remote`.
 
 Whatever the trigger, the steward never works on a Done or Canceled ticket. The state is
-checked at intake, when a job starts, after the agent finishes and before every Linear write
+checked at intake, when a job starts, after the agent finishes and before every label change
 or push; a closed ticket fails the job without retry. This applies to `steward implement` too.
 
 ### 1.7b Greptile fix loop (optional)
@@ -387,7 +397,7 @@ poll run at once; nothing else is queued, and every validly signed event is answ
 
 **Passing.** For the MR's current head SHA: Greptile's summary says `Confidence Score: 5/5`, no Greptile discussion is
 unresolved, and the head pipeline is `success`. 4/5 never passes. A pass applies the `approved` label
-(`agent-approved`) and comments on the ticket; people still merge.
+(`agent-approved`) and posts the round history as a note on the MR; people still merge.
 
 **Token.** `GITLAB_TOKEN` needs the `api` scope (not just `read_api`): the loop reads the MR and pipelines, replies to
 Greptile's threads and resolves them. `steward doctor` checks the scope, that `botUsername` exists, that the `approved`
@@ -401,9 +411,11 @@ label exists in Linear and that the prompt file exists.
 
 **States.** `awaiting_mr` (waiting for the pipeline to open the MR), `awaiting_review` (waiting for Greptile and the
 pipeline), `fixing` (a fix job is running), then an end state: `passed`, `handed_back` or `stopped` (the ticket was closed
-or the MR was merged or closed; the steward says so and leaves labels alone).
+or the MR was merged or closed; for a merged or closed MR the steward says so in a note on it, and either way labels
+stay as they are).
 
-**Hand-back reasons.** The ticket becomes `ready-for-human` with the reason in a comment, and the MR gets a note. Reasons:
+**Hand-back reasons.** The ticket becomes `ready-for-human`, and the MR gets a note with the reason, the last Greptile
+score and any detail (an output tail, paths); a loop whose MR never appeared only changes the label. Reasons:
 no MR was opened; a person pushed to the branch; Greptile failed or never reviewed the head; no finished pipeline, or it
 failed or was canceled; the fix could not be verified (checks, secret guard, no single commit); or the score is still
 below 5/5 after `maxRounds` fix rounds. The brain can also hand back itself when it cannot fix a finding. A round with no
@@ -412,8 +424,10 @@ loop whose await, fix or hand-back job fails for good (out of attempts, or a cra
 within a few minutes, so it never sits in a running state with nothing to move it. Retryable errors only add up while
 they come in a row: each poll that finds the loop still waiting starts the count over.
 
-**Restart.** Re-add `ready-for-agent` to the ticket, or run `steward fix <KEY>` (leaves labels alone). Comments newer than
-the hand-back are given to the restarted loop. `steward jobs show <id>` prints the loop and one line per round
+**Restart.** Re-add `ready-for-agent` to the ticket, or run `steward fix <KEY>` (leaves labels alone). Notes people
+posted on the MR after the hand-back are given to the restarted loop's next fix round; system notes and notes from
+Greptile, GitLab bot users (project and group access tokens) and the steward's own `GITLAB_TOKEN` user are left out.
+With no open MR to resume on, the restart says so in a note on the loop's last MR and queues a fresh implement. `steward jobs show <id>` prints the loop and one line per round
 (`round 1: 3/5 ...`) for the loop's jobs and for the implement job.
 
 **Sessions.** The brain's sessions live in `dataDir/sessions` (`CLAUDE_CONFIG_DIR`), one per ticket, and the loop's worktree
@@ -648,7 +662,7 @@ steward jobs show 42
    `workspace.setup` commands' output; the first thing to read when a job failed before the
    brain ran), `preWriteDescription` (only on old enrich attempts),
    `transcriptPath` and `usage` (tokens and cost). A `succeeded` job whose attempt has an
-   `error` succeeded with a warning, for example a hand-back or a failed comment.
+   `error` succeeded with a warning, for example a hand-back.
 3. **Transcript path.** `dataDir/jobs/<id>/attempt-<n>.jsonl`, one redacted JSON line per
    brain message. `tail -f` it while a job is running.
 4. **Artifacts listing.** Everything the brain wrote under `dataDir/jobs/<id>/artifacts`.

@@ -18,6 +18,7 @@ import { startWorker, type WorkerDeps, type WorkerHandle } from "../../src/worke
 import type { ResourceSample } from "../../src/worker/resources.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
+import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 
@@ -42,6 +43,7 @@ const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyFor
 let dataDir: string;
 let stores: Stores;
 let tracker: FakeTracker;
+let gitlab: FakeGitLabMr;
 let runImplementMock: Mock<typeof runImplement>;
 let publishImplementOnlyMock: Mock<typeof publishImplementOnly>;
 let worker: WorkerHandle | null;
@@ -75,6 +77,7 @@ const makeDeps = (overrides: Partial<WorkerDeps> = {}): WorkerDeps => ({
   tracker,
   brain: new FakeBrain({ result: {} }),
   codehost: new FakeCodeHost(),
+  gitlab,
   mirror: new Mirror(join(dataDir, "repo.git"), "https://gitlab.example/acme/repo.git"),
   stores,
   redactor: new Redactor([]),
@@ -151,7 +154,7 @@ const runningLoop = (state: "awaiting_review" | "fixing"): number => {
     issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: implementId, branch: "fix/API-1-chunk",
     baseSha: "a".repeat(40), headSha: "b".repeat(40), worktreeName: "ticket-API-1", labelDriven: false, sessionId: "session-1",
   });
-  stores.loops.update(id, { state });
+  stores.loops.update(id, { state, projectId: 42, mrIid: 7, mrUrl: "https://gitlab.example/acme/repo/-/merge_requests/7" });
   return id;
 };
 
@@ -168,6 +171,7 @@ describe("startWorker", () => {
     dataDir = await mkdtemp(join(tmpdir(), "steward-worker-"));
     stores = openStores(dataDir);
     tracker = new FakeTracker();
+    gitlab = new FakeGitLabMr();
     runImplementMock = vi.fn<typeof runImplement>().mockResolvedValue(SUCCEEDED);
     publishImplementOnlyMock = vi.fn<typeof publishImplementOnly>().mockResolvedValue(SUCCEEDED);
     worker = null;
@@ -308,8 +312,8 @@ describe("startWorker", () => {
     });
 
     expect(stores.jobs.get(jobId)?.status).toBe("failed");
-    expect(tracker.comments("issue-1")).toHaveLength(1);
-    expect(tracker.comments("issue-1")[0]).toContain("Ticket Steward handed this back: the loop's fix job failed: crashed: boom.");
+    expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes[0]).toContain("Ticket Steward stopped and handed this back: the loop's fix job failed: crashed: boom.");
   });
 
   it("hands back at startup a loop an earlier run left with no job, and leaves a loop with a queued job alone", async () => {
@@ -327,13 +331,13 @@ describe("startWorker", () => {
       expect(stores.loops.get(stranded)?.state).toBe("handed_back");
     });
 
-    expect(tracker.comments("issue-1")[0]).toContain("the loop's await_review job could not publish: comment: Linear down");
+    expect(gitlab.notes[0]).toContain("the loop's await_review job could not publish: comment: Linear down");
     expect(stores.loops.get(waiting)?.state).toBe("awaiting_review");
   });
 
   it("tries a stranded loop's hand-back again on the next sweep when it could not publish", async () => {
     tracker.addIssue(ticket);
-    tracker.failNextWrite();
+    gitlab.failNextNote();
     const loopId = runningLoop("awaiting_review");
     const failed = stores.jobs.enqueue(loopStep(loopId, "await"));
     stores.jobs.claimById(failed);
@@ -344,7 +348,7 @@ describe("startWorker", () => {
       expect(stores.loops.get(loopId)?.state).toBe("handed_back");
     });
 
-    expect(tracker.comments("issue-1")).toHaveLength(1);
+    expect(gitlab.notes).toHaveLength(1);
   });
 
   it("does not add up an await job's retryable failures across the polls of a long wait", async () => {

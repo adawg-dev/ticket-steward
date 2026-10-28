@@ -21,7 +21,7 @@ import { branchName } from "./branch.js";
 import { extractAgentBrief } from "./brief.js";
 import { BranchExistsError, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, type PushMode, remoteTicketBranches, saveBundle, stageAndGuard } from "./git.js";
 import { renderImplementPrompt } from "./prompt.js";
-import { branchUrl, publishImplement } from "./publish.js";
+import { publishImplement } from "./publish.js";
 import { validateImplementResult, type Handback, type StoredImplement } from "./result.js";
 
 const MINUTE_MS = 60_000;
@@ -115,15 +115,7 @@ const dryRunHandback = ({ reason, detail }: Handback): string => (detail === "" 
 const finish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredImplement, branch: string | null): Promise<JobOutcome> => {
   if (ctx.dryRun) return { status: "succeeded", warning: stored.handback === null ? `dry run: would push ${branch ?? "?"}` : dryRunHandback(stored.handback) };
   deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
-  return publishImplement({
-    ctx,
-    tracker: deps.tracker,
-    redactor: deps.redactor,
-    labels: deps.config.tracker.labels,
-    stored,
-    branch,
-    branchUrl: branch === null ? null : branchUrl(deps.config.codehost, branch),
-  });
+  return publishImplement({ ctx, tracker: deps.tracker, labels: deps.config.tracker.labels, stored });
 };
 
 /** Overlay files (never to be committed) and every secret the change must not carry: the overlay's and the steward's own. */
@@ -278,7 +270,7 @@ export const runImplement = async (ctx: RunContext, deps: PipelineDeps): Promise
   return outcome;
 };
 
-/** Retry path: push from the bundle if the push never landed, then comment and labels. Never re-runs the brain or pushes twice. */
+/** Retry path: push from the bundle if the push never landed, then labels. Never re-runs the brain or pushes twice. */
 export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   const configured = settingsOf(deps);
   if (configured === null) return notConfigured;
@@ -324,13 +316,5 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
       return { status: "publish_failed", error: `loop: ${errorMessage(err)}` };
     }
   }
-  return publishImplement({
-    ctx,
-    tracker: deps.tracker,
-    redactor: deps.redactor,
-    labels: deps.config.tracker.labels,
-    stored,
-    branch: stored.handback === null ? job.branch : null,
-    branchUrl: stored.handback === null && job.branch !== null ? branchUrl(deps.config.codehost, job.branch) : null,
-  });
+  return publishImplement({ ctx, tracker: deps.tracker, labels: deps.config.tracker.labels, stored });
 };

@@ -1,14 +1,9 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { AuthenticationLinearError, type LinearClient } from "@linear/sdk";
 import { createLinearClient, LinearApiKeyRejectedError, LinearTracker } from "../../../src/tracker/linear/client.js";
 
 const API_KEY = "lin_api_test_key";
 
 const updateIssueMock = vi.fn<LinearClient["updateIssue"]>();
-const createCommentMock = vi.fn<LinearClient["createComment"]>();
-const fileUploadMock = vi.fn<LinearClient["fileUpload"]>();
 const issueMock = vi.fn<LinearClient["issue"]>();
 const issueAddLabelMock = vi.fn<LinearClient["issueAddLabel"]>();
 const issueRemoveLabelMock = vi.fn<LinearClient["issueRemoveLabel"]>();
@@ -17,8 +12,6 @@ const clientFactoryMock = vi.fn<(apiKey: string) => LinearClient>();
 
 const fakeClient = {
   updateIssue: updateIssueMock,
-  createComment: createCommentMock,
-  fileUpload: fileUploadMock,
   issue: issueMock,
   issueAddLabel: issueAddLabelMock,
   issueRemoveLabel: issueRemoveLabelMock,
@@ -26,8 +19,21 @@ const fakeClient = {
 } as unknown as LinearClient;
 
 const okPayload = { success: true, lastSyncId: 1 };
-const makeTracker = (fetchImpl: typeof fetch = vi.fn<typeof fetch>()) =>
-  new LinearTracker(API_KEY, { fetchImpl, clientFactory: clientFactoryMock });
+const makeTracker = () => new LinearTracker(API_KEY, { clientFactory: clientFactoryMock });
+
+/** An issue carrying `needs-triage`, whose team has its own `needs-info` label: a swap between them is one update. */
+const mockSwappableIssue = (): void => {
+  issueMock.mockResolvedValue({
+    labels: async () => ({ nodes: [{ id: "l-triage", name: "needs-triage" }] }),
+    team: Promise.resolve({ id: "team-1" }),
+  } as never);
+  issueLabelsMock.mockResolvedValue({
+    nodes: [
+      { id: "l-info-workspace", team: undefined },
+      { id: "l-info-team", team: Promise.resolve({ id: "team-1" }) },
+    ],
+  } as never);
+};
 
 describe("createLinearClient", () => {
   it("sends the personal API key as a raw Authorization header, without Bearer", () => {
@@ -41,69 +47,14 @@ describe("LinearTracker", () => {
     vi.clearAllMocks();
     clientFactoryMock.mockReturnValue(fakeClient);
     updateIssueMock.mockResolvedValue(okPayload as never);
-    createCommentMock.mockResolvedValue(okPayload as never);
+    mockSwappableIssue();
   });
 
   it("builds one client from the API key", async () => {
     const tracker = makeTracker();
-    await tracker.writeDescription("issue-uuid-1", "a");
-    await tracker.postComment("issue-uuid-1", "b");
+    await tracker.swapLabel("issue-uuid-1", "needs-triage", "needs-info");
+    await tracker.swapLabel("issue-uuid-1", "needs-triage", "needs-info");
     expect(clientFactoryMock.mock.calls).toEqual([[API_KEY]]);
-  });
-
-  it("writes a description with updateIssue", async () => {
-    await makeTracker().writeDescription("issue-uuid-1", "new body");
-    expect(updateIssueMock).toHaveBeenCalledTimes(1);
-    expect(updateIssueMock).toHaveBeenCalledWith("issue-uuid-1", { description: "new body" });
-  });
-
-  it("posts a comment with createComment", async () => {
-    await makeTracker().postComment("issue-uuid-1", "hello");
-    expect(createCommentMock).toHaveBeenCalledTimes(1);
-    expect(createCommentMock).toHaveBeenCalledWith({ issueId: "issue-uuid-1", body: "hello" });
-  });
-
-  it("uploads a file via fileUpload then PUTs it with the returned headers", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "steward-upload-"));
-    const path = join(dir, "shot.png");
-    writeFileSync(path, Buffer.from([1, 2, 3, 4]));
-    fileUploadMock.mockResolvedValue({
-      success: true,
-      lastSyncId: 1,
-      uploadFile: {
-        uploadUrl: "https://upload.example/put",
-        assetUrl: "https://uploads.linear.app/asset/shot.png",
-        headers: [{ key: "x-amz-meta", value: "abc" }],
-      },
-    } as never);
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
-
-    expect(await makeTracker(fetchMock).uploadFile(path, "image/png")).toEqual({ url: "https://uploads.linear.app/asset/shot.png" });
-
-    expect(fileUploadMock).toHaveBeenCalledTimes(1);
-    expect(fileUploadMock).toHaveBeenCalledWith("image/png", "shot.png", 4);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe("https://upload.example/put");
-    expect(init?.method).toBe("PUT");
-    const headers = new Headers(init?.headers);
-    expect(headers.get("x-amz-meta")).toBe("abc");
-    expect(headers.get("content-type")).toBe("image/png");
-    expect(headers.get("cache-control")).toBe("public, max-age=31536000");
-    expect(Buffer.from(init?.body as Uint8Array)).toEqual(Buffer.from([1, 2, 3, 4]));
-  });
-
-  it("rejects an upload when the PUT is not 2xx", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "steward-upload-"));
-    const path = join(dir, "shot.png");
-    writeFileSync(path, "x");
-    fileUploadMock.mockResolvedValue({
-      success: true,
-      lastSyncId: 1,
-      uploadFile: { uploadUrl: "https://upload.example/put", assetUrl: "https://uploads.linear.app/a", headers: [] },
-    } as never);
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 403 }));
-    await expect(makeTracker(fetchMock).uploadFile(path, "image/png")).rejects.toThrow();
   });
 
   it("reads the description from the issue", async () => {
@@ -125,7 +76,7 @@ describe("LinearTracker", () => {
 
   it("reports an API key Linear accepts as not rejected", async () => {
     const tracker = makeTracker();
-    await tracker.writeDescription("issue-uuid-1", "body");
+    await tracker.swapLabel("issue-uuid-1", "needs-triage", "needs-info");
     expect(tracker.apiKeyRejected()).toBe(false);
   });
 
@@ -133,7 +84,7 @@ describe("LinearTracker", () => {
     updateIssueMock.mockRejectedValue(new AuthenticationLinearError({ message: "unauthorized" }));
     const tracker = makeTracker();
 
-    const write = tracker.writeDescription("issue-uuid-1", "body");
+    const write = tracker.swapLabel("issue-uuid-1", "needs-triage", "needs-info");
 
     await expect(write).rejects.toBeInstanceOf(LinearApiKeyRejectedError);
     await expect(write).rejects.toThrow("Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked");
@@ -158,15 +109,20 @@ describe("LinearTracker", () => {
   });
 
   it("retries a failing write three times before surfacing the error", async () => {
-    createCommentMock.mockRejectedValue(new Error("boom"));
-    await expect(makeTracker().postComment("issue-uuid-1", "hello")).rejects.toThrow();
-    expect(createCommentMock).toHaveBeenCalledTimes(3);
+    updateIssueMock.mockRejectedValue(new Error("boom"));
+    await expect(makeTracker().swapLabel("issue-uuid-1", "needs-triage", "needs-info")).rejects.toThrow();
+    expect(updateIssueMock).toHaveBeenCalledTimes(3);
   });
 
   it("succeeds when a write fails once then recovers", async () => {
-    createCommentMock.mockRejectedValueOnce(new Error("boom"));
-    await makeTracker().postComment("issue-uuid-1", "hello");
-    expect(createCommentMock).toHaveBeenCalledTimes(2);
+    updateIssueMock.mockRejectedValueOnce(new Error("boom"));
+    await makeTracker().swapLabel("issue-uuid-1", "needs-triage", "needs-info");
+    expect(updateIssueMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("has no comment, description or upload writes: labels are its only Linear writes", () => {
+    const tracker: object = makeTracker();
+    expect(["postComment", "writeDescription", "uploadFile"].filter((method) => method in tracker)).toEqual([]);
   });
 });
 
@@ -175,16 +131,7 @@ describe("LinearTracker.swapLabel", () => {
     vi.clearAllMocks();
     clientFactoryMock.mockReturnValue(fakeClient);
     updateIssueMock.mockResolvedValue(okPayload as never);
-    issueMock.mockResolvedValue({
-      labels: async () => ({ nodes: [{ id: "l-triage", name: "needs-triage" }] }),
-      team: Promise.resolve({ id: "team-1" }),
-    } as never);
-    issueLabelsMock.mockResolvedValue({
-      nodes: [
-        { id: "l-info-workspace", team: undefined },
-        { id: "l-info-team", team: Promise.resolve({ id: "team-1" }) },
-      ],
-    } as never);
+    mockSwappableIssue();
   });
 
   it("adds the team label and removes the old one in a single update", async () => {

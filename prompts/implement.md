@@ -52,6 +52,6 @@ In `checksRun`, list each command, its result, and why it is in scope (for examp
 
 ## Result
 
-- `outcome: "implemented"` when the change is complete and your checks pass. Set `branchType` to one of: {{branchTypes}} (the kind of change: `feature` for new behaviour, `fix` for a bug fix, `chore` for maintenance, `refactor` for restructuring without behaviour change). Write `commitMessage` as a subject line of at most 72 characters (no ticket ID; the steward adds it), a blank line, then a short body explaining what changed and why. Write `summary` for the ticket comment and `reviewNotes` for anything a reviewer should check.
+- `outcome: "implemented"` when the change is complete and your checks pass. Set `branchType` to one of: {{branchTypes}} (the kind of change: `feature` for new behaviour, `fix` for a bug fix, `chore` for maintenance, `refactor` for restructuring without behaviour change). Write `commitMessage` as a subject line of at most 72 characters (no ticket ID; the steward adds it), a blank line, then a short body explaining what changed and why. Write `summary` for the note the steward posts on the merge request and `reviewNotes` for anything a reviewer should check.
 - `outcome: "failed"` when you tried and could not get to a working change. Put what you tried, what failed and where you stopped in `failureDetail`. Set `branchType` to null.
 - `outcome: "needs_info"` when the ticket cannot be implemented without answers only a person can give. Put the questions in `questions`. Set `branchType` to null.

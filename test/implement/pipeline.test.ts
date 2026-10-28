@@ -104,6 +104,9 @@ const makeDeps = (runBrain: PipelineDeps["runBrain"], config: StewardConfig = ma
   ...(runBrain === undefined ? {} : { runBrain }),
 });
 
+/** The job's stored result and hand-back, where a hand-back's reason lives now that Linear gets no comments. */
+const recorded = (jobId: number): string => JSON.stringify(stores.jobs.get(jobId)?.implementResult ?? null);
+
 const claim = (event: TriggerEvent = trigger): RunContext => {
   const jobId = stores.jobs.enqueue(event);
   stores.jobs.claimById(jobId);
@@ -127,7 +130,7 @@ afterEach(async () => {
 });
 
 describe("runImplement", () => {
-  it("commits, pushes the branch, comments and swaps to agent-implemented", async () => {
+  it("commits, pushes the branch and swaps to agent-implemented, writing nothing else to Linear", async () => {
     const brain = editingBrain(implemented);
     const ctx = claim();
 
@@ -139,7 +142,7 @@ describe("runImplement", () => {
     expect(await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe(job?.commitSha);
     expect(await git(repo.repo, ["log", "-1", "--format=%s", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe("API-1: Keep the last chunk");
     expect(job?.pushedAt).not.toBeNull();
-    expect(tracker.comments("issue-1")[0]).toContain("fix/API-1-adapter-drops-the-last-chunk");
+    expect(tracker.labelSwaps()).toEqual([{ issueId: "issue-1", from: "ready-for-agent", to: "agent-implemented" }]);
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
     expect(brain.calls[0]?.output).toBe("implement");
     expect(brain.calls[0]?.timeoutMs).toBe(60_000);
@@ -167,7 +170,7 @@ describe("runImplement", () => {
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the ticket needs more information" });
     expect(tracker.labelsOf("issue-1")).toEqual(["needs-info"]);
-    expect(tracker.comments("issue-1")[0]).toContain("1. Which stream?");
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.result?.questions).toEqual(["Which stream?"]);
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });
 
@@ -175,7 +178,7 @@ describe("runImplement", () => {
     const ctx = claim();
     await runImplement(ctx, makeDeps(editingBrain({ ...implemented, outcome: "failed", branchType: null, failureDetail: "the streaming test keeps failing" }).runBrain));
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
-    expect(tracker.comments("issue-1")[0]).toContain("the streaming test keeps failing");
+    expect(recorded(ctx.jobId)).toContain("the streaming test keeps failing");
   });
 
   it("hands back without running the brain when a branch already carries the ticket", async () => {
@@ -187,7 +190,7 @@ describe("runImplement", () => {
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: a branch for API-1 already exists" });
     expect(brain.calls).toHaveLength(0);
-    expect(tracker.comments("issue-1")[0]).toContain("feature/API-1-by-hand");
+    expect(recorded(ctx.jobId)).toContain("feature/API-1-by-hand");
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 
@@ -203,7 +206,7 @@ describe("runImplement", () => {
     const ctx = claim();
     const outcome = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain, makeConfig({ checks: ["echo 'type error in adapter.ts'; exit 2"] })));
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the steward's checks failed" });
-    expect(tracker.comments("issue-1")[0]).toContain("type error in adapter.ts");
+    expect(recorded(ctx.jobId)).toContain("type error in adapter.ts");
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });
 
@@ -213,7 +216,7 @@ describe("runImplement", () => {
     const brain = editingBrain(implemented, async (w) => writeFile(join(w, "src/adapter.ts"), 'export const s = "supersecretvalue123";\n'));
     const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value" });
-    expect(tracker.comments("issue-1")[0]).not.toContain("supersecretvalue123");
+    expect(recorded(ctx.jobId)).not.toContain("supersecretvalue123");
   });
 
   it("hands back when a pre-commit hook force-adds a gitignored overlay secret, pushing nothing", async () => {
@@ -228,7 +231,7 @@ describe("runImplement", () => {
     const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change would commit files the steward copied in" });
-    expect(tracker.comments("issue-1")[0]).toContain(".env");
+    expect(recorded(ctx.jobId)).toContain(".env");
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
     expect(stores.jobs.get(ctx.jobId)?.pushedAt ?? null).toBeNull();
@@ -246,7 +249,7 @@ describe("runImplement", () => {
     const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value" });
-    expect(tracker.comments("issue-1")[0]).toContain("src/leak.txt");
+    expect(recorded(ctx.jobId)).toContain("src/leak.txt");
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });
 
@@ -263,8 +266,8 @@ describe("runImplement", () => {
     const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the commit message contains a secret value" });
-    expect(tracker.comments("issue-1")[0]).toContain("commit message");
-    expect(tracker.comments("issue-1")[0]).not.toContain("supersecretvalue123");
+    expect(recorded(ctx.jobId)).toContain("commit message");
+    expect(recorded(ctx.jobId)).not.toContain("supersecretvalue123");
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
     expect(stores.jobs.get(ctx.jobId)?.pushedAt ?? null).toBeNull();
@@ -294,7 +297,6 @@ describe("runImplement", () => {
 
     expect(outcome).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
     expect(stores.jobs.get(ctx.jobId)?.implementResult ?? null).toBeNull();
-    expect(tracker.comments("issue-1")).toEqual([]);
     expect(tracker.labelSwaps()).toEqual([]);
   });
 
@@ -302,7 +304,7 @@ describe("runImplement", () => {
     const ctx = { ...claim(), dryRun: true };
     const outcome = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain, makeConfig({ checks: ["echo 'type error in adapter.ts'; exit 2"] })));
     expect(outcome).toMatchObject({ status: "succeeded", warning: expect.stringMatching(/^dry run: would hand back: the steward's checks failed\n[\s\S]*type error in adapter\.ts/) });
-    expect(tracker.comments("issue-1")).toEqual([]);
+    expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("refuses a Done ticket without running the brain", async () => {
@@ -321,7 +323,7 @@ describe("runImplement", () => {
     const outcome = await runImplement(claim(), makeDeps(brain.runBrain));
     expect(outcome).toEqual({ status: "failed", error: "API-1 is Canceled; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-    expect(tracker.comments("issue-1")).toEqual([]);
+    expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("does not hand back when the ticket is closed while the agent runs", async () => {
@@ -330,7 +332,6 @@ describe("runImplement", () => {
     });
     const outcome = await runImplement(claim(), makeDeps(brain.runBrain));
     expect(outcome).toEqual({ status: "failed", error: "API-1 is Done; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
-    expect(tracker.comments("issue-1")).toEqual([]);
     expect(tracker.labelSwaps()).toEqual([]);
   });
 
@@ -442,7 +443,7 @@ describe("the fix loop start", () => {
     expect((await runImplement(ctx, makeDeps(runBrain, withGreptile()))).status).toBe("failed");
     expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
 
-    tracker.failNextWrite();
+    tracker.failNextSwap();
     expect((await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined, withGreptile()))).status).toBe("publish_failed");
     const retry = await publishImplementOnly({ ...ctx, attempt: 3 }, makeDeps(undefined, withGreptile()));
 
@@ -454,9 +455,9 @@ describe("the fix loop start", () => {
 });
 
 describe("publishImplementOnly", () => {
-  it("re-publishes after a failed comment without pushing again", async () => {
+  it("re-publishes after a failed label swap without pushing again", async () => {
     const ctx = claim();
-    tracker.failNextWrite();
+    tracker.failNextSwap();
     const first = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
     expect(first.status).toBe("publish_failed");
     const pushed = await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"]);
@@ -468,20 +469,6 @@ describe("publishImplementOnly", () => {
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
   });
 
-  it("does not post the implement comment twice when a label-swap failure is retried", async () => {
-    const ctx = claim();
-    tracker.failNextSwap();
-    const first = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
-    expect(first).toEqual({ status: "publish_failed", error: "labels: Linear down" });
-    expect(tracker.comments("issue-1")).toHaveLength(1);
-
-    const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
-
-    expect(retry).toEqual({ status: "succeeded" });
-    expect(tracker.comments("issue-1")).toHaveLength(1);
-    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
-  });
-
   it("pushes from the bundle on retry after the first push was rejected", async () => {
     const allowPushes = await rejectPushes();
     const ctx = claim();
@@ -489,7 +476,6 @@ describe("publishImplementOnly", () => {
     const first = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
     expect(first).toMatchObject({ status: "publish_failed", error: expect.stringContaining("push:") });
     expect(stores.jobs.get(ctx.jobId)?.pushedAt ?? null).toBeNull();
-    expect(tracker.comments("issue-1")).toEqual([]);
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-agent"]);
 
     await allowPushes();
@@ -504,7 +490,7 @@ describe("publishImplementOnly", () => {
 
   it("treats its own already-landed push as pushed when the record was lost", async () => {
     const ctx = claim();
-    tracker.failNextWrite();
+    tracker.failNextSwap();
     await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
     stores.db.prepare("UPDATE jobs SET pushed_at = NULL WHERE id = ?").run(ctx.jobId);
 
@@ -526,7 +512,6 @@ describe("publishImplementOnly", () => {
 
     expect(retry).toEqual({ status: "failed", error: "API-1 is Canceled; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-    expect(tracker.comments("issue-1")).toEqual([]);
     expect(tracker.labelSwaps()).toEqual([]);
   });
 
@@ -539,7 +524,6 @@ describe("publishImplementOnly", () => {
     const job = stores.jobs.get(ctx.jobId);
     expect(job?.implementResult).not.toBeNull();
     expect(job?.pushedAt ?? null).toBeNull();
-    expect(tracker.comments("issue-1")).toEqual([]);
     const pushed = await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"]);
     expect(pushed).toBe(job?.commitSha);
 
@@ -562,7 +546,7 @@ describe("publishImplementOnly", () => {
 
     expect(retry).toEqual({ status: "succeeded", warning: "handed back: a branch for API-1 already exists" });
     expect(await git(repo.repo, ["branch", "--list", "fix/API-1-*"])).toBe("");
-    expect(tracker.comments("issue-1")[0]).toContain("feature/API-1-by-hand");
+    expect(recorded(ctx.jobId)).toContain("feature/API-1-by-hand");
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
     expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toMatchObject({ reason: "a branch for API-1 already exists", detail: "feature/API-1-by-hand" });
   });

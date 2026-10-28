@@ -245,7 +245,7 @@ describe("runFix", () => {
 
     expect(outcome.status).toBe("succeeded");
     expect(loopOf(id).state).toBe("handed_back");
-    expect(tracker.comments("issue-1")[0]).toContain("disagree");
+    expect(gitlab.notes.some((note) => note.includes("disagree"))).toBe(true);
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
     expect(gitlab.notes.some((note) => note.includes("@greptileai"))).toBe(false);
     expect(queuedAwaits()).toEqual([]);
@@ -278,24 +278,38 @@ describe("runFix", () => {
     expect(loopOf(id).history[0]?.pipeline).toBe("failed");
   });
 
-  it("gives the agent the ticket comments posted since the last hand-back, not the steward's own", async () => {
-    tracker.addIssue({
-      ...structuredClone(issue),
-      comments: [
-        { author: "Ada", body: "Before the hand-back", createdAt: "2026-10-27T08:00:00.000Z" },
-        { author: "Ada", body: "Please keep the old buffer size", createdAt: "2026-10-27T10:00:00.000Z" },
-        { author: "Ticket Steward", body: "Handed back\n\n<!-- ticket-steward:loop id=1 handback -->", createdAt: "2026-10-27T10:30:00.000Z" },
-      ],
-    });
+  it("gives the agent the MR notes people posted since the last hand-back, not bots', Greptile's or the steward's", async () => {
+    gitlab.addDiscussion("ada", "Before the hand-back", { createdAt: "2026-10-27T08:00:00.000Z" });
+    gitlab.addDiscussion("ada", "Please keep the old buffer size", { createdAt: "2026-10-27T10:00:00.000Z" });
+    gitlab.addDiscussion("sam", "And log the dropped chunk", { createdAt: "2026-10-27T09:30:00.000Z" });
+    gitlab.addDiscussion("ada", "changed the description", { createdAt: "2026-10-27T10:05:00.000Z", system: true });
+    gitlab.addDiscussion(GREPTILE, "Greptile says hello after the hand-back", { createdAt: "2026-10-27T10:10:00.000Z", resolved: true });
+    gitlab.addDiscussion("project_42_bot_0123abcd", "Bot note after the hand-back", { createdAt: "2026-10-27T10:15:00.000Z" });
+    gitlab.addDiscussion("steward-bot", "The steward's own note", { createdAt: "2026-10-27T10:20:00.000Z" });
+    gitlab.addDiscussion("ada", "Handed back\n\n<!-- ticket-steward:loop id=1 handback -->", { createdAt: "2026-10-27T10:30:00.000Z" });
     const id = createLoop();
     stores.loops.update(id, { handedBackAt: "2026-10-27T09:00:00.000Z" });
     const brain = editing({ result: changed(finding) });
 
     await runFix(claim(id), makeDeps(brain));
 
-    expect(brain.lastInput().prompt).toContain("Please keep the old buffer size");
-    expect(brain.lastInput().prompt).not.toContain("Before the hand-back");
-    expect(brain.lastInput().prompt).not.toContain("ticket-steward:loop");
+    const prompt = brain.lastInput().prompt;
+    expect(prompt).toContain("## New comments on the merge request");
+    expect(prompt.indexOf("**sam:** And log the dropped chunk")).toBeGreaterThan(-1);
+    expect(prompt.indexOf("**ada:** Please keep the old buffer size")).toBeGreaterThan(prompt.indexOf("**sam:** And log the dropped chunk"));
+    for (const skipped of ["Before the hand-back", "changed the description", "Greptile says hello", "Bot note", "The steward's own note", "ticket-steward:loop"]) {
+      expect(prompt).not.toContain(skipped);
+    }
+  });
+
+  it("gives the agent no MR notes when the loop was never handed back", async () => {
+    gitlab.addDiscussion("ada", "Please keep the old buffer size", { createdAt: "2026-10-27T10:00:00.000Z" });
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) });
+
+    await runFix(claim(id), makeDeps(brain));
+
+    expect(brain.lastInput().prompt).not.toContain("Please keep the old buffer size");
   });
 
   it("lists a person's commits since the adopted head", async () => {
@@ -317,7 +331,7 @@ describe("runFix", () => {
     expect(loopOf(id).adoptedFrom).toBeNull();
   });
 
-  it("after a restart, gives the agent the person's commits and the comments since the hand-back", async () => {
+  it("after a restart, gives the agent the person's commits and the MR notes since the hand-back", async () => {
     await git(repo.repo, ["checkout", "-q", BRANCH]);
     const personHead = await commitFile(repo.repo, "docs/notes.md", "notes\n");
     await git(repo.repo, ["checkout", "-q", "main"]);
@@ -326,10 +340,7 @@ describe("runFix", () => {
     gitlab.openMr = gitlab.mr;
     gitlab.discussions = [];
     finding = gitlab.addDiscussion(GREPTILE, "Null check missing on the last chunk.");
-    tracker.addIssue({
-      ...structuredClone(issue),
-      comments: [{ author: "Ada", body: "Keep the old buffer size when you fix it", createdAt: "2026-10-27T10:00:00.000Z" }],
-    });
+    gitlab.addDiscussion("ada", "Keep the old buffer size when you fix it", { createdAt: "2026-10-27T10:00:00.000Z" });
     const id = createLoop();
     stores.loops.update(id, { state: "handed_back", round: 3, handedBackAt: "2026-10-27T09:00:00.000Z" });
     const restart: TriggerEvent = { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "restart", labelDriven: true };

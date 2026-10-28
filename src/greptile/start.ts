@@ -4,7 +4,7 @@ import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
 import { transaction, type Job, type Loop } from "../store/index.js";
 import type { TriggerEvent } from "../tracker/types.js";
-import { commentOnce, LOOP_MARKER } from "./publish.js";
+import { LOOP_MARKER, noteOnce } from "./publish.js";
 
 /** Where the implement push left the ticket: the base it branched from and the worktree its brain session ran in. */
 export interface LoopStart {
@@ -79,16 +79,14 @@ const resumeLoop = async (deps: RestartDeps, loop: Loop, mr: MergeRequestInfo, l
 };
 
 /**
- * No open MR to resume on: says so on Linear and queues an implement, which hands back with "a branch already exists"
+ * No open MR to resume on: says so on the loop's last MR, if it had one, and queues an implement, which hands back with "a branch already exists"
  * while the branch is there. A label restart queues it as the label would; `steward fix` queues a CLI one that leaves labels alone.
  */
 const restartImplement = async (deps: RestartDeps, ctx: RunContext, loop: Loop, labelDriven: boolean): Promise<JobOutcome> => {
   try {
-    await commentOnce(deps, loop, LOOP_MARKER(loop.id, `restart job=${ctx.jobId}`), [
-      `no open merge request for ${loop.branch}; starting a fresh implement`,
-    ]);
+    await noteOnce(deps, loop, LOOP_MARKER(loop.id, `restart job=${ctx.jobId}`), `No open merge request for ${loop.branch}; Ticket Steward is starting a fresh implement.`);
   } catch (err) {
-    return { status: "failed", error: `comment: ${errorMessage(err)}`, retryable: true };
+    return { status: "failed", error: `merge request note: ${errorMessage(err)}`, retryable: true };
   }
   const { issueId, identifier, teamKey } = loop;
   const trigger: TriggerEvent = labelDriven

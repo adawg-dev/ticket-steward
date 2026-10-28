@@ -81,7 +81,7 @@ describe("steward implement", () => {
 
     expect(stdout()).toContain("would commit on fix/API-1-adapter-drops-the-last-chunk");
     expect(stdout()).toContain("API-1: Keep the last chunk");
-    expect(tracker.comments("issue-1")).toEqual([]);
+    expect(tracker.labelSwaps()).toEqual([]);
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });
 

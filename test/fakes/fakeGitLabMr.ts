@@ -34,21 +34,28 @@ export class FakeGitLabMr implements GitLabMrApi {
   readonly replies: Array<{ discussionId: string; body: string }> = [];
   readonly resolved: string[] = [];
   private nextId = 1;
+  private failingNotes = 0;
 
   constructor(mr: MergeRequestInfo = fakeMergeRequest()) {
     this.mr = mr;
   }
 
-  addDiscussion(author: string, body: string, opts: { resolvable?: boolean; resolved?: boolean } = {}): string {
+  addDiscussion(author: string, body: string, opts: { resolvable?: boolean; resolved?: boolean; system?: boolean; createdAt?: string } = {}): string {
     const id = `d${this.nextId++}`;
+    const createdAt = opts.createdAt ?? "2026-10-27T10:00:00Z";
     this.discussions.push({
       id,
       notes: [{
-        id: this.nextId++, body, author, system: false, resolvable: opts.resolvable ?? true, resolved: opts.resolved ?? false,
-        type: null, createdAt: "2026-10-27T10:00:00Z", updatedAt: "2026-10-27T10:00:00Z", position: null,
+        id: this.nextId++, body, author, system: opts.system ?? false, resolvable: opts.resolvable ?? true, resolved: opts.resolved ?? false,
+        type: null, createdAt, updatedAt: createdAt, position: null,
       }],
     });
     return id;
+  }
+
+  /** The next createNote throws, as GitLab being down would. */
+  failNextNote(): void {
+    this.failingNotes += 1;
   }
 
   async currentUser(): Promise<{ username: string }> {
@@ -76,6 +83,10 @@ export class FakeGitLabMr implements GitLabMrApi {
   }
 
   async createNote(_project: number | string, _iid: number, body: string): Promise<void> {
+    if (this.failingNotes > 0) {
+      this.failingNotes -= 1;
+      throw new Error("GitLab down");
+    }
     this.notes.push(body);
     this.addDiscussion(BOT, body, { resolvable: false });
   }

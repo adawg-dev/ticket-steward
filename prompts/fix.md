@@ -63,7 +63,7 @@ Keep their changes; build on them.
 
 {{/hasPersonCommits}}
 {{#hasNewComments}}
-## New comments on the ticket
+## New comments on the merge request
 
 {{#newComments}}
 **{{author}}:** {{body}}
@@ -93,6 +93,6 @@ Do not repeat them across the repository; spend your own checks on behaviour.
 - `outcome: "no_changes"` when you edited nothing because you declined every thread. Every thread must be `declined`; leave `commitMessage` empty.
 - `outcome: "failed"` when you tried and could not get to a working change. Put what you tried, what failed and where you stopped in `failureDetail`.
 - `threads`: one entry per thread above, with its `discussionId`, `action` (`fixed` or `declined`) and a non-empty `reply` that says what you did or why you declined. No duplicates, none missing.
-- `summary`: a short account of the round for the ticket comment.
+- `summary`: a short account of the round for the merge request.
 - `checksRun`: each command, its result, and why it is in scope.
 - `failureDetail`: null unless the outcome is `failed`.

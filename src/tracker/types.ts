@@ -49,16 +49,14 @@ export interface TicketBundle {
   templates: Array<{ name: string; description: string; body: string; requiredFields: string[] }>;
 }
 
+/** Reads tickets and swaps labels: label changes are the steward's only Linear writes (2026-10-28). */
 export interface Tracker {
   kind: "linear";
   resolveIssueId(idOrKey: string): Promise<{ id: string; identifier: string; teamKey: string }>;
   fetchTicket(issueId: string): Promise<TicketBundle>;
   readDescription(issueId: string): Promise<string>;
-  writeDescription(issueId: string, description: string): Promise<void>;
-  postComment(issueId: string, body: string): Promise<void>;
   /** Adds `to` (if missing), then removes `from` (if present); names match case-insensitively. */
   swapLabel(issueId: string, from: string, to: string): Promise<void>;
-  uploadFile(localPath: string, contentType: string): Promise<{ url: string }>;
   /** True once the tracker rejected its credentials (Linear answered 401); the worker stops claiming jobs until a restart. */
   apiKeyRejected(): boolean;
 }

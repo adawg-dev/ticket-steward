@@ -22,15 +22,8 @@ const hasMarker = (bodies: string[], marker: string): boolean => bodies.some((bo
 
 const score = (value: number | null): string => (value === null ? "?" : String(value));
 
-/** Posts the Linear comment unless one with the marker is already on the ticket. */
-export const commentOnce = async (deps: Pick<PipelineDeps, "tracker" | "redactor">, loop: Loop, marker: string, lines: string[]): Promise<void> => {
-  const ticket = await deps.tracker.fetchTicket(loop.issueId);
-  if (hasMarker(ticket.comments.map((comment) => comment.body), marker)) return;
-  await deps.tracker.postComment(loop.issueId, deps.redactor.redact([...lines, "", marker].join("\n")));
-};
-
 /** Posts the MR note unless one with the marker is already on the MR; a loop with no known MR has nowhere to post. */
-const noteOnce = async (deps: PipelineDeps, loop: Loop, marker: string, text: string): Promise<void> => {
+export const noteOnce = async (deps: Pick<PipelineDeps, "gitlab" | "redactor">, loop: Loop, marker: string, text: string): Promise<void> => {
   if (deps.gitlab === undefined || loop.projectId === null || loop.mrIid === null) return;
   const discussions = await deps.gitlab.listDiscussions(loop.projectId, loop.mrIid);
   if (hasMarker(discussions.flatMap((discussion) => discussion.notes.map((note) => note.body)), marker)) return;
@@ -59,10 +52,10 @@ const publish = async (deps: PipelineDeps, loop: Loop, steps: Step[], patch: Loo
   return done;
 };
 
-/** Success: the ticket gets the round history, the label moves to approved, the MR is left alone. */
+/** Success: the MR gets the round history and the label moves to approved. */
 export const publishPassed = (deps: PipelineDeps, loop: Loop, summary: GreptileSummary): Promise<JobOutcome> => {
   const lines = [
-    `Greptile ${summary.score}/5 after ${loop.round} fix rounds: ${loop.mrUrl ?? "(merge request link unknown)"}`,
+    `Greptile ${summary.score}/5 after ${loop.round} fix rounds.`,
     "",
     ...loop.history.map(
       (r) => `- round ${r.round}: ${score(r.score)}/5, pipeline ${r.pipeline ?? "none"}, ${r.fixed} fixed, ${r.declined} declined`,
@@ -72,7 +65,7 @@ export const publishPassed = (deps: PipelineDeps, loop: Loop, summary: GreptileS
     deps,
     loop,
     [
-      { what: "comment", run: () => commentOnce(deps, loop, LOOP_MARKER(loop.id, "passed"), lines) },
+      { what: "merge request note", run: () => noteOnce(deps, loop, LOOP_MARKER(loop.id, "passed"), lines.join("\n")) },
       { what: "labels", run: () => swapFromImplemented(deps, loop, "approved") },
     ],
     { state: "passed" },
@@ -80,17 +73,13 @@ export const publishPassed = (deps: PipelineDeps, loop: Loop, summary: GreptileS
   );
 };
 
-/**
- * Hands the ticket back to a person: a Linear comment, `ready-for-human`, and a note on the MR saying why the steward stopped.
- * `detail` (an output tail, paths) goes in the Linear comment only.
- */
+/** Hands the ticket back to a person: a note on the MR saying why the steward stopped, then `ready-for-human`. */
 export const publishHandback = (deps: PipelineDeps, loop: Loop, reason: string, detail = ""): Promise<JobOutcome> => {
   const marker = handbackMarker(loop);
   const last = loop.history.at(-1);
   const lines = [
-    `Ticket Steward handed this back: ${reason}.`,
+    `Ticket Steward stopped and handed this back: ${reason}.`,
     "",
-    `Merge request: ${loop.mrUrl ?? "none found"}`,
     last === undefined ? "Last Greptile score: none yet" : `Last Greptile score: ${score(last.score)}/5 (round ${last.round})`,
     ...(detail === "" ? [] : ["", "```", detail, "```"]),
   ];
@@ -98,22 +87,21 @@ export const publishHandback = (deps: PipelineDeps, loop: Loop, reason: string, 
     deps,
     loop,
     [
-      { what: "comment", run: () => commentOnce(deps, loop, marker, lines) },
+      { what: "merge request note", run: () => noteOnce(deps, loop, marker, lines.join("\n")) },
       { what: "labels", run: () => swapFromImplemented(deps, loop, "readyForHuman") },
-      { what: "merge request note", run: () => noteOnce(deps, loop, marker, `Ticket Steward stopped: ${reason}`) },
     ],
     { state: "handed_back", handedBackAt: deps.now().toISOString() },
     { status: "succeeded", warning: `handed back: ${reason}` },
   );
 };
 
-/** Ends the loop quietly: labels stay, and Linear hears about it only when `comment` is set. */
-export const publishStop = (deps: PipelineDeps, loop: Loop, reason: string, comment: boolean): Promise<JobOutcome> => {
-  const lines = [`Ticket Steward stopped the Greptile loop: ${reason}.`, ...(loop.mrUrl === null ? [] : ["", `Merge request: ${loop.mrUrl}`])];
+/** Ends the loop quietly: labels stay, and the MR hears about it only when `note` is set. */
+export const publishStop = (deps: PipelineDeps, loop: Loop, reason: string, note: boolean): Promise<JobOutcome> => {
+  const text = `Ticket Steward stopped the Greptile loop: ${reason}.`;
   return publish(
     deps,
     loop,
-    comment ? [{ what: "comment", run: () => commentOnce(deps, loop, LOOP_MARKER(loop.id, "stop"), lines) }] : [],
+    note ? [{ what: "merge request note", run: () => noteOnce(deps, loop, LOOP_MARKER(loop.id, "stop"), text) }] : [],
     { state: "stopped" },
     { status: "succeeded", warning: `stopped: ${reason}` },
   );

@@ -77,12 +77,22 @@ const gate = (fix: Fix, observed: Observed): Promise<JobOutcome> | null => {
   return null;
 };
 
-/** Ticket comments since the loop was last handed back, without the steward's own. */
-const newComments = (loop: Loop, ticket: TicketBundle): Array<{ author: string; body: string }> => {
+/** GitLab project and group access tokens post as bot users named `project_<id>_bot_<hex>` or `group_<id>_bot_<hex>`. */
+const BOT_USER = /^(project|group)_\d+_bot(_[0-9a-f]+)?$/i;
+
+/**
+ * MR notes people posted since the loop was last handed back, oldest first: no system notes, nothing from Greptile, a
+ * bot user or the steward's own account, and nothing carrying the steward's marker.
+ */
+const newNotes = (loop: Loop, discussions: MrDiscussion[], skipAuthors: string[]): Array<{ author: string; body: string }> => {
   const since = loop.handedBackAt;
   if (since === null) return [];
-  return ticket.comments
-    .filter((comment) => Date.parse(comment.createdAt) > Date.parse(since) && !comment.body.includes(LOOP_MARKER_TEXT))
+  const skipped = new Set(skipAuthors.map((author) => author.toLowerCase()));
+  return discussions
+    .flatMap((discussion) => discussion.notes)
+    .filter((note) => Date.parse(note.createdAt) > Date.parse(since) && !note.system && !note.body.includes(LOOP_MARKER_TEXT))
+    .filter((note) => !skipped.has(note.author.toLowerCase()) && !BOT_USER.test(note.author))
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
     .map(({ author, body }) => ({ author, body }));
 };
 
@@ -277,8 +287,11 @@ const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Wor
   const sessionId = loop.sessionId;
 
   let ciFailures: CiFailure[] = [];
+  // Only a restarted loop reads people's notes, so only it needs to know which account is the steward's.
+  let stewardUser: string[] = [];
   try {
     if (pipeline?.status === "failed") ciFailures = await collectCiFailures(gitlab, mr.projectId, pipeline.id, greptile.ciLogLines, deps.redactor);
+    if (loop.handedBackAt !== null) stewardUser = [(await gitlab.currentUser()).username];
     await deps.mirror.fetch();
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
@@ -298,7 +311,7 @@ const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Wor
       findings,
       ciFailures,
       personCommits: await personCommits(loop, worktree),
-      newComments: newComments(loop, observed.ticket),
+      newComments: newNotes(loop, discussions, [greptile.botUsername, ...stewardUser]),
       workspacePath: worktree.path,
       headSha: loop.headSha,
       stewardPort: jobPort(deps),

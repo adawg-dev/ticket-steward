@@ -20,9 +20,7 @@ const bundle: TicketBundle = {
   templates: [],
 };
 
-const writeDescriptionMock = vi.fn<Tracker["writeDescription"]>();
-const postCommentMock = vi.fn<Tracker["postComment"]>();
-const uploadFileMock = vi.fn<Tracker["uploadFile"]>();
+const swapLabelMock = vi.fn<Tracker["swapLabel"]>();
 const apiKeyRejectedMock = vi.fn<Tracker["apiKeyRejected"]>();
 
 const inner: Tracker = {
@@ -30,10 +28,7 @@ const inner: Tracker = {
   resolveIssueId: async () => ({ id: "issue-uuid-1", identifier: "API-42", teamKey: "API" }),
   fetchTicket: async () => bundle,
   readDescription: async () => "Something is broken",
-  writeDescription: writeDescriptionMock,
-  postComment: postCommentMock,
-  uploadFile: uploadFileMock,
-  swapLabel: async () => {},
+  swapLabel: swapLabelMock,
   apiKeyRejected: apiKeyRejectedMock,
 };
 
@@ -54,14 +49,13 @@ describe("ReadOnlyTracker", () => {
 
   it("records writes in order without calling the inner tracker", async () => {
     const tracker = new ReadOnlyTracker(inner);
-    await tracker.writeDescription("issue-uuid-1", "new description");
-    await tracker.postComment("issue-uuid-1", "a comment");
+    await tracker.swapLabel("issue-uuid-1", "ready-for-agent", "agent-implemented");
+    await tracker.swapLabel("issue-uuid-1", "agent-implemented", "agent-approved");
     expect(tracker.writes).toEqual([
-      { method: "writeDescription", args: ["issue-uuid-1", "new description"] },
-      { method: "postComment", args: ["issue-uuid-1", "a comment"] },
+      { method: "swapLabel", args: ["issue-uuid-1", "ready-for-agent", "agent-implemented"] },
+      { method: "swapLabel", args: ["issue-uuid-1", "agent-implemented", "agent-approved"] },
     ]);
-    expect(writeDescriptionMock).not.toHaveBeenCalled();
-    expect(postCommentMock).not.toHaveBeenCalled();
+    expect(swapLabelMock).not.toHaveBeenCalled();
   });
 
   it("reports the inner tracker's API key state", () => {
@@ -70,13 +64,6 @@ describe("ReadOnlyTracker", () => {
     expect(tracker.apiKeyRejected()).toBe(false);
     apiKeyRejectedMock.mockReturnValue(true);
     expect(tracker.apiKeyRejected()).toBe(true);
-  });
-
-  it("returns a file:// url for uploads and records the call", async () => {
-    const tracker = new ReadOnlyTracker(inner);
-    expect(await tracker.uploadFile("/tmp/artifacts/shot.png", "image/png")).toEqual({ url: "file:///tmp/artifacts/shot.png" });
-    expect(tracker.writes).toEqual([{ method: "uploadFile", args: ["/tmp/artifacts/shot.png", "image/png"] }]);
-    expect(uploadFileMock).not.toHaveBeenCalled();
   });
 
   it("records swapLabel without forwarding it", async () => {

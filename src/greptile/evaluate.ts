@@ -10,7 +10,7 @@ export type RoundDecision =
   | { kind: "passed"; summary: GreptileSummary }
   | { kind: "fix"; summary: GreptileSummary; findings: Finding[]; pipelineFailed: boolean }
   | { kind: "handback"; reason: string }
-  | { kind: "stop"; reason: string; comment: boolean };
+  | { kind: "stop"; reason: string; note: boolean };
 export interface RoundInput {
   loop: Loop; settings: GreptileConfig; now: Date; ticketClosed: boolean;
   mr: MergeRequestInfo | null; summary: GreptileSummary | null; findings: Finding[];
@@ -29,14 +29,14 @@ export const evaluateRound = (input: RoundInput): RoundDecision => {
   const deadline = (minutes: number): Date | null =>
     loop.waitStartedAt === null ? null : new Date(Date.parse(loop.waitStartedAt) + minutes * 60_000);
 
-  if (input.ticketClosed) return { kind: "stop", reason: "the ticket was closed", comment: false };
+  if (input.ticketClosed) return { kind: "stop", reason: "the ticket was closed", note: false };
   if (mr === null) {
     return timedOut(settings.mrTimeoutMinutes)
       ? { kind: "handback", reason: `no merge request was opened for ${loop.branch}` }
       : { kind: "wait", waitingFor: "mr", deadline: deadline(settings.mrTimeoutMinutes) };
   }
   if (mr.state === "merged" || mr.state === "closed") {
-    return { kind: "stop", reason: `the merge request was ${mr.state}`, comment: true };
+    return { kind: "stop", reason: `the merge request was ${mr.state}`, note: true };
   }
   const short = mr.sha.slice(0, 7);
   if (mr.sha.toLowerCase() !== loop.headSha.toLowerCase()) {

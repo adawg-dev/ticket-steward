@@ -3,9 +3,10 @@ import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
+import { buildImplementSummary } from "../implement/publish.js";
 import { ACTIVE_LOOP_STATES, transaction, type Loop } from "../store/index.js";
 import { evaluateRound } from "./evaluate.js";
-import { publishHandback, publishPassed, publishStop } from "./publish.js";
+import { LOOP_MARKER, noteOnce, publishHandback, publishPassed, publishStop } from "./publish.js";
 import { findSummary, openFindings } from "./summary.js";
 
 interface Observed {
@@ -44,6 +45,18 @@ const observe = async (deps: PipelineDeps, loop: Loop, project: string, now: Dat
   return { ticketClosed, mr, discussions };
 };
 
+/**
+ * The implement job's summary, posted on the MR the first poll that finds it (Linear gets no comments). Checked against the
+ * discussions already read, so later polls cost nothing; a loop whose implement job stored no result posts nothing.
+ */
+const postImplementSummary = async (deps: PipelineDeps, loop: Loop, discussions: MrDiscussion[]): Promise<void> => {
+  const marker = LOOP_MARKER(loop.id, "implement-summary");
+  if (discussions.some((discussion) => discussion.notes.some((note) => note.body.includes(marker)))) return;
+  const stored = deps.stores.jobs.get(loop.implementJobId)?.implementResult ?? null;
+  if (stored === null || stored.result === null || stored.handback !== null) return;
+  await noteOnce(deps, loop, marker, buildImplementSummary({ jobId: loop.implementJobId, identifier: loop.identifier, result: stored.result }));
+};
+
 /** The next poll: one interval out, but no later than just past the wait's deadline, so a timeout never overruns by a poll. */
 const nextPoll = (now: Date, pollSeconds: number, deadline: Date | null): Date => {
   const interval = now.getTime() + pollSeconds * 1000;
@@ -67,6 +80,7 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   let observed: Observed;
   try {
     observed = await observe(deps, stored, config.codehost.project, now);
+    if (observed.mr?.state === "opened") await postImplementSummary(deps, reload(deps, loopId), observed.discussions);
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
   }
@@ -109,6 +123,6 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
     case "handback":
       return publishHandback(deps, loop, decision.reason);
     case "stop":
-      return publishStop(deps, loop, decision.reason, decision.comment);
+      return publishStop(deps, loop, decision.reason, decision.note);
   }
 };

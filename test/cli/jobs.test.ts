@@ -165,7 +165,7 @@ describe("steward jobs", () => {
     stores.jobs.finish(id, { status: "succeeded" });
     await done;
 
-    expect(stdout()).toBe(`job ${id}: publish-only (hand-back stored; comment and labels, nothing to push)\nsteward serve is running; requeued job ${id}\njob ${id} queued\njob ${id} succeeded\n`);
+    expect(stdout()).toBe(`job ${id}: publish-only (hand-back stored; labels only, nothing to push)\nsteward serve is running; requeued job ${id}\njob ${id} queued\njob ${id} succeeded\n`);
     expect(stores.jobs.get(id)?.attempts).toBe(2);
   });
 
@@ -195,7 +195,7 @@ describe("steward jobs", () => {
           stores.jobs.recordCommit(id, "fix/API-1-keep", "d".repeat(40));
           stores.jobs.saveImplementResult(id, { result, handback: null });
         }),
-      ).toBe("publish-only (push fix/API-1-keep from the bundle, then comment and labels)");
+      ).toBe("publish-only (push fix/API-1-keep from the bundle, then labels)");
     });
 
     it("only publishes once the push landed", async () => {
@@ -205,12 +205,12 @@ describe("steward jobs", () => {
           stores.jobs.saveImplementResult(id, { result, handback: null });
           stores.jobs.markPushed(id);
         }),
-      ).toBe("publish-only (fix/API-1-keep already pushed; comment and labels only)");
+      ).toBe("publish-only (fix/API-1-keep already pushed; labels only)");
     });
 
     it("only publishes a stored hand-back", async () => {
       expect(await retryLine((id) => stores.jobs.saveImplementResult(id, { result: null, handback: { label: "readyForHuman", reason: "the steward's checks failed", detail: "" } }))).toBe(
-        "publish-only (hand-back stored; comment and labels, nothing to push)",
+        "publish-only (hand-back stored; labels only, nothing to push)",
       );
     });
   });

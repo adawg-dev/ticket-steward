@@ -6,6 +6,7 @@ import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import { runAwaitReview } from "../../src/greptile/await.js";
 import { LOOP_MARKER, publishHandback, requestReview } from "../../src/greptile/publish.js";
+import type { ImplementResult } from "../../src/implement/result.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { Mirror } from "../../src/workspace/mirror.js";
@@ -36,6 +37,17 @@ const issue: TicketBundle = {
   attachments: [],
   appliedTemplate: null,
   templates: [],
+};
+
+const implemented: ImplementResult = {
+  outcome: "implemented",
+  branchType: "fix",
+  commitMessage: "Keep the last chunk",
+  summary: "Flush the buffer before closing the stream.",
+  reviewNotes: ["Check the streaming test."],
+  checksRun: ["tsc: ok"],
+  questions: [],
+  failureDetail: null,
 };
 
 const summaryBody = (score: number, sha = SHA): string =>
@@ -85,10 +97,11 @@ const makeDeps = (): PipelineDeps => ({
   now: () => NOW,
 });
 
-/** A finished implement job for the loop to come from. */
+/** A finished implement job for the loop to come from, with the result its push stored. */
 const implementJob = (): number => {
   const jobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
   stores.jobs.claimById(jobId);
+  stores.jobs.saveImplementResult(jobId, { result: implemented, handback: null });
   stores.jobs.finish(jobId, { status: "succeeded" });
   return jobId;
 };
@@ -174,6 +187,42 @@ describe("runAwaitReview", () => {
     expect(loopOf(id)).toMatchObject({ projectId: 42, mrIid: 7, mrUrl: gitlab.mr.webUrl, state: "awaiting_review" });
   });
 
+  it("posts the implement summary on the MR the first time it finds it, and never again", async () => {
+    const id = createLoop();
+    gitlab.openMr = fakeMergeRequest({ sha: SHA });
+
+    await runAwaitReview(claim(id), makeDeps());
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.notes).toHaveLength(1);
+    const [note] = gitlab.notes;
+    expect(note).toContain(`Ticket Steward implemented API-1 (job ${loopOf(id).implementJobId}).`);
+    expect(note).toContain("Flush the buffer before closing the stream.");
+    expect(note).toContain("**For the reviewer**\n- Check the streaming test.");
+    expect(note).toContain("**Checks the agent ran**\n- tsc: ok");
+    expect(note).toContain(LOOP_MARKER(id, "implement-summary"));
+  });
+
+  it("posts nothing while no MR is open", async () => {
+    const id = createLoop();
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.notes).toEqual([]);
+  });
+
+  it("retries the poll when the implement summary cannot be posted, then posts it once", async () => {
+    const id = createLoop();
+    gitlab.openMr = fakeMergeRequest({ sha: SHA });
+    gitlab.failNextNote();
+
+    expect(await runAwaitReview(claim(id), makeDeps())).toEqual({ status: "failed", error: "GitLab down", retryable: true });
+    expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("deferred");
+
+    expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "implement-summary"));
+  });
+
   it("gives the review its own wait once the MR is found, however long the MR took", async () => {
     const id = createLoop();
     stores.loops.update(id, { waitStartedAt: new Date(NOW.getTime() - 35 * 60_000).toISOString() });
@@ -182,7 +231,6 @@ describe("runAwaitReview", () => {
     const outcome = await runAwaitReview(claim(id), makeDeps());
 
     expect(outcome).toEqual({ status: "deferred", until: new Date(NOW.getTime() + 60_000) });
-    expect(tracker.comments("issue-1")).toEqual([]);
     expect(loopOf(id)).toMatchObject({ state: "awaiting_review", mrIid: 7, waitStartedAt: NOW.toISOString() });
   });
 
@@ -193,15 +241,14 @@ describe("runAwaitReview", () => {
     const outcome = await runAwaitReview(claim(id), makeDeps());
 
     expect(outcome).toEqual({ status: "succeeded" });
-    const [comment] = tracker.comments("issue-1");
-    expect(comment).toContain("Greptile 5/5 after 0 fix rounds: https://gitlab.example/acme/repo/-/merge_requests/7");
-    expect(comment).toContain("round 0: 5/5, pipeline success, 0 fixed, 0 declined");
-    expect(comment).toContain(LOOP_MARKER(id, "passed"));
+    const passed = gitlab.notes.filter((note) => note.includes(LOOP_MARKER(id, "passed")));
+    expect(passed).toHaveLength(1);
+    expect(passed[0]).toContain("Greptile 5/5 after 0 fix rounds.");
+    expect(passed[0]).toContain("round 0: 5/5, pipeline success, 0 fixed, 0 declined");
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-approved"]);
     const loop = loopOf(id);
     expect(loop.state).toBe("passed");
     expect(loop.history).toEqual([{ round: 0, headSha: SHA, score: 5, pipeline: "success", fixed: 0, declined: 0, outcome: "passed" }]);
-    expect(gitlab.notes).toEqual([]);
   });
 
   it("queues a fix job for a 3/5 with an open finding", async () => {
@@ -217,7 +264,7 @@ describe("runAwaitReview", () => {
     expect(queued[0]).toMatchObject({ kind: "fix", subject: `loop:${id}` });
     expect(JSON.parse(queued[0]?.trigger ?? "{}")).toMatchObject({ kind: "loop", loopId: id, step: "fix" });
     expect(loopOf(id)).toMatchObject({ state: "fixing", waitStartedAt: null });
-    expect(tracker.comments("issue-1")).toEqual([]);
+    expect(gitlab.notes.filter((note) => !note.includes("implement-summary"))).toEqual([]);
   });
 
   it("hands back when a person pushed to the branch", async () => {
@@ -227,12 +274,11 @@ describe("runAwaitReview", () => {
     const outcome = await runAwaitReview(claim(id), makeDeps());
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: a person pushed to the branch; the loop stopped" });
-    const [comment] = tracker.comments("issue-1");
-    expect(comment).toContain("a person pushed");
-    expect(comment).toContain(gitlab.mr.webUrl);
+    const handbacks = gitlab.notes.filter((note) => note.includes("handback round="));
+    expect(handbacks).toHaveLength(1);
+    expect(handbacks[0]).toContain("Ticket Steward stopped and handed this back: a person pushed to the branch; the loop stopped.");
+    expect(handbacks[0]).toContain("Last Greptile score: none yet");
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
-    expect(gitlab.notes).toHaveLength(1);
-    expect(gitlab.notes[0]).toContain("Ticket Steward stopped: a person pushed to the branch; the loop stopped");
     expect(loopOf(id)).toMatchObject({ state: "handed_back", handedBackAt: NOW.toISOString() });
   });
 
@@ -244,8 +290,9 @@ describe("runAwaitReview", () => {
 
     expect(outcome.status).toBe("succeeded");
     expect(tracker.labelSwaps()).toEqual([]);
-    expect(tracker.comments("issue-1")[0]).toContain("the merge request was merged");
-    expect(gitlab.notes).toEqual([]);
+    expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes[0]).toContain("Ticket Steward stopped the Greptile loop: the merge request was merged.");
+    expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "stop"));
     expect(loopOf(id).state).toBe("stopped");
   });
 
@@ -256,7 +303,7 @@ describe("runAwaitReview", () => {
     await runAwaitReview(claim(id), makeDeps());
 
     expect(tracker.labelSwaps()).toEqual([]);
-    expect(tracker.comments("issue-1")[0]).toContain("Greptile 5/5");
+    expect(gitlab.notes.some((note) => note.includes("Greptile 5/5"))).toBe(true);
     expect(loopOf(id).state).toBe("passed");
   });
 
@@ -272,7 +319,9 @@ describe("runAwaitReview", () => {
   it("keeps the loop open when the hand-back cannot be published", async () => {
     const id = knownMrLoop();
     gitlab.mr = fakeMergeRequest({ sha: "d".repeat(40) });
-    tracker.failNextWrite();
+    // The summary is already on the MR, so the failing note is the hand-back.
+    gitlab.addDiscussion("steward-bot", LOOP_MARKER(id, "implement-summary"), { resolvable: false });
+    gitlab.failNextNote();
 
     const outcome = await runAwaitReview(claim(id), makeDeps());
 
@@ -282,21 +331,22 @@ describe("runAwaitReview", () => {
 });
 
 describe("publishHandback", () => {
-  it("posts each comment once when a retry runs it again", async () => {
+  it("posts its MR note, detail included, once when a retry runs it again", async () => {
     const id = knownMrLoop();
     const deps = makeDeps();
     // A retry sees the loop as it was before the publish: the hand-back time is written only once every step succeeded.
     const before = loopOf(id);
 
-    await publishHandback(deps, before, "Greptile did not review ccccccc");
-    await publishHandback(deps, before, "Greptile did not review ccccccc");
+    await publishHandback(deps, before, "Greptile did not review ccccccc", "output tail");
+    await publishHandback(deps, before, "Greptile did not review ccccccc", "output tail");
 
-    expect(tracker.comments("issue-1")).toHaveLength(1);
     expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes[0]).toContain("```\noutput tail\n```");
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
     expect(loopOf(id)).toMatchObject({ state: "handed_back", handedBackAt: NOW.toISOString() });
   });
 
-  it("posts each comment once when the first try failed part-way", async () => {
+  it("posts its MR note once when the first try failed part-way", async () => {
     const id = knownMrLoop();
     const deps = makeDeps();
     tracker.failNextSwap();
@@ -305,7 +355,6 @@ describe("publishHandback", () => {
     expect(loopOf(id).handedBackAt).toBeNull();
     await publishHandback(deps, loopOf(id), "Greptile did not review ccccccc");
 
-    expect(tracker.comments("issue-1")).toHaveLength(1);
     expect(gitlab.notes).toHaveLength(1);
     expect(loopOf(id).state).toBe("handed_back");
   });
@@ -319,7 +368,6 @@ describe("publishHandback", () => {
 
     await publishHandback({ ...deps, now: () => new Date(NOW.getTime() + 3_600_000) }, loopOf(id), "Greptile did not review ccccccc");
 
-    expect(tracker.comments("issue-1")).toHaveLength(2);
     expect(gitlab.notes).toHaveLength(2);
     expect(loopOf(id).handedBackAt).toBe(new Date(NOW.getTime() + 3_600_000).toISOString());
   });
@@ -330,6 +378,15 @@ describe("publishHandback", () => {
     await publishHandback(makeDeps(), loopOf(id), "Greptile did not review ccccccc");
 
     expect(tracker.labelSwaps()).toEqual([]);
+  });
+
+  it("only swaps the label for a loop whose MR never appeared", async () => {
+    const id = createLoop();
+
+    expect(await publishHandback(makeDeps(), loopOf(id), "no merge request appeared")).toEqual({ status: "succeeded", warning: "handed back: no merge request appeared" });
+
+    expect(gitlab.notes).toEqual([]);
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 });
 

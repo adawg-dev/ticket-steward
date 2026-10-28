@@ -1,12 +1,9 @@
-import { readFile, stat } from "node:fs/promises";
-import { basename } from "node:path";
 import { LinearClient, LinearError, LinearErrorType, type Comment, type Issue, type Template } from "@linear/sdk";
 import { logger } from "../../log.js";
 import type { TicketBundle, Tracker } from "../types.js";
 import { toTemplateSummary } from "./templates.js";
 
 const WRITE_BACKOFF_MS = [500, 1000, 2000];
-const UPLOAD_CACHE_CONTROL = "public, max-age=31536000";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -42,12 +39,10 @@ const labelIdFor = async (client: LinearClient, name: string, teamId: string | n
 
 export class LinearTracker implements Tracker {
   readonly kind = "linear";
-  private readonly fetchImpl: typeof fetch;
   private readonly client: LinearClient;
   private rejected = false;
 
-  constructor(apiKey: string, opts: { fetchImpl?: typeof fetch; clientFactory?: (apiKey: string) => LinearClient } = {}) {
-    this.fetchImpl = opts.fetchImpl ?? fetch;
+  constructor(apiKey: string, opts: { clientFactory?: (apiKey: string) => LinearClient } = {}) {
     this.client = (opts.clientFactory ?? createLinearClient)(apiKey);
   }
 
@@ -113,14 +108,6 @@ export class LinearTracker implements Tracker {
     return issue.description ?? "";
   }
 
-  async writeDescription(issueId: string, description: string): Promise<void> {
-    await this.write((client) => client.updateIssue(issueId, { description }));
-  }
-
-  async postComment(issueId: string, body: string): Promise<void> {
-    await this.write((client) => client.createComment({ issueId, body }));
-  }
-
   async swapLabel(issueId: string, from: string, to: string): Promise<void> {
     await this.write(async (client) => {
       const issue = await client.issue(issueId);
@@ -133,20 +120,6 @@ export class LinearTracker implements Tracker {
       if (added.length === 0 && removed.length === 0) return;
       // One update, never two: labels in an exclusive Linear group cannot both sit on an issue, even briefly.
       await client.updateIssue(issueId, { addedLabelIds: added, removedLabelIds: removed });
-    });
-  }
-
-  async uploadFile(localPath: string, contentType: string): Promise<{ url: string }> {
-    const [{ size }, content] = await Promise.all([stat(localPath), readFile(localPath)]);
-    return this.write(async (client) => {
-      const payload = await client.fileUpload(contentType, basename(localPath), size);
-      const upload = payload.uploadFile;
-      if (!payload.success || upload == null) throw new Error("Linear did not return an upload URL");
-      const headers = new Headers({ "content-type": contentType, "cache-control": UPLOAD_CACHE_CONTROL });
-      for (const { key, value } of upload.headers) headers.set(key, value);
-      const response = await this.fetchImpl(upload.uploadUrl, { method: "PUT", headers, body: content });
-      if (!response.ok) throw new Error(`Upload PUT answered ${response.status}`);
-      return { url: upload.assetUrl };
     });
   }
 

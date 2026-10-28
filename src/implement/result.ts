@@ -33,9 +33,9 @@ export const validateImplementResult = (output: unknown, branchTypes: string[]):
 
 export const HandbackSchema = z.object({
   label: z.enum(["readyForHuman", "needsInfo"]),
-  /** One line, shown in the job warning and the comment's first line. */
+  /** One line, shown in the job warning. */
   reason: z.string(),
-  /** Longer text for the comment (output tails, paths); already redacted. */
+  /** Longer text kept in the job record (output tails, paths); already redacted. */
   detail: z.string(),
 });
 export type Handback = z.infer<typeof HandbackSchema>;

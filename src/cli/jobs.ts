@@ -39,9 +39,9 @@ const retryMode = (job: Job): string => {
   if (job.kind === "implement") {
     const stored = job.implementResult;
     if (stored === null) return `job ${job.id}: full run`;
-    if (stored.handback !== null) return `job ${job.id}: publish-only (hand-back stored; comment and labels, nothing to push)`;
-    if (job.pushedAt === null) return `job ${job.id}: publish-only (push ${job.branch ?? "?"} from the bundle, then comment and labels)`;
-    return `job ${job.id}: publish-only (${job.branch ?? "?"} already pushed; comment and labels only)`;
+    if (stored.handback !== null) return `job ${job.id}: publish-only (hand-back stored; labels only, nothing to push)`;
+    if (job.pushedAt === null) return `job ${job.id}: publish-only (push ${job.branch ?? "?"} from the bundle, then labels)`;
+    return `job ${job.id}: publish-only (${job.branch ?? "?"} already pushed; labels only)`;
   }
   return `job ${job.id}: fails (${job.kind} was removed)`;
 };

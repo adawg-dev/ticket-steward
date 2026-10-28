@@ -220,15 +220,16 @@ describe("runRestart", () => {
     expect(tracker.labelSwaps()).toEqual([]);
   });
 
-  it("with no open MR, says so on Linear and queues a fresh implement from the label", async () => {
+  it("with no open MR, says so on the loop's last MR and queues a fresh implement from the label", async () => {
     const id = handedBackLoop();
 
     const outcome = await runRestart(claimRestart(id, true), restartDeps());
 
     expect(outcome).toEqual({ status: "succeeded" });
-    expect(tracker.comments("issue-1")).toHaveLength(1);
-    expect(tracker.comments("issue-1")[0]).toContain("no open merge request for fix/API-1-adapter; starting a fresh implement");
-    expect(tracker.comments("issue-1")[0]).toContain("<!-- ticket-steward:loop");
+    expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes[0]).toContain("No open merge request for fix/API-1-adapter; Ticket Steward is starting a fresh implement.");
+    expect(gitlab.notes[0]).toContain("<!-- ticket-steward:loop");
+    expect(tracker.labelSwaps()).toEqual([]);
     const implement = queued("implement");
     expect(implement).toHaveLength(1);
     expect(implement[0]?.trigger).toMatchObject({ kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });

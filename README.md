@@ -143,10 +143,10 @@ With a `greptile` block the steward then runs a fix loop on the merge request: i
   `main`/`staging`/`dev` stay protected server-side. `steward doctor` checks the protection.
 - **Redaction.** Every `.env` value (the Linear API key included) and every
   credential-looking overlay value are redacted from transcripts, setup output and
-  anything written to the ticket, along with `sk-`, `glpat-`, `ghp_`, `lin_api_`,
+  anything posted on the merge request, along with `sk-`, `glpat-`, `ghp_`, `lin_api_`,
   `lin_oauth_` and `postgres://user:pass@` patterns.
-- **Linear key.** A personal API key restricted to the allowlisted teams, with read,
-  write, comment and upload permissions only. A 401 is not retried: the worker stops
+- **Linear key.** A personal API key restricted to the allowlisted teams, with read and
+  write permissions only (the steward only changes labels). A 401 is not retried: the worker stops
   claiming jobs and `/health` answers 503 until the steward restarts with a working key.
 - **Webhook.** HMAC-SHA256 signature and delivery-id dedupe.
 
