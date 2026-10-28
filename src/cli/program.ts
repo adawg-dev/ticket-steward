@@ -6,6 +6,7 @@ import { registerFix } from "./fix.js";
 import { registerImplement } from "./implement.js";
 import { registerInit } from "./init.js";
 import { registerJobs } from "./jobs.js";
+import { registerKeyproxy } from "./keyproxy.js";
 import { registerMcp } from "./mcp.js";
 import { registerMirror } from "./mirror.js";
 import { registerOverlay } from "./overlay.js";
@@ -34,5 +35,6 @@ export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   registerTemplates(program, ctx);
   registerMcp(program, ctx);
   registerTools(program, ctx);
+  registerKeyproxy(program, ctx);
   return program;
 };

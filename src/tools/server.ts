@@ -35,12 +35,12 @@ export const toolRoutes = (p: { spec: RunSpec; codehost: CodeHost; orbit: OrbitR
   return routes;
 };
 
-/** `--listen`: `127.0.0.1:<port>`, and nothing else, so the credentials behind the tools never answer off the pod. */
-export const parseListen = (value: string): { host: string; port: number } => {
+/** `--listen`: `127.0.0.1:<port>`, and nothing else, so the credentials behind a sidecar never answer off the pod. */
+export const parseListen = (value: string, sidecar = "the tools sidecar"): { host: string; port: number } => {
   const match = /^(.+):(\d{1,5})$/.exec(value);
   if (match === null) throw new Error(`--listen must be ${TOOLS_HOST}:<port>, got ${value}`);
   const [, host = "", port = ""] = match;
-  if (host !== TOOLS_HOST) throw new Error(`the tools sidecar listens on ${TOOLS_HOST} only, not ${host}`);
+  if (host !== TOOLS_HOST) throw new Error(`${sidecar} listens on ${TOOLS_HOST} only, not ${host}`);
   const parsed = Number(port);
   if (parsed < 1 || parsed > 65_535) throw new Error(`--listen port ${port} is out of range`);
   return { host, port: parsed };
@@ -77,7 +77,7 @@ const serveMcp = async (route: ToolRoutes[string], req: IncomingMessage, res: Se
  * loopback through the egress sidecar, so binding to 127.0.0.1 is not enough: a DNS-rebound name or a page's request
  * reaches the port too. Such requests carry a foreign Host or an Origin; the runner and the agent's MCP client send neither.
  */
-const fromThePod = (req: IncomingMessage, port: number): boolean =>
+export const fromThePod = (req: IncomingMessage, port: number): boolean =>
   req.headers.origin === undefined && (req.headers.host === `${TOOLS_HOST}:${port}` || req.headers.host === `localhost:${port}`);
 
 /**
