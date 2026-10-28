@@ -19,14 +19,25 @@ const toolResult = (result: PushResult): { content: Array<{ type: "text"; text: 
   ...(result.ok ? {} : { isError: true }),
 });
 
-/**
- * Serves the `push` tool. One push runs at a time: a second call waits for the first, so two pushes never race on the
- * branch or the store. A thrown error is a refusal the agent sees, never a crash of the server.
- */
-export const startPushMcpServer = async (p: { push: (request: PushRequest) => Promise<PushResult> }): Promise<void> => {
-  const server = new McpServer({ name: "ticket-steward-push", version: "0.1.0" });
-  let queue: Promise<unknown> = Promise.resolve();
+export type PushTool = (request: PushRequest) => Promise<PushResult>;
 
+export const PUSH_SERVER_INFO = { name: "ticket-steward-push", version: "0.1.0" };
+
+/**
+ * One push at a time: a second call waits for the first, so two pushes never race on the branch or the record. A thrown
+ * error is a refusal the agent sees. Wrap once per run, so every transport and session shares the queue.
+ */
+export const serialPushes = (push: PushTool): PushTool => {
+  let queue: Promise<unknown> = Promise.resolve();
+  return (request) => {
+    const run = queue.then(() => push(request).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: errorMessage(err) })));
+    queue = run;
+    return run;
+  };
+};
+
+/** Registers the `push` tool on `server`, whatever its transport; `push` should come from `serialPushes`. */
+export const registerPushTool = (server: McpServer, push: PushTool): void => {
   server.registerTool(
     "push",
     {
@@ -34,12 +45,13 @@ export const startPushMcpServer = async (p: { push: (request: PushRequest) => Pr
         "Push your commits (HEAD) to this ticket's branch. Commit first; every commit subject must start with the ticket identifier and a colon. The steward checks the commits, runs its checks and pushes; a refusal says what to fix before calling again.",
       inputSchema: PushInput,
     },
-    async (request) => {
-      const run = queue.then(() => p.push(request).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: errorMessage(err) })));
-      queue = run;
-      return toolResult(await run);
-    },
+    async (request) => toolResult(await push(request)),
   );
+};
 
+/** Serves the `push` tool over stdio, one push at a time. */
+export const startPushMcpServer = async (p: { push: PushTool }): Promise<void> => {
+  const server = new McpServer(PUSH_SERVER_INFO);
+  registerPushTool(server, serialPushes(p.push));
   await server.connect(new StdioServerTransport());
 };

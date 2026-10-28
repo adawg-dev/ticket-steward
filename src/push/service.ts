@@ -1,24 +1,41 @@
 import { existsSync } from "node:fs";
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { buildWorkspaceEnv } from "../brain/env.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { errorMessage, jobDirOf } from "../core/workspace.js";
 import { branchName } from "../implement/branch.js";
 import { BranchExistsError, guardRange, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, uncommittedPaths, type PushMode } from "../implement/git.js";
 import { CHECK_TAIL_BYTES, guardSecrets, lsRemoteSite, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
-import { gitOrThrow } from "../workspace/git.js";
-import type { RemoteCredentials } from "../workspace/mirror.js";
-import { runSetup } from "../workspace/setup.js";
+import type { Mirror, RemoteCredentials } from "../workspace/mirror.js";
+import { localCheckRunner, type CheckRunner } from "./checks.js";
+import { safeGitOrThrow } from "../tools/gitSafe.js";
 import type { PushLedger, RemoteHead } from "./ledger.js";
 import type { PushTarget } from "./target.js";
 
-const MINUTE_MS = 60_000;
+export const MINUTE_MS = 60_000;
 const PUSH_BUNDLE = "push.bundle";
 const PUSH_REPO = "push.git";
 const NO_REPLACE = { GIT_NO_REPLACE_OBJECTS: "1" };
 
-export type PushDeps = Pick<PipelineDeps, "config" | "secrets" | "mirror" | "redactor"> & { ledger: PushLedger };
+/** What the push guards against: the worktree paths the steward copied in, and the values no commit may carry. */
+export type PushGuard = { stewardFiles: string[]; secrets: string[] };
+
+/**
+ * `mirror` is the git directory the worktree must still use (the steward's mirror, or a run pod's clone). `checks` runs the
+ * steward's checks, in-process by default; `guard` defaults to the overlay's and the steward's own secrets.
+ */
+export type PushDeps = Pick<PipelineDeps, "config" | "secrets" | "redactor"> & {
+  mirror: Pick<Mirror, "path">;
+  ledger: PushLedger;
+  checks?: CheckRunner;
+  guard?: () => Promise<PushGuard>;
+};
+
+/** The local runtime's guard: the overlay files and skills the steward copied in, the overlay's and the steward's secrets. */
+export const localGuard = async (p: { overlayDir: string; skillsDir: string | undefined; secrets: Record<string, string | undefined> }): Promise<PushGuard> => {
+  const { files, secrets } = await guardSecrets(p.overlayDir, p.secrets);
+  return { stewardFiles: await stewardCopies(p.skillsDir, files), secrets };
+};
 
 export type PushResult = { ok: true; branch: string; sha: string; commits: number } | { ok: false; reason: string; detail: string };
 
@@ -37,7 +54,7 @@ export const remoteHeadOf =
 
 /** Commits in `base..head` whose subject does not start with `<identifier>: `. */
 const unprefixed = async (worktreePath: string, base: string, head: string, identifier: string): Promise<string[]> => {
-  const log = await gitOrThrow(["log", "--format=%h %s", `${base}..${head}`], worktreePath, NO_REPLACE);
+  const log = await safeGitOrThrow(["log", "--format=%h %s", `${base}..${head}`], worktreePath, NO_REPLACE);
   return log
     .split("\n")
     .filter((line) => line !== "")
@@ -71,7 +88,7 @@ const pushFromBundle = async (deps: PushDeps, jobDir: string, input: { remote: R
  * still pushes it.
  */
 const gitDirProblem = async (worktreePath: string, mirrorPath: string): Promise<string | null> => {
-  const common = await gitOrThrow(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktreePath);
+  const common = await safeGitOrThrow(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktreePath);
   if ((await realpath(common)) !== (await realpath(mirrorPath))) return `the git directory is ${common}, not the steward's mirror`;
   const hiding = ["shallow", join("info", "grafts")].find((file) => existsSync(join(common, file)));
   return hiding === undefined ? null : `${join(common, hiding)} is present`;
@@ -98,13 +115,12 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   if (tampered !== null) return refuse("the worktree's git directory was changed; restore it before pushing", tampered);
 
   // 1. Only committed work is pushed.
-  const { files: overlayFiles, secrets } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
-  const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
+  const { stewardFiles, secrets } = await (deps.guard ?? (() => localGuard({ overlayDir: deps.config.workspace.overlayDir, skillsDir: deps.config.workspace.skillsDir, secrets: deps.secrets })))();
   const dirty = await uncommittedPaths(worktreePath, stewardFiles);
   if (dirty.length > 0) return refuse("commit or discard your changes first", dirty.join("\n"));
 
   // 2. New, merge-free commits on the head the push starts from.
-  const sha = await gitOrThrow(["rev-parse", "HEAD"], worktreePath);
+  const sha = await safeGitOrThrow(["rev-parse", "HEAD"], worktreePath);
   if (sha === start.base) return refuse(`nothing to push: HEAD is already at ${short(start.base)}`);
   const problem = await linearRangeProblem(worktreePath, start.base, sha);
   if (problem !== null) return refuse(`HEAD must be new commits on top of ${short(start.base)}`, problem);
@@ -118,10 +134,8 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   if (!guarded.ok) return refuse(guarded.reason, guarded.detail);
 
   // 5. The steward's checks, against the original base so a filtered check covers the whole branch.
-  const checked = await runSetup(stewardChecks(settings.checks, target.baseSha), worktreePath, buildWorkspaceEnv(target.port), {
-    timeoutMs: settings.checksTimeoutMinutes * MINUTE_MS,
-    tailBytes: CHECK_TAIL_BYTES,
-  });
+  const checks = deps.checks ?? localCheckRunner({ worktreePath, port: target.port, timeoutMs: settings.checksTimeoutMinutes * MINUTE_MS, tailBytes: CHECK_TAIL_BYTES });
+  const checked = await checks.run(stewardChecks(settings.checks, target.baseSha));
   if (!checked.ok) return refuse("the steward's checks failed", deps.redactor.redact(checked.tail));
 
   // 6. The run can last an hour; never push for a ticket closed meanwhile.
@@ -157,6 +171,6 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
     return refuse("the push was rejected", deps.redactor.redact(errorMessage(err)));
   }
   await deps.ledger.landed(target, pushId, sha);
-  const commits = Number(await gitOrThrow(["rev-list", "--count", `${start.base}..${sha}`], worktreePath));
+  const commits = Number(await safeGitOrThrow(["rev-list", "--count", `${start.base}..${sha}`], worktreePath));
   return { ok: true, branch, sha, commits };
 };

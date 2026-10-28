@@ -6,6 +6,7 @@ import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushDeps } from "../../src/push/service.js";
 import type { PushTarget } from "../../src/push/target.js";
 import { openStores, type Stores } from "../../src/store/index.js";
+import { toolsGuard } from "../../src/tools/guard.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
@@ -195,6 +196,29 @@ describe("pushFromWorktree refusals", () => {
 
     expect(result).toMatchObject({ ok: false, reason: "the steward's checks failed" });
     expect(result.ok ? "" : result.detail).toContain(`*** ${repo.sha}`);
+  });
+
+  it("takes the checks' result from its check runner", async () => {
+    await agentCommit("API-1: keep the last chunk");
+    const ran: string[][] = [];
+    const checks = { run: (commands: string[]) => (ran.push(commands), Promise.resolve({ ok: false, tail: "lint failed" })) };
+
+    const result = await push(createTarget(), "fix", { ...makeDeps(makeConfig(["pnpm lint {{baseSha}}"])), checks });
+
+    expect(result).toEqual({ ok: false, reason: "the steward's checks failed", detail: "lint failed" });
+    expect(ran).toEqual([[`pnpm lint ${repo.sha}`]]);
+  });
+
+  it("refuses a commit carrying a placeholder from the guard file", async () => {
+    const placeholder = "STEWARD_PH_STRIPE_SECRET_KEY_0123456789abcdef";
+    const guardFile = join(repo.root, "guard.json");
+    await writeFile(guardFile, JSON.stringify(["sk_test_real_value", placeholder]));
+    await agentCommit("API-1: config", `export const key = "${placeholder}";\n`);
+    const deps = makeDeps();
+
+    const result = await push(createTarget(), "fix", { ...deps, guard: toolsGuard({ guardFile, overlayDir: repo.overlayDir, skillsDir: undefined, secrets: deps.secrets }) });
+
+    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/adapter.ts" });
   });
 
   it("refuses when the ticket was closed during the run, and pushes nothing", async () => {

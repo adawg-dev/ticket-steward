@@ -1,6 +1,7 @@
 import { mkdir, open, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execa } from "execa";
+import { filterOverrides, safeGit, safeGitArgs, safeGitEnv, safeGitOrThrow } from "../tools/gitSafe.js";
 import { git, gitEnvRecord, gitOrThrow, scrubCredentials } from "../workspace/git.js";
 import type { RemoteCredentials } from "../workspace/mirror.js";
 import { branchRefPattern, carriesTicket } from "./branch.js";
@@ -43,7 +44,7 @@ type ScanDiff = { ok: true; diff: string } | { ok: false; reason: string };
 
 /** One file's diff for the secret scan. Fails closed: a git error or output over `maxBytes` is a refusal, never a partial pass. */
 const scanDiff = async (cwd: string, args: string[], env: Record<string, string>, maxBytes: number): Promise<ScanDiff> => {
-  const result = await execa("git", args, { cwd, env: { ...gitEnvRecord(), ...env }, extendEnv: false, reject: false, maxBuffer: { stdout: maxBytes } });
+  const result = await execa("git", [...safeGitArgs(), ...(await filterOverrides(cwd)), ...args], { cwd, env: { ...gitEnvRecord(), ...safeGitEnv(), ...env }, extendEnv: false, reject: false, maxBuffer: { stdout: maxBytes } });
   if (result.isMaxBuffer) return { ok: false, reason: "the change is too large to scan for secrets" };
   if (result.exitCode !== 0) return { ok: false, reason: "the change could not be scanned for secrets" };
   return { ok: true, diff: result.stdout };
@@ -54,7 +55,7 @@ const scanDiff = async (cwd: string, args: string[], env: Record<string, string>
  * Refuses an empty change, steward-copied files (overlay, skills) and added lines carrying a secret value.
  */
 const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: Record<string, string> = {}, allowEmpty = false): Promise<GuardResult> => {
-  const paths = (await gitOrThrow(["diff", "--name-only", "-z", ...range], cwd, env)).split("\0").filter((path) => path !== "");
+  const paths = (await safeGitOrThrow(["diff", "--name-only", "-z", ...range], cwd, env)).split("\0").filter((path) => path !== "");
   if (paths.length === 0 && !allowEmpty) return { ok: false, reason: "the agent reported the work as implemented but changed nothing", detail: "" };
   const steward = new Set(input.stewardFiles);
   const copied = paths.filter((path) => steward.has(path));
@@ -90,7 +91,7 @@ export const guardRange = async (input: GuardInput & { worktreePath: string; bas
   const overall = await guardDiff(input.worktreePath, [input.baseSha, input.headSha], input, NO_REPLACE);
   if (!overall.ok) return overall;
   const secrets = usableSecrets(input.secretValues);
-  const commits = (await gitOrThrow(["rev-list", "--reverse", "--parents", `${input.baseSha}..${input.headSha}`], input.worktreePath, NO_REPLACE))
+  const commits = (await safeGitOrThrow(["rev-list", "--reverse", "--parents", `${input.baseSha}..${input.headSha}`], input.worktreePath, NO_REPLACE))
     .split("\n")
     .filter((line) => line !== "")
     .map((line) => line.split(" "));
@@ -100,7 +101,7 @@ export const guardRange = async (input: GuardInput & { worktreePath: string; bas
       if (!own.ok) return { ...own, detail: own.detail === "" ? `commit ${sha.slice(0, 7)}` : `commit ${sha.slice(0, 7)}: ${own.detail}` };
     }
     // The agent wrote the messages and its commit hooks could rewrite them: they are pushed too, so they get the same scan.
-    const message = messageOf(await gitOrThrow(["cat-file", "commit", sha], input.worktreePath, NO_REPLACE));
+    const message = messageOf(await safeGitOrThrow(["cat-file", "commit", sha], input.worktreePath, NO_REPLACE));
     if (secrets.some((secret) => message.includes(secret))) return { ok: false, reason: "the commit message contains a secret value", detail: `commit ${sha.slice(0, 7)}` };
   }
   return overall;
@@ -111,9 +112,9 @@ export const guardRange = async (input: GuardInput & { worktreePath: string; bas
  * The range is what a fast-forward from `baseSha` would push.
  */
 export const linearRangeProblem = async (cwd: string, baseSha: string, sha: string): Promise<string | null> => {
-  const ancestor = await git(["merge-base", "--is-ancestor", baseSha, sha], cwd, NO_REPLACE);
+  const ancestor = await safeGit(["merge-base", "--is-ancestor", baseSha, sha], cwd, NO_REPLACE);
   if (ancestor.exitCode !== 0) return `${sha.slice(0, 7)} does not descend from ${baseSha.slice(0, 7)}`;
-  const lines = (await gitOrThrow(["rev-list", "--parents", `${baseSha}..${sha}`], cwd, NO_REPLACE)).split("\n").filter((line) => line !== "");
+  const lines = (await safeGitOrThrow(["rev-list", "--parents", `${baseSha}..${sha}`], cwd, NO_REPLACE)).split("\n").filter((line) => line !== "");
   if (lines.length === 0) return `there are no commits on top of ${baseSha.slice(0, 7)}`;
   const merge = lines.find((line) => line.split(" ").length !== 2);
   if (merge !== undefined) return `${merge.slice(0, 7)} is a merge commit; the history on top of ${baseSha.slice(0, 7)} must be linear`;
@@ -127,8 +128,8 @@ export const linearRangeProblem = async (cwd: string, baseSha: string, sha: stri
  */
 export const uncommittedPaths = async (worktreePath: string, stewardFiles: string[]): Promise<string[]> => {
   const steward = new Set(stewardFiles);
-  const changed = await gitOrThrow(["diff", "--name-only", "-z", "--no-renames", "HEAD"], worktreePath, NO_REPLACE);
-  const untracked = await gitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], worktreePath);
+  const changed = await safeGitOrThrow(["diff", "--name-only", "-z", "--no-renames", "HEAD"], worktreePath, NO_REPLACE);
+  const untracked = await safeGitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], worktreePath);
   const paths = [...changed.split("\0"), ...untracked.split("\0")].filter((path) => path !== "" && !steward.has(path));
   return [...new Set(paths)];
 };
@@ -139,7 +140,7 @@ export const uncommittedPaths = async (worktreePath: string, stewardFiles: strin
  */
 export const unpushedWork = async (input: { worktreePath: string; pushedSha: string; stewardFiles: string[] }): Promise<{ uncommitted: string[]; commits: string[]; summary: string }> => {
   const uncommitted = await uncommittedPaths(input.worktreePath, input.stewardFiles);
-  const log = await gitOrThrow(["log", "--format=%h %s", `${input.pushedSha}..HEAD`], input.worktreePath, NO_REPLACE);
+  const log = await safeGitOrThrow(["log", "--format=%h %s", `${input.pushedSha}..HEAD`], input.worktreePath, NO_REPLACE);
   const commits = log.split("\n").filter((line) => line !== "");
   const summary = [
     ...(uncommitted.length > 0 ? ["uncommitted:", ...uncommitted.map((path) => `  ${path}`)] : []),
@@ -150,7 +151,7 @@ export const unpushedWork = async (input: { worktreePath: string; pushedSha: str
 
 /** Keeps the commit on disk after the worktree is gone, so a failed push can be retried. */
 export const saveBundle = async (worktreePath: string, baseSha: string, bundlePath: string): Promise<void> => {
-  await gitOrThrow(["bundle", "create", "--quiet", bundlePath, `${baseSha}..HEAD`], worktreePath);
+  await safeGitOrThrow(["bundle", "create", "--quiet", bundlePath, `${baseSha}..HEAD`], worktreePath);
 };
 
 const BUNDLE_SIGNATURES = new Set(["# v2 git bundle", "# v3 git bundle"]);

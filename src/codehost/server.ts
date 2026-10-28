@@ -18,9 +18,12 @@ const PermalinkInput = z.object({
   line: z.number().int().positive().optional().describe("Line number to anchor"),
 });
 
-export const startCodeHostMcpServer = async (p: { codehost: CodeHost; worktreePath: string; sha: string }): Promise<void> => {
-  const server = new McpServer({ name: "ticket-steward-codehost", version: "0.1.0" });
+export type CodeHostTools = { codehost: CodeHost; worktreePath: string; sha: string };
 
+export const CODEHOST_SERVER_INFO = { name: "ticket-steward-codehost", version: "0.1.0" };
+
+/** Registers recent_changes and permalink on `server`, whatever its transport (stdio locally, HTTP in a run pod). */
+export const registerCodeHostTools = (server: McpServer, p: CodeHostTools): void => {
   server.registerTool(
     "recent_changes",
     {
@@ -39,7 +42,11 @@ export const startCodeHostMcpServer = async (p: { codehost: CodeHost; worktreePa
     { description: "Permanent code-host link to a file (and line) at the checked-out commit", inputSchema: PermalinkInput },
     async ({ path, line }) => ({ content: [{ type: "text", text: p.codehost.permalink(path, p.sha, line) }] }),
   );
+};
 
+export const startCodeHostMcpServer = async (p: CodeHostTools): Promise<void> => {
+  const server = new McpServer(CODEHOST_SERVER_INFO);
+  registerCodeHostTools(server, p);
   await server.connect(new StdioServerTransport());
 };
 

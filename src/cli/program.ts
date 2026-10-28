@@ -11,6 +11,7 @@ import { registerMirror } from "./mirror.js";
 import { registerOverlay } from "./overlay.js";
 import { registerServe } from "./serve.js";
 import { registerTemplates } from "./templates.js";
+import { registerTools } from "./tools.js";
 
 export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   const program = new Command("steward")
@@ -32,5 +33,6 @@ export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   registerJobs(program, ctx);
   registerTemplates(program, ctx);
   registerMcp(program, ctx);
+  registerTools(program, ctx);
   return program;
 };

@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { StdioMcpServerSpec } from "../brain/types.js";
 import type { Secrets } from "../config/load.js";
 import type { CodeHostConfig } from "../config/schema.js";
+import { safeGitConfigEnv } from "../tools/gitSafe.js";
 import { orbitEnv, type OrbitExec } from "./run.js";
 
 export const ORBIT_TOOL_TIMEOUT_MS = 60_000;
@@ -36,7 +37,8 @@ export interface OrbitRemote {
 
 /** The remote's env and reason it is unavailable, from the config's code host and `.env`. */
 export const orbitRemote = (p: { exec: OrbitExec; dataDir: string; worktreePath: string; codehost: CodeHostConfig; secrets: Secrets }): OrbitRemote => {
-  const base: OrbitRemote = { exec: p.exec, cwd: p.worktreePath, env: orbitEnv(p.dataDir), secrets: [] };
+  // Orbit runs git in the agent's worktree with the token in its env: the worktree's config must run nothing there.
+  const base: OrbitRemote = { exec: p.exec, cwd: p.worktreePath, env: { ...orbitEnv(p.dataDir), ...safeGitConfigEnv() }, secrets: [] };
   if (p.codehost.kind !== "gitlab") return { ...base, unavailable: "the code host is not GitLab" };
   const token = p.secrets.GITLAB_TOKEN;
   if (token === undefined || token === "") return { ...base, unavailable: "GITLAB_TOKEN is not set" };
@@ -88,10 +90,10 @@ export const runOrbitContext = (remote: OrbitRemote, refs: string[]): Promise<To
   return runOrbitTool(remote, ["context", "--", ...refs]);
 };
 
-/** Serves read-only Orbit tools. `--` keeps a query or ref from being read as an Orbit flag. */
-export const startOrbitMcpServer = async (remote: OrbitRemote): Promise<void> => {
-  const server = new McpServer({ name: "ticket-steward-orbit", version: "0.1.0" });
+export const ORBIT_SERVER_INFO = { name: "ticket-steward-orbit", version: "0.1.0" };
 
+/** Registers the read-only Orbit tools on `server`. `--` keeps a query or ref from being read as an Orbit flag. */
+export const registerOrbitTools = (server: McpServer, remote: OrbitRemote): void => {
   server.registerTool(
     "orbit_query",
     {
@@ -117,7 +119,12 @@ export const startOrbitMcpServer = async (remote: OrbitRemote): Promise<void> =>
     },
     async ({ refs }) => runOrbitContext(remote, refs),
   );
+};
 
+/** Serves the Orbit tools over stdio. */
+export const startOrbitMcpServer = async (remote: OrbitRemote): Promise<void> => {
+  const server = new McpServer(ORBIT_SERVER_INFO);
+  registerOrbitTools(server, remote);
   await server.connect(new StdioServerTransport());
 };
 
