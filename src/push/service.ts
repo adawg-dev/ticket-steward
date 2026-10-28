@@ -79,7 +79,10 @@ export const settleUnfinished = async (deps: PushDeps, target: PushTarget, remot
   if (branches.some(({ ref, sha }) => ref === `refs/heads/${latest.branch}` && sha === latest.sha)) markLanded(deps, target, latest);
 };
 
-/** A loop pushes onto its head; a job that pushed already this run onto its last push; otherwise `target` decides. */
+/**
+ * A loop pushes onto its head; a job that pushed already onto its last push, or onto the head the job recorded when the
+ * steward pushed it before push rows existed; otherwise `target` decides.
+ */
 const startOf = (deps: PushDeps, target: PushTarget): Start | PushResult => {
   if (target.loopId !== null) {
     const loop = deps.stores.loops.get(target.loopId);
@@ -88,6 +91,8 @@ const startOf = (deps: PushDeps, target: PushTarget): Start | PushResult => {
   }
   const last = deps.stores.pushes.latestPushed(target.jobId);
   if (last !== null) return { kind: "fastForward", branch: last.branch, base: last.sha };
+  const job = deps.stores.jobs.get(target.jobId);
+  if (job !== null && job.pushedAt !== null && job.branch !== null && job.commitSha !== null) return { kind: "fastForward", branch: job.branch, base: job.commitSha };
   if (target.mode === "create") return { kind: "create", base: target.baseSha };
   if (target.branch === null) return refuse("this run has no branch to push to");
   return { kind: "fastForward", branch: target.branch, base: target.baseSha };

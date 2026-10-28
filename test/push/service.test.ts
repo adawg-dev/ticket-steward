@@ -253,6 +253,20 @@ describe("pushFromWorktree pushes", () => {
     expect(stores.loops.get(loopId)).toMatchObject({ headSha: head, pendingPush: null });
   });
 
+  it("fast-forwards from a job the old steward-side code pushed, which has no push rows", async () => {
+    const first = await agentCommit("API-1: keep the last chunk");
+    await git(worktree.path, ["push", "-q", repo.repo, `${first}:refs/heads/${BRANCH}`]);
+    stores.jobs.recordCommit(jobId, BRANCH, first);
+    stores.jobs.markPushed(jobId);
+    const second = await agentCommit("API-1: and test it", "test\n", "test/adapter.test.ts");
+
+    const result = await push(createTarget({ mode: "fastForward", branch: BRANCH }), null);
+
+    expect(result).toEqual({ ok: true, branch: BRANCH, sha: second, commits: 1 });
+    expect(await remoteHead(BRANCH)).toBe(second);
+    expect(stores.pushes.forJob(jobId)).toMatchObject([{ branch: BRANCH, sha: second, previousSha: first }]);
+  });
+
   it("settles a push that landed before it was recorded and fast-forwards from it", async () => {
     const first = await agentCommit("API-1: keep the last chunk");
     // A push that landed, then the steward stopped before marking it.
