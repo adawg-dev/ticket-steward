@@ -119,7 +119,7 @@ const converse = async (ctx: CliContext, runtime: Runtime, ticket: { id: string;
     const pushing = push === undefined ? "nothing is pushed yet, so it has no push tool" : `the push tool pushes to ${push.branch ?? ""}`;
     println(ctx, `resuming ${ticket.identifier}'s agent session in ${worktree.path} ${where}; ${pushing}`);
     const run = ctx.factories?.spawnInteractive ?? spawnInteractive;
-    const code = await run(claudeExecutable(), chatArgs({ sessionId: session.sessionId, model: config.brain.model, settings, mcpServers }), { cwd: worktree.path, env });
+    const code = await run(claudeExecutable(), chatArgs({ sessionId: session.sessionId, model: config.brain.model, settings, mcpServers }), { cwd: worktree.path, env: input.env });
     const leftover = await leftoverWork(deps, session, worktree, push);
     if (leftover !== "") println(ctx, `Left in the agent's worktree, not pushed:\n${leftover}`);
     return code;

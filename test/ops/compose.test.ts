@@ -93,6 +93,14 @@ describe("images", () => {
     expect(text).not.toMatch(/:latest\b/);
   });
 
+  it("installs native glab 1.125.0 and Orbit 0.161.0, each checked against a pinned sha256", async () => {
+    const text = await readFile("Dockerfile", "utf8");
+    expect(text).toMatch(/^ARG GLAB_VERSION=1\.125\.0$/m);
+    expect(text).toMatch(/^ARG ORBIT_VERSION=0\.161\.0$/m);
+    for (const name of ["GLAB_SHA256_AMD64", "GLAB_SHA256_ARM64", "ORBIT_SHA256_AMD64", "ORBIT_SHA256_ARM64"]) expect(text).toMatch(new RegExp(`^ARG ${name}=[0-9a-f]{64}$`, "m"));
+    expect(text.match(/sha256sum -c -/g)).toHaveLength(2);
+  });
+
   it("serves the unchanged helper protocol on the shared socket, one helper per connection", async () => {
     const serve = await readFile("ops/slot-helper/serve.sh", "utf8");
     expect(serve).toContain("UNIX-LISTEN:/run/slot/steward-slot.sock,fork,");

@@ -650,7 +650,7 @@ same, bind-mounted from the host, so the steward behaves as it does under system
 | --- | --- | --- |
 | `dind` | `docker:29.2.1-dind`, privileged | dockerd for the slot containers, on a unix socket only (no 2375/2376 listener); publishes port 3020 to `127.0.0.1:${STEWARD_PORT}` |
 | `slot-helper` | `ops/slot-helper/Dockerfile` | the same `ops/steward-slot`, served by socat on `/run/slot/steward-slot.sock` (one helper per connection, owner `STEWARD_UID:STEWARD_GID`, mode 0660); the only service with the docker socket |
-| `steward` | `Dockerfile` | `steward serve` as `STEWARD_UID:STEWARD_GID`; Node 24, pnpm 11.13.0, git, psql, Playwright Chromium; no Docker CLI or socket |
+| `steward` | `Dockerfile` | `steward serve` as `STEWARD_UID:STEWARD_GID`; Node 24, pnpm 11.13.0, git, psql, Playwright Chromium, native `glab` 1.125.0 and the Orbit CLI 0.161.0 (§1.12); no Docker CLI or socket |
 
 `slot-helper` and `steward` share `dind`'s network namespace, so slot ports that dind publishes on `127.0.0.1` are on
 `127.0.0.1` for the steward and the agent exactly as on the host: `slots.env` and `appPortBase` stay unchanged. The
@@ -710,6 +710,30 @@ images), set `slots.socket` back to `/run/steward-slot.sock`, `systemctl enable 
 - `cannot reach the slot helper at /run/slot/steward-slot.sock`: `ENOENT`, `slot-helper` is not running
   (`ps`, `logs slot-helper`); `EACCES`, the steward runs as another uid/gid than the socket's owner (set both through `STEWARD_UID`/`STEWARD_GID`, never `user:` alone).
 - Doctor's `check` fails with `image … is not pulled`: pull it through `slot-helper` as in Setup.
+
+### 1.12 Orbit for the agents
+
+[Orbit](https://docs.gitlab.com/orbit/) gives the agents a code graph of their checkout and, when GitLab allows it,
+the GitLab Knowledge Graph. The image installs native `glab` 1.125.0 and the Orbit CLI 0.161.0 (its static musl
+build) from their release downloads, each checked against a sha256 pinned in the `Dockerfile`, and never updates them
+at runtime. A host install puts `orbit` on the steward user's `PATH` itself; without it agents work as before.
+
+- **Local graph.** Before every implement, fix and chat run (and `steward chat`), the steward runs
+  `orbit workspace index .` in the worktree (120 s limit) with `ORBIT_DATA_DIR=<dataDir>/orbit`, where the DuckDB
+  files and Orbit's settings live. A failed index logs `orbit index failed` and the run goes on. The agent's shell
+  gets the same `ORBIT_DATA_DIR`, so its `orbit grep` and `orbit context` read that graph; they need no credentials.
+- **Remote.** The brain gets the `orbit` MCP server (`steward mcp orbit`), with the read-only tools `orbit_query`,
+  `orbit_schema` and `orbit_context`. Like the codehost and push servers it loads `GITLAB_TOKEN` from the config's
+  `.env` itself and hands it only to the Orbit processes it runs (60 s limit, output cut at 64 KiB), so the brain
+  still receives no GitLab credential. Any failure is a tool error starting `Orbit remote is unavailable:`; it never
+  fails the job.
+- **Doctor** prints `[ok] orbit: 0.161.0` when the binary runs and `orbit remote` for
+  `orbit status --full-path <codehost.project>` with `GITLAB_TOKEN`. Both only warn.
+
+As of 2026-10-28 the Orbit API refuses the project access token (`Orbit is not available for your user`, HTTP 403 on
+queries): Orbit is enabled per user, and the token's bot user is not one. Until GitLab allows it, doctor warns
+`orbit remote` and the `orbit_*` tools return that error; the local graph works regardless. `glab orbit` with a
+person's own login is unaffected.
 
 ## 2. Why the overlay holds sandbox credentials
 

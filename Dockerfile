@@ -42,6 +42,37 @@ RUN node -e 'const { createRequire } = require("module"); const r = createRequir
   && chmod -R a+rX /opt/ms-playwright
 # The Claude Code CLI comes with the Agent SDK (its platform package in node_modules), at the version it expects.
 
+# Native glab and the Orbit CLI for the agents (docs/ops.md, "Orbit"), pinned and checksum-checked, never auto-updated.
+# Orbit is its static musl build, the one glab installs and the one verified on the dev host; its local graph (DuckDB)
+# crashes under the snap-packaged glab, so both come from their release downloads.
+ARG TARGETARCH=amd64
+ARG GLAB_VERSION=1.125.0
+ARG GLAB_SHA256_AMD64=c7325f14e408be26fcc1ba5f7a7f71f02c1a20aa3ac6018a57fb04901ea5549a
+ARG GLAB_SHA256_ARM64=1b0ed76664cff16a3d183413931f75601d3054869c24dee6d528f930fec8c9b3
+ARG ORBIT_VERSION=0.161.0
+ARG ORBIT_SHA256_AMD64=9cf4a6fd3c902250343de6797c93931690cb1328da2924138a6619f164588992
+ARG ORBIT_SHA256_ARM64=595da171fc6b94bc0ea35736502ed9a7c30ce3266ff53f7410cd8ddd38eb0eff
+RUN set -eu; \
+  case "${TARGETARCH}" in \
+    amd64) glab_arch=amd64; orbit_arch=x86_64; glab_sha="${GLAB_SHA256_AMD64}"; orbit_sha="${ORBIT_SHA256_AMD64}" ;; \
+    arm64) glab_arch=arm64; orbit_arch=aarch64; glab_sha="${GLAB_SHA256_ARM64}"; orbit_sha="${ORBIT_SHA256_ARM64}" ;; \
+    *) echo "unsupported TARGETARCH ${TARGETARCH}" >&2; exit 1 ;; \
+  esac; \
+  tmp="$(mktemp -d)"; \
+  curl -fsSL -o "${tmp}/glab.tar.gz" "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${glab_arch}.tar.gz"; \
+  echo "${glab_sha}  ${tmp}/glab.tar.gz" | sha256sum -c -; \
+  tar -xzf "${tmp}/glab.tar.gz" -C "${tmp}" bin/glab; \
+  install -m 0755 "${tmp}/bin/glab" /usr/local/bin/glab; \
+  curl -fsSL -o "${tmp}/orbit.tar.gz" "https://gitlab.com/api/v4/projects/77960826/packages/generic/orbit-cli/${ORBIT_VERSION}/orbit-cli-linux-musl-${orbit_arch}.tar.gz"; \
+  echo "${orbit_sha}  ${tmp}/orbit.tar.gz" | sha256sum -c -; \
+  tar -xzf "${tmp}/orbit.tar.gz" -C "${tmp}" orbit; \
+  install -m 0755 "${tmp}/orbit" /usr/local/bin/orbit; \
+  rm -rf "${tmp}"; \
+  glab --version; \
+  test "$(orbit version)" = "${ORBIT_VERSION}"
+# glab finds the Orbit CLI here instead of downloading its own.
+ENV GLAB_ORBIT_CLI_BINARY_PATH=/usr/local/bin/orbit
+
 # uid 1001 is the default; on the live host compose runs it as the existing steward user (STEWARD_UID/STEWARD_GID).
 RUN groupadd --gid 1001 steward && useradd --uid 1001 --gid 1001 --home-dir /var/lib/ticket-steward --no-create-home --shell /bin/bash steward
 # The host install's steward user has its home at the data dir; pnpm's store and caches land there too.

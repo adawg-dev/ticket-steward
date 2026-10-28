@@ -1,5 +1,7 @@
 import type { Command } from "commander";
 import { createCodeHost, startCodeHostMcpServer } from "../codehost/index.js";
+import { execOrbit } from "../orbit/run.js";
+import { orbitRemote, startOrbitMcpServer } from "../orbit/server.js";
 import { pushFromWorktree, type PushResult } from "../push/service.js";
 import { startPushMcpServer } from "../push/server.js";
 import { PushTargetSchema, type PushTarget } from "../push/target.js";
@@ -44,5 +46,16 @@ export const registerMcp = (program: Command, ctx: CliContext): void => {
             (err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: redactor.redact(errorMessage(err)) }),
           ),
       });
+    });
+
+  mcp
+    .command("orbit")
+    .description("stdio MCP server exposing read-only Orbit tools for one worktree; loads GITLAB_TOKEN from the config's .env")
+    .requiredOption("--workspace <path>", "absolute worktree path")
+    .action(async (opts: { workspace: string }) => {
+      const { config: configPath } = program.opts<{ config?: string }>();
+      if (configPath === undefined) return fail(ctx, "mcp orbit requires --config <absolute path to steward.config.ts>");
+      const { config, secrets } = await ctx.loadConfig({ configPath });
+      await startOrbitMcpServer(orbitRemote({ exec: execOrbit, dataDir: config.dataDir, worktreePath: opts.workspace, codehost: config.codehost, secrets }));
     });
 };

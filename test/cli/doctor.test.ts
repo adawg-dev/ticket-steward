@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
 import type { McpServerSpec } from "../../src/brain/types.js";
+import type { OrbitExec } from "../../src/orbit/run.js";
 import type { SlotPorts } from "../../src/workspace/slots.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
@@ -24,8 +25,17 @@ const fakeCodehostMcpSpec = (p: { worktreePath: string; sha: string }): McpServe
   env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
 });
 
+/** Orbit 0.161.0 whose remote API refuses the token, the way it refuses a project access token today. */
+const orbitCalls: Array<{ args: string[]; env: Record<string, string> }> = [];
+const refusedOrbit: OrbitExec = async (args, opts) => {
+  orbitCalls.push({ args, env: opts.env });
+  if (args[0] === "version") return { exitCode: 0, stdout: "0.161.0\n", stderr: "", timedOut: false };
+  return { exitCode: 1, stdout: "", stderr: "Orbit access denied\n", timedOut: false };
+};
+
 beforeEach(async () => {
   vi.restoreAllMocks();
+  orbitCalls.length = 0;
   dir = await tmpConfigDir();
   repo = await tmpRepo("{{ticket}}");
   home = join(dir, "home");
@@ -81,7 +91,7 @@ describe("steward doctor", () => {
       serverPort: await freeTcpPort(),
       skillsDir,
     });
-    const { ctx, stdout } = makeContext({ fetchImpl: unhealthyFetch, factories: { codehostMcpSpec: fakeCodehostMcpSpec } });
+    const { ctx, stdout } = makeContext({ fetchImpl: unhealthyFetch, factories: { codehostMcpSpec: fakeCodehostMcpSpec, orbitExec: refusedOrbit } });
 
     await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toEqual(new ExitSignal(1));
 
@@ -107,7 +117,24 @@ describe("steward doctor", () => {
     expect(lines[17]?.startsWith("[ok] playwright mcp: ")).toBe(true);
     expect(lines[18]).toBe(`[ok] chromium: ${join(browsers, "chromium-1000")}`);
     expect(lines[19]).toBe(`[ok] port: ${port} is free`);
-    expect(lines.length).toBe(20);
+    expect(lines[20]).toBe("[ok] orbit: 0.161.0");
+    expect(lines[21]).toBe("[warn] orbit remote: Orbit remote is unavailable: Orbit access denied; the agents' orbit_* tools return this error");
+    expect(lines.length).toBe(22);
+    expect(orbitCalls.map((call) => call.args)).toEqual([["version"], ["status", "--full-path", "acme/repo", "--response-format", "raw"]]);
+    expect(orbitCalls[1]?.env).toMatchObject({ GITLAB_TOKEN: "glpat-token", GITLAB_URL: "https://gitlab.example" });
+    expect(orbitCalls[0]?.env).not.toHaveProperty("GITLAB_TOKEN");
+  });
+
+  it("warns, without failing, when Orbit is not installed", async () => {
+    await writeFile(join(dir, ".env"), `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
+    const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, fetchUrl: repo.repo, port: await freeTcpPort(), serverPort: await freeTcpPort() });
+    const missing: OrbitExec = async () => ({ exitCode: null, stdout: "", stderr: "spawn orbit ENOENT", timedOut: false });
+    const { ctx, stdout } = makeContext({ fetchImpl: unhealthyFetch, factories: { codehostMcpSpec: fakeCodehostMcpSpec, orbitExec: missing } });
+
+    await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"]).catch(() => undefined);
+
+    expect(stdout()).toContain("[warn] orbit: orbit did not run (spawn orbit ENOENT); agents work without Orbit\n");
+    expect(stdout()).toContain("[warn] orbit remote: Orbit remote is unavailable: spawn orbit ENOENT;");
   });
 
   it("fails when no chromium is installed under PLAYWRIGHT_BROWSERS_PATH", async () => {

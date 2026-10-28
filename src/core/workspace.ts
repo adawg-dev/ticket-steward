@@ -10,6 +10,9 @@ import { codehostMcpSpec } from "../codehost/server.js";
 import { pushMcpSpec, type PushTarget } from "../push/target.js";
 import { appPortOf } from "../config/schema.js";
 import { logger } from "../log.js";
+import { indexWorktree } from "../orbit/index.js";
+import { orbitDataDir } from "../orbit/run.js";
+import { orbitMcpSpec } from "../orbit/server.js";
 import { DB_FILENAME } from "../store/db.js";
 import type { AttemptPatch } from "../store/index.js";
 import { copyOverlay, OverrideKeysError } from "../workspace/overlay.js";
@@ -105,7 +108,8 @@ export const startSlot = async (ctx: RunContext, deps: PipelineDeps, appPort: nu
 
 /**
  * Lays the steward's files into a worktree for a run on `port` (and `slot`, with `slots`): the overlay (port-rewritten and
- * slot-overridden) and skills, then, with `setup`, `workspace.setup`. Returns the redacted setup tail when setup fails.
+ * slot-overridden) and skills, then, with `setup`, `workspace.setup`, then indexes it for Orbit (best effort). Returns the
+ * redacted setup tail when setup fails.
  */
 export const furnishWorktree = async (
   deps: Pick<PipelineDeps, "config" | "redactor" | "signal">,
@@ -120,13 +124,16 @@ export const furnishWorktree = async (
   const overrides = slot === null || config.slots === undefined ? {} : { overrides: renderSlotEnv(config.slots.env, slot) };
   await copyOverlay(config.workspace.overlayDir, worktreePath, { ...portRewrite, ...overrides });
   await copySkills(config.workspace.skillsDir, worktreePath);
-  if (!placement.setup) return null;
-  const setup = await runSetup(config.workspace.setup, worktreePath, env, {
-    timeoutMs: config.workspace.setupTimeoutMinutes * MINUTE_MS,
-    tailBytes: SETUP_TAIL_BYTES,
-    ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-  });
-  return setup.ok ? null : { setupTail: deps.redactor.redact(setup.tail) };
+  if (placement.setup) {
+    const setup = await runSetup(config.workspace.setup, worktreePath, env, {
+      timeoutMs: config.workspace.setupTimeoutMinutes * MINUTE_MS,
+      tailBytes: SETUP_TAIL_BYTES,
+      ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+    });
+    if (!setup.ok) return { setupTail: deps.redactor.redact(setup.tail) };
+  }
+  await indexWorktree(worktreePath, config.dataDir);
+  return null;
 };
 
 /** Brings the job's slot up (with `slots`), creates the worktree at `sha`, then lays down the artifacts dir, overlay and skills, and runs setup. */
@@ -186,7 +193,8 @@ export const brainInput = (
     artifactsDir: paths.artifactsDir,
     transcriptPath: paths.transcriptPath,
     prompt,
-    env,
+    // The agent's own `orbit grep` and `orbit context` read the graph indexed before the run; no credential comes with it.
+    env: { ...env, ORBIT_DATA_DIR: orbitDataDir(config.dataDir) },
     timeoutMs: (limits?.timeoutMinutes ?? config.brain.timeoutMinutes) * MINUTE_MS,
     maxTurns: limits?.maxTurns ?? config.brain.maxTurns,
     model: config.brain.model,
@@ -194,6 +202,7 @@ export const brainInput = (
     mcpServers: {
       codehost: codehostMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path, sha: worktree.sha }),
       playwright: playwrightMcpSpec(),
+      orbit: orbitMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path }),
       // Only a run that may push gets the push tool; its target is fixed here, never chosen by the agent.
       ...(opts.push === undefined ? {} : { push: pushMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, target: opts.push }) }),
     },

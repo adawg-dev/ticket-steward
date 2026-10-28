@@ -20,3 +20,14 @@ describe("steward mcp push", () => {
     expect(test.stderr()).toContain("mcp push requires --config");
   });
 });
+
+describe("steward mcp orbit", () => {
+  it("requires --config", async () => {
+    const test = makeContext();
+    const program = buildProgram(test.ctx);
+
+    await expect(program.parseAsync(["node", "steward", "mcp", "orbit", "--workspace", "/w"])).rejects.toBeInstanceOf(ExitSignal);
+
+    expect(test.stderr()).toContain("mcp orbit requires --config");
+  });
+});

@@ -12,6 +12,8 @@ import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { LoadedConfig } from "../config/load.js";
 import { appPortOf, type SlotsConfig, type StewardConfig } from "../config/schema.js";
+import { execOrbit, orbitEnv } from "../orbit/run.js";
+import { orbitRemote, runOrbitTool } from "../orbit/server.js";
 import { listFiles } from "../workspace/files.js";
 import { git, scrubCredentials } from "../workspace/git.js";
 import { injectToken, splitCredentials } from "../workspace/mirror.js";
@@ -400,6 +402,36 @@ const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   ];
 };
 
+const ORBIT_VERSION_TIMEOUT_MS = 10_000;
+
+/**
+ * The Orbit CLI runs (`[ok]` with its version) and its remote API answers for the project with GITLAB_TOKEN. Neither
+ * fails doctor: agents work without Orbit, and a remote outage only turns its tools into error results.
+ */
+const orbitChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Check[] => {
+  const exec = ctx.factories?.orbitExec ?? execOrbit;
+  const remote = orbitRemote({ exec, dataDir: config.dataDir, worktreePath: config.dataDir, codehost: config.codehost, secrets });
+  return [
+    {
+      name: "orbit",
+      run: async () => {
+        const run = await exec(["version"], { cwd: config.dataDir, env: orbitEnv(config.dataDir), timeoutMs: ORBIT_VERSION_TIMEOUT_MS });
+        const version = run.stdout.trim();
+        return run.exitCode === 0 && version !== "" ? ok(version) : warn(`orbit did not run (${run.stderr.trim() || `exit ${run.exitCode ?? "none"}`}); agents work without Orbit`);
+      },
+    },
+    {
+      name: "orbit remote",
+      run: async () => {
+        const project = config.codehost.kind === "gitlab" ? config.codehost.project : "";
+        const result = await runOrbitTool(remote, ["status", "--full-path", project, "--response-format", "raw"]);
+        const text = result.content[0]?.text ?? "";
+        return result.isError === true ? warn(`${text}; the agents' orbit_* tools return this error`) : ok(`${project} answered with GITLAB_TOKEN`);
+      },
+    },
+  ];
+};
+
 const runChecks = async (checks: Check[], ctx: CliContext): Promise<boolean> => {
   let failed = false;
   for (const check of checks) {
@@ -418,6 +450,7 @@ const configChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => [
   ...implementChecks(loaded, ctx),
   ...greptileChecks(loaded, ctx),
   ...serviceChecks(loaded, ctx),
+  ...orbitChecks(loaded, ctx),
 ];
 
 export const registerDoctor = (program: Command, ctx: CliContext): void => {

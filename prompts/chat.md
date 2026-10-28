@@ -6,6 +6,10 @@ Answer them. The checkout is still at `{{workspacePath}}`, now at commit `{{head
 
 The slot's services were recreated empty since your last turn, so the local databases and any process you started are gone. The app port is now `{{stewardPort}}`.
 
+## Codebase graph
+
+Orbit indexed this checkout before you started. To find code, prefer `orbit grep '<words>'` (it ignores case, `_` and `-`; `a|b` matches either) and `orbit context <path:start-end or name>` in the shell over grep: they return definitions with their callers and the tests that cover them. For merge requests, issues, pipelines, job logs and questions across GitLab, use the `orbit_context`, `orbit_query` and `orbit_schema` tools. Either may be unavailable; when one fails, fall back to plain search and `recent_changes` and do not retry it.
+
 ## Rules
 
 1. Edit files only inside `{{workspacePath}}`. Screenshots and scratch files go under `{{artifactsDir}}`.

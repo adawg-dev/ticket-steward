@@ -101,6 +101,11 @@ describe("evaluateTool", () => {
     expect(evaluate("mcp__codehost__recent_changes", { paths: ["src"] })).toEqual({ allow: true });
   });
 
+  it("allows the steward's Orbit tools", () => {
+    expect(evaluate("mcp__orbit__orbit_query", { query: "MATCH (m:MergeRequest) RETURN m LIMIT 1" })).toEqual({ allow: true });
+    expect(evaluate("mcp__orbit__orbit_context", { refs: ["mr:42"] })).toEqual({ allow: true });
+  });
+
   it("denies Read of a denied path", () => {
     expect(evaluate("Read", { file_path: "/data/overlay/.env" }).allow).toBe(false);
   });

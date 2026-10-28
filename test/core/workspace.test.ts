@@ -83,6 +83,13 @@ describe("brainInput", () => {
     vi.unstubAllEnvs();
   });
 
+  it("adds the Orbit server with no secrets and points the agent's own orbit at the data dir's graph", () => {
+    const input = brainInput(fullDeps, paths, worktree, "prompt", { PATH: "/bin" }, "implement");
+    expect(input.mcpServers.orbit?.args).toEqual(["/bin/steward", "mcp", "orbit", "--config", "/etc/steward/config.json", "--workspace", worktree.path]);
+    expect(Object.keys(input.mcpServers.orbit?.env ?? {}).sort()).toEqual(["HOME", "PATH"]);
+    expect(input.env).toEqual({ PATH: "/bin", ORBIT_DATA_DIR: "/data/orbit" });
+  });
+
   it("passes the session to resume only when given", () => {
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "fix", { resumeSessionId: "s0" }).resumeSessionId).toBe("s0");
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement")).not.toHaveProperty("resumeSessionId");

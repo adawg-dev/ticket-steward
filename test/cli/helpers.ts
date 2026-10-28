@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { loadConfig } from "../../src/config/load.js";
 import type { CliContext, CliFactories } from "../../src/cli/context.js";
+import type { OrbitExec } from "../../src/orbit/run.js";
 
 export class ExitSignal extends Error {
   constructor(readonly code: number) {
@@ -29,6 +30,9 @@ export const rejectingFetch: typeof fetch = async () => {
   throw new Error("Intended Test Error");
 };
 
+/** An Orbit CLI that is not installed. */
+const absentOrbit: OrbitExec = async () => ({ exitCode: null, stdout: "", stderr: "spawn orbit ENOENT", timedOut: false });
+
 export const makeContext = (overrides: { fetchImpl?: typeof fetch; factories?: CliFactories } = {}): TestContext => {
   const out: string[] = [];
   const err: string[] = [];
@@ -40,7 +44,8 @@ export const makeContext = (overrides: { fetchImpl?: typeof fetch; factories?: C
     exit: (code) => {
       throw new ExitSignal(code);
     },
-    ...(overrides.factories === undefined ? {} : { factories: overrides.factories }),
+    // The real Orbit CLI, when one is on PATH, would reach for a GitLab that is not there; tests name the Orbit they want.
+    factories: { orbitExec: absentOrbit, ...overrides.factories },
   };
   return { ctx, stdout: () => out.join(""), stderr: () => err.join("") };
 };

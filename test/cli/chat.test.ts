@@ -192,11 +192,11 @@ describe("steward chat", () => {
     expect(argAfter(call.args, "--resume")).toBe("session-1");
     expect(argAfter(call.args, "--model")).toBe("claude-test");
     expect(call.args).toContain("--strict-mcp-config");
-    expect(call.env).toMatchObject({ CLAUDE_CONFIG_DIR: join(repo.dataDir, "sessions"), GIT_AUTHOR_NAME: "Ticket Steward" });
+    expect(call.env).toMatchObject({ CLAUDE_CONFIG_DIR: join(repo.dataDir, "sessions"), GIT_AUTHOR_NAME: "Ticket Steward", ORBIT_DATA_DIR: join(repo.dataDir, "orbit") });
     expect(JSON.stringify(call)).not.toContain("glpat-push-token-value");
 
     const mcp = McpConfig.parse(JSON.parse(argAfter(call.args, "--mcp-config")));
-    expect(Object.keys(mcp.mcpServers).sort()).toEqual(["codehost", "playwright", "push"]);
+    expect(Object.keys(mcp.mcpServers).sort()).toEqual(["codehost", "orbit", "playwright", "push"]);
     const pushArgs = mcp.mcpServers.push?.args ?? [];
     expect(JSON.parse(argAfter(pushArgs, "--target"))).toMatchObject({ jobId: implementJob, mode: "fastForward", branch: BRANCH, baseSha: repo.sha, loopId: null, worktreePath: worktree });
 
@@ -252,7 +252,7 @@ describe("steward chat", () => {
     await parse();
 
     const mcp = McpConfig.parse(JSON.parse(argAfter(spawned[0]?.args ?? [], "--mcp-config")));
-    expect(Object.keys(mcp.mcpServers).sort()).toEqual(["codehost", "playwright"]);
+    expect(Object.keys(mcp.mcpServers).sort()).toEqual(["codehost", "orbit", "playwright"]);
     expect(stdout()).toContain("no push tool");
   });
 
