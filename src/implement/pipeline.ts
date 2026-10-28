@@ -1,24 +1,25 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { buildBrainEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
-import type { BrainRun } from "../brain/types.js";
+import { INTERRUPTED_ERROR } from "../brain/types.js";
 import type { ImplementConfig } from "../config/schema.js";
 import { renderTicketMarkdown } from "../core/context.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
 import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, stableWorktreeName, type JobPaths } from "../core/workspace.js";
+import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, stableWorktreeName, type JobPaths } from "../core/workspace.js";
 import { isLabelImplement, startLoop } from "../greptile/start.js";
 import type { PushTarget } from "../push/target.js";
+import { setupTailOf } from "../run/execute.js";
+import { localExecutor } from "../run/local.js";
+import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import { transaction, type Job } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
 import { injectToken, splitCredentials, type RemoteCredentials } from "../workspace/mirror.js";
-import type { Worktree } from "../workspace/worktree.js";
 import { extractAgentBrief } from "./brief.js";
-import { bundleBase, remoteTicketBranches, unpushedWork } from "./git.js";
+import { bundleBase, remoteTicketBranches } from "./git.js";
 import { renderImplementPrompt } from "./prompt.js";
 import { publishImplement } from "./publish.js";
 import { validateImplementResult, type Handback, type StoredImplement } from "./result.js";
@@ -121,9 +122,16 @@ const pushLanded = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, 
   return true;
 };
 
-const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
+/** The spec's run id: the job's attempt, or the dry run's process. */
+const runIdOf = (ctx: RunContext): string => (ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`);
+
+/**
+ * The prepare half: the closed check, the base, the ticket-branch checks and the prompt. Either a spec to execute, or the
+ * job's outcome without running the brain.
+ */
+export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<{ spec: RunSpec } | { outcome: JobOutcome }> => {
   const configured = settingsOf(deps);
-  if (configured === null) return notConfigured;
+  if (configured === null) return { outcome: notConfigured };
   const { settings, remote } = configured;
   const paths = implementPaths(ctx, deps);
 
@@ -133,35 +141,31 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   try {
     bundle = await deps.tracker.fetchTicket(ctx.issueId);
     const closed = closedReason(ctx.identifier, bundle.state);
-    if (closed !== null) return { status: "failed", error: closed, retryable: false };
+    if (closed !== null) return { outcome: { status: "failed", error: closed, retryable: false } };
     await deps.mirror.fetch();
     baseSha = await deps.mirror.resolveSha(deps.config.workspace.baseBranch);
     const site = await lsRemoteSite(paths, remote);
     existing = await remoteTicketBranches(site.remote, site.cwd, ctx.identifier);
   } catch (err) {
-    return { status: "failed", error: errorMessage(err), retryable: true };
+    return { outcome: { status: "failed", error: errorMessage(err), retryable: true } };
   }
   // A rerun after the agent pushed (the attempt was interrupted later) never runs the brain again over its own branch.
   const own = ctx.dryRun ? null : ownBranch(deps.stores.jobs.get(ctx.jobId), existing);
-  if (own !== null) return finish(ctx, deps, { result: null, handback: handback("readyForHuman", "an earlier attempt stopped after the agent pushed", own) });
+  if (own !== null) return { outcome: await finish(ctx, deps, { result: null, handback: handback("readyForHuman", "an earlier attempt stopped after the agent pushed", own) }) };
   if (existing[0] !== undefined) {
-    return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) });
+    return { outcome: await finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) }) };
   }
 
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config), deps.config.implement?.commitAuthor);
-  let worktree: Worktree;
+  const worktreePath = join(paths.workRoot, paths.worktreeName);
   let prompt: string;
   try {
-    worktree = await prepareWorkspace(ctx, deps, paths, env, baseSha, onWorktree);
-    // Where the session will be keyed: a later chat recreates this worktree at this path when it is gone.
-    if (!ctx.dryRun) deps.stores.jobs.recordWorkspace(ctx.jobId, paths.worktreeName, baseSha);
     const brief = extractAgentBrief(bundle.description);
     prompt = renderImplementPrompt(await readFile(settings.prompt, "utf8"), {
       identifier: ctx.identifier,
       teamKey: ctx.teamKey,
       teamName: bundle.team.name,
       ticket: renderTicketMarkdown(bundle),
-      workspacePath: worktree.path,
+      workspacePath: worktreePath,
       baseBranch: deps.config.workspace.baseBranch,
       sha: baseSha,
       artifactsDir: paths.artifactsDir,
@@ -173,55 +177,78 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
       checks: stewardChecks(settings.checks, baseSha).map((command) => `- \`${command}\``).join("\n"),
     });
   } catch (err) {
-    return prepareFailed(deps, err);
+    return { outcome: prepareFailed(deps, err) };
   }
 
   // The first push creates the ticket's branch on the base; a dry run (no job row) gets no push tool.
-  const push: PushTarget | undefined = ctx.dryRun
-    ? undefined
-    : { jobId: ctx.jobId, worktreePath: worktree.path, identifier: ctx.identifier, issueId: ctx.issueId, mode: "create", branch: null, baseSha, loopId: null, port: jobPort(deps) };
-  let run: BrainRun;
-  try {
-    run = await (deps.runBrain ?? runBrainDetached)(
-      deps.config.brain,
-      brainInput(deps, paths, worktree, prompt, env, "implement", { limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns }, ...(push === undefined ? {} : { push }) }),
-      deps.redactor,
-      { ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
-    );
-  } catch (err) {
-    return { status: "failed", error: errorMessage(err), retryable: false };
-  }
-  patchAttempt(ctx, deps, { transcriptPath: paths.transcriptPath, ...(run.usage === undefined ? {} : { usage: run.usage }) });
-  if (run.sessionId !== undefined && !ctx.dryRun) deps.stores.jobs.recordSession(ctx.jobId, run.sessionId);
-  if (!run.ok) return { status: "failed", error: run.error ?? "brain run failed", retryable: run.error === INTERRUPTED_ERROR };
+  const push: PushTarget | null = ctx.dryRun
+    ? null
+    : { jobId: ctx.jobId, worktreePath, identifier: ctx.identifier, issueId: ctx.issueId, mode: "create", branch: null, baseSha, loopId: null, port: jobPort(deps) };
+  const spec: RunSpec = {
+    version: 1,
+    runId: runIdOf(ctx),
+    jobId: ctx.jobId,
+    kind: "implement",
+    identifier: ctx.identifier,
+    issueId: ctx.issueId,
+    checkout: { ref: null, sha: baseSha },
+    baseSha,
+    worktreePath,
+    artifactsDir: paths.artifactsDir,
+    transcriptPath: paths.transcriptPath,
+    prompt,
+    personCommits: null,
+    output: "implement",
+    resumeSessionId: null,
+    limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns, setupTimeoutMinutes: deps.config.workspace.setupTimeoutMinutes },
+    push,
+    setup: deps.config.workspace.setup,
+    checks: stewardChecks(settings.checks, baseSha),
+    interactive: false,
+  };
+  return { spec };
+};
 
-  const validated = validateImplementResult(run.output);
+/** The finish half, from the executor's report and the work it found: the result, the push, the hand-back or the publish. */
+export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec: RunSpec, executed: { report: RunReport; work: WorkReport }): Promise<JobOutcome> => {
+  const configured = settingsOf(deps);
+  if (configured === null) return notConfigured;
+  const paths = implementPaths(ctx, deps);
+  const { report, work } = executed;
+  const { baseSha } = spec;
+
+  if (report.setupFailed) {
+    patchAttempt(ctx, deps, { setupTail: setupTailOf(report) });
+    return report.interrupted ? { status: "failed", error: INTERRUPTED_ERROR, retryable: true } : { status: "failed", error: report.error ?? "setup failed", retryable: true };
+  }
+  // Where the session is keyed: a later chat recreates this worktree at this path when it is gone.
+  if (!ctx.dryRun) deps.stores.jobs.recordWorkspace(ctx.jobId, paths.worktreeName, baseSha);
+  patchAttempt(ctx, deps, { transcriptPath: paths.transcriptPath, ...(report.usage === null ? {} : { usage: report.usage }) });
+  if (report.sessionId !== null && !ctx.dryRun) deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
+  if (!report.ok) return { status: "failed", error: report.error ?? "brain run failed", retryable: report.interrupted };
+
+  const validated = validateImplementResult(report.output);
   if (!validated.ok) return finish(ctx, deps, { result: null, handback: handback("readyForHuman", "the agent's result was invalid", validated.error) });
   const result = validated.result;
   if (result.outcome === "needs_info") return finish(ctx, deps, { result, handback: handback("needsInfo", "the ticket needs more information") });
   if (result.outcome === "failed") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent could not finish") });
 
-  const { files: overlayFiles } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
-  const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
   if (ctx.dryRun) {
-    const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: baseSha, stewardFiles });
-    return { status: "succeeded", warning: `dry run: no push tool; the agent's work on ${baseSha.slice(0, 7)}:\n${work.summary === "" ? "nothing" : work.summary}` };
+    return { status: "succeeded", warning: `dry run: no push tool; the agent's work on ${baseSha.slice(0, 7)}:\n${work.unpushed === "" ? "nothing" : work.unpushed}` };
   }
 
   // The agent pushed through the push tool; the steward only reads the outcome, and never commits or pushes for it.
   let landed: boolean;
   try {
-    landed = await pushLanded(ctx, deps, paths, remote);
+    landed = await pushLanded(ctx, deps, paths, configured.remote);
   } catch (err) {
     // Stored first, so the retry settles the push (publishImplementOnly) instead of running the brain again.
     deps.stores.jobs.saveImplementResult(ctx.jobId, { result, handback: null, baseSha });
     return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
   }
-  const pushedSha = landed ? (deps.stores.jobs.get(ctx.jobId)?.commitSha ?? baseSha) : baseSha;
-  const work = await unpushedWork({ worktreePath: worktree.path, pushedSha, stewardFiles });
-  const detail = deps.redactor.redact(work.summary);
+  const detail = deps.redactor.redact(work.unpushed);
   if (!landed) return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent did not push its change", detail), baseSha });
-  if (work.summary !== "") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent left unpushed work", detail), baseSha });
+  if (work.unpushed !== "") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent left unpushed work", detail), baseSha });
 
   const stored: StoredImplement = { result, handback: null, baseSha };
   // Stored before the loop starts, so a crash from here on retries via publishImplementOnly, which starts it once.
@@ -230,17 +257,21 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   return publishImplement({ ctx, tracker: deps.tracker, labels: deps.config.tracker.labels, stored });
 };
 
-export const runImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
-  const workspace: { worktree: Worktree | null } = { worktree: null };
-  const outcome = redactOutcome(
-    await executeImplement(ctx, deps, (created) => {
-      workspace.worktree = created;
-    }).catch(crashed),
-    deps.redactor,
-  );
-  await cleanupWorkspace(deps, workspace.worktree, outcome);
-  return outcome;
+const executeImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
+  const prepared = await prepareImplement(ctx, deps);
+  if ("outcome" in prepared) return prepared.outcome;
+  let executed: { report: RunReport; work: WorkReport };
+  try {
+    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal);
+  } catch (err) {
+    if (err instanceof SetupError) patchAttempt(ctx, deps, { setupTail: err.tail });
+    return prepareFailed(deps, err);
+  }
+  return finishImplement(ctx, deps, prepared.spec, executed);
 };
+
+/** Prepare, execute (in-process or in a run pod), finish. */
+export const runImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => redactOutcome(await executeImplement(ctx, deps).catch(crashed), deps.redactor);
 
 /**
  * Retry path: settles a push recorded but not marked (landed on the remote → pushed; otherwise hand back), starts the

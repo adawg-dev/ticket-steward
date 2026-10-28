@@ -3,7 +3,7 @@ import { chatResultJsonSchema } from "../chat/result.js";
 import { fixResultJsonSchema } from "../greptile/result.js";
 import { implementResultJsonSchema } from "../implement/result.js";
 import { evaluateTool, POLICY_HOOK_MATCHER } from "./policy.js";
-import type { Brain, BrainInput, BrainOutput, BrainUsage, OnMessage } from "./types.js";
+import type { Brain, BrainInput, BrainOutput, BrainUsage, McpServerSpec, OnMessage } from "./types.js";
 
 const ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*", "mcp__push__*", "mcp__orbit__*"];
 const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = {
@@ -33,8 +33,14 @@ const policyHook = (input: BrainInput): HookCallback => async (hookInput) => {
   };
 };
 
+/** One MCP server as Claude Code takes it, in the SDK's options and in the CLI's `--mcp-config`. */
+export const claudeMcpServer = (spec: McpServerSpec): McpServerConfig =>
+  spec.type === "http"
+    ? { type: "http", url: spec.url, ...(spec.headers === undefined ? {} : { headers: spec.headers }) }
+    : { type: "stdio", command: spec.command, args: spec.args, env: spec.env };
+
 const mcpServers = (input: BrainInput): Record<string, McpServerConfig> =>
-  Object.fromEntries(Object.entries(input.mcpServers).map(([name, spec]) => [name, { type: "stdio", command: spec.command, args: spec.args, env: spec.env }]));
+  Object.fromEntries(Object.entries(input.mcpServers).map(([name, spec]) => [name, claudeMcpServer(spec)]));
 
 const usageOf = (result: SDKResultMessage): BrainUsage => ({
   inputTokens: result.usage.input_tokens,

@@ -104,7 +104,8 @@ const makeConfig = (): StewardConfig => ({
 
 /** The push target the steward gave the run's push server, read back from its command line. */
 const pushTargetOf = (input: BrainInput): PushTarget | null => {
-  const args = input.mcpServers.push?.args;
+  const spec = input.mcpServers.push;
+  const args = spec?.type === "http" ? undefined : spec?.args;
   if (args === undefined) return null;
   return PushTargetSchema.parse(JSON.parse(args[args.indexOf("--target") + 1] ?? "null"));
 };

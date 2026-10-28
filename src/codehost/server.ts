@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import type { McpServerSpec } from "../brain/types.js";
+import type { StdioMcpServerSpec } from "../brain/types.js";
 import { recentCommits } from "./gitlog.js";
 import type { CodeHost } from "./types.js";
 
@@ -47,7 +47,7 @@ export const startCodeHostMcpServer = async (p: { codehost: CodeHost; worktreePa
  * Spawn spec for `steward mcp codehost`. The env carries no secrets: the brain SDKs put MCP env on the
  * `claude` command line, so the server process loads the codehost token itself from the config's `.env`.
  */
-export const codehostMcpSpec = (p: { binPath: string; configPath: string; worktreePath: string; sha: string }): McpServerSpec => ({
+export const codehostMcpSpec = (p: { binPath: string; configPath: string; worktreePath: string; sha: string }): StdioMcpServerSpec => ({
   command: process.execPath,
   args: [p.binPath, "mcp", "codehost", "--config", p.configPath, "--workspace", p.worktreePath, "--sha", p.sha],
   env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir() },

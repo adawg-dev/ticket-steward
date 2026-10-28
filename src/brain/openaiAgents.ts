@@ -54,17 +54,23 @@ const sumUsage = (result: { rawResponses: Array<{ usage: { inputTokens: number; 
     { inputTokens: 0, outputTokens: 0 },
   );
 
+/** The HTTP MCP servers of a run pod's tools sidecar; this brain runs only on the local runtime, with stdio servers. */
+const httpServers = (input: BrainInput): string[] => Object.entries(input.mcpServers).flatMap(([name, spec]) => (spec.type === "http" ? [name] : []));
+
 const mcpServers = (input: BrainInput): MCPServerStdio[] =>
-  Object.entries(input.mcpServers).map(
-    ([name, spec]) =>
-      new MCPServerStdio({
-        name,
-        command: spec.command,
-        args: spec.args,
-        env: spec.env,
-        cwd: input.workspacePath,
-        ...(name === "playwright" ? { toolFilter: { allowedToolNames: PLAYWRIGHT_TOOLS } } : {}),
-      }),
+  Object.entries(input.mcpServers).flatMap(([name, spec]) =>
+    spec.type === "http"
+      ? []
+      : [
+          new MCPServerStdio({
+            name,
+            command: spec.command,
+            args: spec.args,
+            env: spec.env,
+            cwd: input.workspacePath,
+            ...(name === "playwright" ? { toolFilter: { allowedToolNames: PLAYWRIGHT_TOOLS } } : {}),
+          }),
+        ],
   );
 
 export const modelSettingsFor = (input: Pick<BrainInput, "reasoningEffort">): { reasoning?: { effort: ReasoningEffort } } =>
@@ -96,6 +102,8 @@ export const createOpenAiAgentsBrain = (): Brain => ({
   kind: "openai-agents",
   run: async (input, onMessage) => {
     if (input.resumeSessionId !== undefined) return { ok: false, output: undefined, error: "openai-agents cannot resume a session" };
+    const http = httpServers(input);
+    if (http.length > 0) return { ok: false, output: undefined, error: `openai-agents cannot reach HTTP MCP servers: ${http.join(", ")}` };
     const abortController = new AbortController();
     const timer = setTimeout(() => abortController.abort(), input.timeoutMs);
     const servers = mcpServers(input);

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { INTERRUPTED_ERROR, type BrainInput, type BrainOutput, type McpServerSpec } from "../brain/types.js";
+import { INTERRUPTED_ERROR, type BrainInput, type BrainOutput, type StdioMcpServerSpec } from "../brain/types.js";
 import { playwrightEnv } from "../brain/env.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import { pushMcpSpec, type PushTarget } from "../push/target.js";
@@ -33,8 +33,18 @@ export interface JobPaths {
   transcriptPath: string;
 }
 
-const SETUP_TAIL_BYTES = 16 * 1024;
-const MINUTE_MS = 60_000;
+export const SETUP_TAIL_BYTES = 16 * 1024;
+export const MINUTE_MS = 60_000;
+
+/** The workspace could not be set up: `tail` is the redacted output, kept on the attempt. */
+export class SetupError extends Error {
+  constructor(
+    message: string,
+    readonly tail: string,
+  ) {
+    super(message);
+  }
+}
 
 const PlaywrightPackage = z.object({ bin: z.union([z.string(), z.record(z.string(), z.string())]) });
 
@@ -67,7 +77,7 @@ export const patchAttempt = (ctx: RunContext, deps: PipelineDeps, patch: Attempt
   if (current !== undefined) deps.stores.attempts.patch(current.id, patch);
 };
 
-const playwrightMcpSpec = (): McpServerSpec => {
+const playwrightMcpSpec = (): StdioMcpServerSpec => {
   const packagePath = createRequire(import.meta.url).resolve("@playwright/mcp/package.json");
   const { bin } = PlaywrightPackage.parse(JSON.parse(readFileSync(packagePath, "utf8")));
   const relative = typeof bin === "string" ? bin : Object.values(bin)[0];
@@ -90,8 +100,8 @@ export const redactOutcome = (outcome: JobOutcome, redactor: Redactor): JobOutco
 /** The job's app port: its slot's with `slots` configured, otherwise `workspace.port`. */
 export const jobPort = (deps: Pick<PipelineDeps, "config" | "slot">): number => appPortOf(deps.config, deps.slot?.n ?? 1);
 
-/** With `slots`: frees the slot's app port and brings its containers up fresh. Null without `slots`. */
-export const startSlot = async (ctx: RunContext, deps: PipelineDeps, appPort: number): Promise<Slot | null> => {
+/** With `slots`: frees the slot's app port and brings its containers up fresh, or throws a `SetupError`. Null without `slots`. */
+export const bringSlotUp = async (deps: Pick<PipelineDeps, "config" | "slot" | "signal" | "redactor">, appPort: number): Promise<Slot | null> => {
   if (deps.config.slots === undefined) return null;
   if (deps.slot === undefined) throw new Error("slots is configured but this run has no slot");
   const { n, client } = deps.slot;
@@ -101,8 +111,17 @@ export const startSlot = async (ctx: RunContext, deps: PipelineDeps, appPort: nu
   } catch (err) {
     if (!(err instanceof SlotError)) throw err;
     const tail = deps.redactor.redact(err.tail);
-    patchAttempt(ctx, deps, { setupTail: tail });
-    throw new Error(`setup failed: slot ${n}: ${tail}`);
+    throw new SetupError(`setup failed: slot ${n}: ${tail}`, tail);
+  }
+};
+
+/** `bringSlotUp`, keeping a failed slot's tail on the attempt. */
+export const startSlot = async (ctx: RunContext, deps: PipelineDeps, appPort: number): Promise<Slot | null> => {
+  try {
+    return await bringSlotUp(deps, appPort);
+  } catch (err) {
+    if (err instanceof SetupError) patchAttempt(ctx, deps, { setupTail: err.tail });
+    throw err;
   }
 };
 
@@ -177,15 +196,18 @@ export const brainDenyPaths = (config: PipelineDeps["config"], configPath: strin
   sessionsDir(config),
 ];
 
+/** A brain input whose MCP servers the steward spawns itself, as every run on the local runtime has. */
+export type LocalBrainInput = BrainInput & { mcpServers: Record<string, StdioMcpServerSpec> };
+
 export const brainInput = (
   deps: PipelineDeps,
-  paths: JobPaths,
+  paths: Pick<JobPaths, "artifactsDir" | "transcriptPath">,
   worktree: Worktree,
   prompt: string,
   env: Record<string, string>,
   output: BrainOutput,
   opts: { limits?: { timeoutMinutes: number; maxTurns: number }; resumeSessionId?: string; push?: PushTarget } = {},
-): BrainInput => {
+): LocalBrainInput => {
   const { config, mirror } = deps;
   const { limits } = opts;
   return {

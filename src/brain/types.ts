@@ -1,10 +1,21 @@
 import type { BrainConfig } from "../config/schema.js";
 
-export interface McpServerSpec {
+/** An MCP server the brain spawns: the steward's own servers on one host. */
+export interface StdioMcpServerSpec {
+  type?: "stdio";
   command: string;
   args: string[];
   env: Record<string, string>;
 }
+
+/** An MCP server the brain reaches over HTTP: a run pod's tools sidecar on localhost, which holds the credentials. */
+export interface HttpMcpServerSpec {
+  type: "http";
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServerSpec = StdioMcpServerSpec | HttpMcpServerSpec;
 
 export type BrainOutput = "implement" | "fix" | "chat";
 

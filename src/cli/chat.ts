@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import type { Readable } from "node:stream";
 import { join } from "node:path";
 import type { Command } from "commander";
-import { CLEANUP_PERIOD_DAYS } from "../brain/claudeCode.js";
+import { claudeMcpServer, CLEANUP_PERIOD_DAYS } from "../brain/claudeCode.js";
 import type { PolicyDecision } from "../brain/policy.js";
 import { buildBrainEnv } from "../brain/env.js";
 import { chatSettings, evaluateHook, HOOK_DENY_EXIT } from "../chat/hook.js";
@@ -105,9 +105,7 @@ const converse = async (ctx: CliContext, runtime: Runtime, ticket: { id: string;
     // No job runs a terminal chat: its pushes are recorded on the session's implement job (with the loop, when there is one).
     const push = sessionPushTarget(deps, session, worktree, { jobId: session.jobId, identifier: ticket.identifier, issueId: ticket.id, port });
     const input = brainInput(deps, paths, worktree, "", env, "chat", { resumeSessionId: session.sessionId, ...(push === undefined ? {} : { push }) });
-    const mcpServers = Object.fromEntries(
-      Object.entries(input.mcpServers).map(([name, spec]) => [name, { type: "stdio", command: spec.command, args: spec.args, env: spec.env }]),
-    );
+    const mcpServers = Object.fromEntries(Object.entries(input.mcpServers).map(([name, spec]) => [name, claudeMcpServer(spec)]));
     const settings = chatSettings({
       nodePath: process.execPath,
       binPath: deps.binPath,

@@ -2,7 +2,7 @@ import { appendFile, chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
-import type { McpServerSpec } from "../../src/brain/types.js";
+import type { StdioMcpServerSpec } from "../../src/brain/types.js";
 import type { OrbitExec } from "../../src/orbit/run.js";
 import type { SlotPorts } from "../../src/workspace/slots.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
@@ -19,7 +19,7 @@ const tsxBin = resolve("node_modules/tsx/dist/cli.mjs");
 const fakeServerEntry = resolve("test/codehost/fakeServerEntry.ts");
 
 /** Serves the codehost MCP from the in-repo fake entry, the way the codehost server test does. */
-const fakeCodehostMcpSpec = (p: { worktreePath: string; sha: string }): McpServerSpec => ({
+const fakeCodehostMcpSpec = (p: { worktreePath: string; sha: string }): StdioMcpServerSpec => ({
   command: process.execPath,
   args: [tsxBin, fakeServerEntry, p.worktreePath, p.sha],
   env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },

@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { z } from "zod";
-import type { McpServerSpec } from "../brain/types.js";
+import type { StdioMcpServerSpec } from "../brain/types.js";
 
 /**
  * What one run may push, fixed by the steward when it spawns the push server. Carries no secrets: it travels on the
@@ -26,7 +26,7 @@ export type PushTarget = z.infer<typeof PushTargetSchema>;
  * Spawn spec for `steward mcp push`. Like `codehostMcpSpec`, the env carries no secrets: the server loads the push token
  * itself from the config's `.env`, so it never reaches the brain's process or command line.
  */
-export const pushMcpSpec = (p: { binPath: string; configPath: string; target: PushTarget }): McpServerSpec => ({
+export const pushMcpSpec = (p: { binPath: string; configPath: string; target: PushTarget }): StdioMcpServerSpec => ({
   command: process.execPath,
   args: [p.binPath, "mcp", "push", "--config", p.configPath, "--target", JSON.stringify(p.target)],
   env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir() },

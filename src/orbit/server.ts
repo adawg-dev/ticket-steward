@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import type { McpServerSpec } from "../brain/types.js";
+import type { StdioMcpServerSpec } from "../brain/types.js";
 import type { Secrets } from "../config/load.js";
 import type { CodeHostConfig } from "../config/schema.js";
 import { orbitEnv, type OrbitExec } from "./run.js";
@@ -125,7 +125,7 @@ export const startOrbitMcpServer = async (remote: OrbitRemote): Promise<void> =>
  * Spawn spec for `steward mcp orbit`. Like `codehostMcpSpec`, the env carries no secrets: the server loads `GITLAB_TOKEN`
  * itself from the config's `.env` and hands it only to the Orbit processes it runs.
  */
-export const orbitMcpSpec = (p: { binPath: string; configPath: string; worktreePath: string }): McpServerSpec => ({
+export const orbitMcpSpec = (p: { binPath: string; configPath: string; worktreePath: string }): StdioMcpServerSpec => ({
   command: process.execPath,
   args: [p.binPath, "mcp", "orbit", "--config", p.configPath, "--workspace", p.worktreePath],
   env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir() },

@@ -74,4 +74,24 @@ describe("openai-agents brain", () => {
 
     expect(run).toEqual({ ok: false, output: undefined, error: "openai-agents cannot resume a session" });
   });
+
+  it("refuses HTTP MCP servers, which only a run pod's tools sidecar serves", async () => {
+    const input: BrainInput = {
+      workspacePath: "/data/work/42-1",
+      artifactsDir: "/data/jobs/42/artifacts",
+      transcriptPath: "/data/jobs/42/attempt-1.jsonl",
+      prompt: "fix",
+      env: {},
+      timeoutMs: 10_000,
+      maxTurns: 12,
+      model: "gpt-test",
+      mcpServers: { push: { type: "http", url: "http://127.0.0.1:4181/mcp/push" } },
+      denyPaths: [],
+      output: "fix",
+    };
+
+    const run = await createOpenAiAgentsBrain().run(input, () => undefined);
+
+    expect(run).toEqual({ ok: false, output: undefined, error: "openai-agents cannot reach HTTP MCP servers: push" });
+  });
 });

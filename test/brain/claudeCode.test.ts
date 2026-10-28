@@ -161,4 +161,21 @@ describe("claude-code brain", () => {
     expect(run.usage?.costUsd).toBeCloseTo(0.6);
     expect(run.sessionId).toBe("s2");
   });
+
+  it("passes stdio and HTTP MCP servers through to the SDK", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: {} })));
+    const servers: BrainInput["mcpServers"] = {
+      playwright: { command: "/usr/bin/node", args: ["mcp.js"], env: { HOME: "/home/steward" } },
+      push: { type: "http", url: "http://127.0.0.1:4181/mcp/push" },
+      codehost: { type: "http", url: "http://127.0.0.1:4181/mcp/codehost", headers: { "x-run": "7-1" } },
+    };
+
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run({ ...input, mcpServers: servers }, onMessage);
+
+    expect(queryMock.mock.calls[0]?.[0].options.mcpServers).toEqual({
+      playwright: { type: "stdio", command: "/usr/bin/node", args: ["mcp.js"], env: { HOME: "/home/steward" } },
+      push: { type: "http", url: "http://127.0.0.1:4181/mcp/push" },
+      codehost: { type: "http", url: "http://127.0.0.1:4181/mcp/codehost", headers: { "x-run": "7-1" } },
+    });
+  });
 });

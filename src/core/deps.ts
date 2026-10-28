@@ -6,6 +6,7 @@ import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
 import type { Stores } from "../store/index.js";
 import type { Tracker } from "../tracker/types.js";
+import type { RunExecutor } from "../run/executor.js";
 import type { Mirror } from "../workspace/mirror.js";
 import type { SlotRef } from "../workspace/slots.js";
 import type { Redactor } from "./redact.js";
@@ -29,4 +30,9 @@ export interface PipelineDeps {
   signal?: AbortSignal;
   /** With `slots` configured: the job's slot (each worker loop's own, or slot 1 for inline CLI runs). */
   slot?: SlotRef;
+  /**
+   * Where a run's execute half happens. Unset, it runs in-process through `localExecutor` over the run's own deps, so
+   * each worker loop's slot and signal apply; the Kubernetes runtime sets its executor here.
+   */
+  executor?: RunExecutor;
 }

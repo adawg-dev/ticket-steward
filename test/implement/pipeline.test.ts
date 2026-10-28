@@ -11,6 +11,8 @@ import { publishImplementOnly, runImplement } from "../../src/implement/pipeline
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
+import type { RunExecutor } from "../../src/run/executor.js";
+import { RunSpecSchema, type RunReport, type RunSpec } from "../../src/run/protocol.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { TriggerEvent, TicketBundle } from "../../src/tracker/types.js";
 import { SlotClient } from "../../src/workspace/slots.js";
@@ -83,7 +85,8 @@ const makeConfig = (implement: Partial<NonNullable<StewardConfig["implement"]>> 
 
 /** The push target the steward gave the run's push server, read back from its command line. */
 const pushTargetOf = (input: BrainInput): PushTarget | null => {
-  const args = input.mcpServers.push?.args;
+  const spec = input.mcpServers.push;
+  const args = spec?.type === "http" ? undefined : spec?.args;
   if (args === undefined) return null;
   return PushTargetSchema.parse(JSON.parse(args[args.indexOf("--target") + 1] ?? "null"));
 };
@@ -428,6 +431,74 @@ describe("runImplement", () => {
     expect(brain.pushes).toMatchObject([{ ok: true }]);
     expect(brain.calls[0]?.env.STEWARD_PORT).toBe(String(appPortBase + 1));
     expect(runner.calls).toEqual([["down", "1"], ["up", "1"], ["ports", "1"], ["down", "1"]]);
+  });
+
+  it("fails retryably with the setup tail when workspace setup fails, without running the brain", async () => {
+    const brain = agentBrain(implemented);
+    const base = makeConfig();
+    const ctx = claim();
+
+    const outcome = await runImplement(ctx, depsFor(brain, { ...base, workspace: { ...base.workspace, setup: ["echo installing", "exit 2"] } }));
+
+    expect(outcome).toEqual({ status: "failed", error: "setup failed:\n$ echo installing\ninstalling\n$ exit 2\n[exit 2]\n", retryable: true });
+    expect(brain.calls).toHaveLength(0);
+    expect(stores.attempts.forJob(ctx.jobId)[0]?.setupTail).toBe("$ echo installing\ninstalling\n$ exit 2\n[exit 2]\n");
+  });
+});
+
+describe("runImplement through an executor", () => {
+  const reportOf = (spec: RunSpec, patch: Partial<RunReport> = {}): RunReport => ({
+    runId: spec.runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-x", output: implemented, usage: { inputTokens: 1, outputTokens: 1 }, ...patch,
+  });
+
+  it("hands the executor a spec that carries no secret, then finishes from its reports", async () => {
+    const specs: RunSpec[] = [];
+    const executor: RunExecutor = {
+      execute: async (spec) => {
+        specs.push(spec);
+        return { report: reportOf(spec), work: { runId: spec.runId, unpushed: "commits not pushed:\n  a1b2c3d API-1: wip", pushedSha: null } };
+      },
+    };
+    const ctx = claim();
+
+    const outcome = await runImplement(ctx, { ...makeDeps(undefined), executor });
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent did not push its change" });
+    const main = await git(repo.repo, ["rev-parse", "main"]);
+    expect(specs).toHaveLength(1);
+    expect(RunSpecSchema.parse(JSON.parse(JSON.stringify(specs[0])))).toMatchObject({
+      runId: `${ctx.jobId}-1`,
+      kind: "implement",
+      checkout: { ref: null, sha: main },
+      baseSha: main,
+      worktreePath: join(repo.dataDir, "work", `${ctx.jobId}-1`),
+      push: { jobId: ctx.jobId, mode: "create", branch: null, baseSha: main, loopId: null, worktreePath: join(repo.dataDir, "work", `${ctx.jobId}-1`) },
+      resumeSessionId: null,
+      interactive: false,
+    });
+    expect(JSON.stringify(specs[0])).not.toContain("glpat-push-token-value");
+    expect(stores.jobs.get(ctx.jobId)).toMatchObject({ sessionId: "session-x", worktreeName: `${ctx.jobId}-1` });
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toEqual({ label: "readyForHuman", reason: "the agent did not push its change", detail: "commits not pushed:\n  a1b2c3d API-1: wip" });
+  });
+
+  it("retries an interrupted run and keeps the tail of a failed setup", async () => {
+    const interrupted: RunExecutor = { execute: async (spec) => ({ report: reportOf(spec, { ok: false, error: "interrupted", interrupted: true, sessionId: null }), work: { runId: spec.runId, unpushed: "", pushedSha: null } }) };
+    const setup: RunExecutor = {
+      execute: async (spec) => ({ report: reportOf(spec, { ok: false, error: "setup failed:\npnpm: not found\n", setupFailed: true, sessionId: null }), work: { runId: spec.runId, unpushed: "", pushedSha: null } }),
+    };
+    const first = claim();
+    expect(await runImplement(first, { ...makeDeps(undefined), executor: interrupted })).toEqual({ status: "failed", error: "interrupted", retryable: true });
+
+    const second = claim({ ...trigger, deliveryId: "d-2" });
+    expect(await runImplement(second, { ...makeDeps(undefined), executor: setup })).toEqual({ status: "failed", error: "setup failed:\npnpm: not found\n", retryable: true });
+    expect(stores.attempts.forJob(second.jobId)[0]?.setupTail).toBe("pnpm: not found\n");
+  });
+
+  it("fails retryably when the executor cannot start the run", async () => {
+    const executor: RunExecutor = { execute: () => Promise.reject(new Error("cannot create the run's Job")) };
+    const ctx = claim();
+
+    expect(await runImplement(ctx, { ...makeDeps(undefined), executor })).toEqual({ status: "failed", error: "cannot create the run's Job", retryable: true });
   });
 });
 
