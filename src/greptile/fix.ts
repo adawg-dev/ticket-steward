@@ -1,6 +1,5 @@
-import { readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { buildBrainEnv, buildWorkspaceEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
+import { readFile } from "node:fs/promises";
+import { buildBrainEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
 import type { BrainRun } from "../brain/types.js";
 import type { GitLabMrApi, MergeRequestInfo, MrDiscussion } from "../codehost/gitlabMr.js";
 import type { GreptileConfig } from "../config/schema.js";
@@ -8,13 +7,14 @@ import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, type JobPaths } from "../core/workspace.js";
-import { commitWithHooks, guardCommit, installHookWrappers, pushCommit, saveBundle, stageAndGuard } from "../implement/git.js";
-import { CHECK_TAIL_BYTES, commitMessage, guardSecrets, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
-import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store/index.js";
+import { unpushedWork } from "../implement/git.js";
+import { guardSecrets, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
+import { settleUnfinished } from "../push/service.js";
+import type { PushTarget } from "../push/target.js";
+import { transaction, type Loop, type LoopPatch, type LoopRound, type Push } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { gitOrThrow } from "../workspace/git.js";
 import type { RemoteCredentials } from "../workspace/mirror.js";
-import { runSetup } from "../workspace/setup.js";
 import type { Worktree } from "../workspace/worktree.js";
 import { collectCiFailures, type CiFailure } from "./ci.js";
 import { renderFixPrompt } from "./prompt.js";
@@ -22,15 +22,10 @@ import { publishHandback, publishStop, publishThreads, requestReview } from "./p
 import { validateFixResult, type FixResult, type StoredFix } from "./result.js";
 import { findSummary, openFindings } from "./summary.js";
 
-const MINUTE_MS = 60_000;
-const FIX_BUNDLE = "fix.bundle";
-const PUSH_REPO = "push.git";
 const LOOP_MARKER_TEXT = "ticket-steward:loop";
 const SESSION_LOST = "the agent's session could not be resumed";
 /** The SDK's errors for a session it cannot load or resume. */
 const SESSION_ERROR = /no conversation found|resume/i;
-/** A push git or the steward's own checks refused, as opposed to one that could not reach the remote. */
-const PUSH_REJECTED = /failed to push some refs|refusing to push/;
 
 const fail = (error: string): JobOutcome => ({ status: "failed", error, retryable: false });
 
@@ -67,7 +62,10 @@ const observe = async (fix: Fix, projectId: number, mrIid: number): Promise<Obse
   return { ticket, mr, discussions };
 };
 
-/** The gate: the ticket is open, the MR is open, and its head is the steward's last push (or the fix commit it pushed). */
+/**
+ * The gate: the ticket is open, the MR is open, and its head is the loop's last push. The push tool moves `headSha` as
+ * its push lands; `pendingPush` covers a push that landed before the tool could record it.
+ */
 const gate = (fix: Fix, observed: Observed): Promise<JobOutcome> | null => {
   const { deps, loop } = fix;
   if (CLOSED_STATE_TYPES.includes(observed.ticket.state.type)) return publishStop(deps, loop, "the ticket was closed", false);
@@ -103,9 +101,15 @@ const personCommits = async (loop: Loop, worktree: Worktree): Promise<string[]> 
   return log.split("\n").filter((line) => line !== "");
 };
 
-const round = (loop: Loop, facts: RoundFacts, result: FixResult, outcome: LoopRound["outcome"]): LoopRound => ({
-  round: loop.round,
-  headSha: loop.headSha,
+/**
+ * The head the round started from. The push tool moves the loop's head mid-run, so once this job pushed, the head it
+ * reviewed is the one its first push fast-forwarded from.
+ */
+const roundHead = (fix: Fix): string => fix.deps.stores.pushes.forJob(fix.ctx.jobId)[0]?.previousSha ?? fix.loop.headSha;
+
+const round = (fix: Fix, facts: RoundFacts, result: FixResult, outcome: LoopRound["outcome"]): LoopRound => ({
+  round: fix.loop.round,
+  headSha: roundHead(fix),
   score: facts.score,
   pipeline: facts.pipeline,
   fixed: result.threads.filter((thread) => thread.action === "fixed").length,
@@ -125,50 +129,29 @@ const nextRound = (fix: Fix, patch: LoopPatch, finished: LoopRound): JobOutcome 
   return { status: "succeeded" };
 };
 
-/** Pushes the fix commit from the job's bundle in a scratch repo, fast-forward only, leased on the previous head. */
-const pushFix = async (fix: Fix, sha: string): Promise<void> => {
-  const scratchDir = join(fix.paths.jobDir, PUSH_REPO);
-  try {
-    await pushCommit({
-      scratchDir,
-      objectsDir: join(fix.deps.mirror.path, "objects"),
-      bundlePath: join(fix.paths.jobDir, FIX_BUNDLE),
-      remote: fix.remote,
-      sha,
-      baseSha: fix.loop.headSha,
-      branch: fix.loop.branch,
-      identifier: fix.loop.identifier,
-      branchTypes: fix.settings.branchTypes,
-      mode: { kind: "fastForward", previousHead: fix.loop.headSha },
-    });
-  } finally {
-    await rm(scratchDir, { recursive: true, force: true });
-  }
-};
-
-/** A `changed` fix: push the pending commit unless it landed, reply and resolve, then move the loop to the new head. */
+/**
+ * A `changed` fix: the agent pushed it through the push tool. Reply and resolve, then move the loop to the pushed head.
+ * Never pushes: a push the tool recorded but never marked counts only when the MR is already at its commit.
+ */
 const publishChanged = async (fix: Fix, stored: StoredFix, result: FixResult, mr: MergeRequestInfo): Promise<JobOutcome> => {
-  const { deps, loop } = fix;
+  const { ctx, deps } = fix;
+  const loop = reload(fix);
   const pending = loop.pendingPush;
   if (pending === null) return fail("no pending fix commit to publish");
   if (!pending.pushed) {
-    // The MR already at the fix commit means the push landed before it was recorded.
-    if (mr.sha.toLowerCase() !== pending.sha.toLowerCase()) {
-      try {
-        await pushFix(fix, pending.sha);
-      } catch (err) {
-        if (PUSH_REJECTED.test(errorMessage(err))) return publishHandback(deps, loop, "the push was rejected", errorMessage(err));
-        return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
-      }
-    }
-    deps.stores.loops.update(loop.id, { pendingPush: { sha: pending.sha, pushed: true } });
+    if (mr.sha.toLowerCase() !== pending.sha.toLowerCase()) return publishHandback(deps, loop, "the push did not complete", pending.sha);
+    const push = deps.stores.pushes.latest(ctx.jobId);
+    transaction(deps.stores.db, () => {
+      if (push !== null && push.pushedAt === null && push.sha === pending.sha) deps.stores.pushes.markPushed(push.id);
+      deps.stores.loops.update(loop.id, { pendingPush: { sha: pending.sha, pushed: true }, headSha: pending.sha });
+    });
   }
   const replied = await publishThreads(deps, reload(fix), result, pending.sha);
   if (replied.status !== "succeeded") return replied;
   return nextRound(
     fix,
     { headSha: pending.sha, reviewCountAtTrigger: null, adoptedFrom: null, pendingPush: null },
-    round(loop, stored, result, "changed"),
+    round(fix, stored, result, "changed"),
   );
 };
 
@@ -184,7 +167,7 @@ const publishNoChanges = async (fix: Fix, stored: StoredFix, result: FixResult):
   if (replied.status !== "succeeded") return replied;
   const requested = await requestReview(fix.deps, fix.loop);
   if (requested.status !== "succeeded") return requested;
-  return nextRound(fix, { reviewCountAtTrigger: stored.reviewCount }, round(fix.loop, stored, result, "no_changes"));
+  return nextRound(fix, { reviewCountAtTrigger: stored.reviewCount }, round(fix, stored, result, "no_changes"));
 };
 
 /** Publishes what the fix decided; a retry of the job comes straight here, so the brain never runs twice. */
@@ -209,62 +192,43 @@ const handingBack = (facts: RoundFacts, result: FixResult | null, reason: string
   handback: { reason, detail },
 });
 
-/** Guards, checks and commits the agent's change on the previous head, bundles it, and records it as the pending push. */
-const commitChange = async (fix: Fix, worktree: Worktree, facts: RoundFacts, result: FixResult, mr: MergeRequestInfo): Promise<JobOutcome> => {
-  const { ctx, deps, settings, loop, paths } = fix;
-  const { files: overlayFiles, secrets } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
+/** What the agent pushed in this job through the push tool, and what it left behind that never reached the branch. */
+interface AgentPushes {
+  pushed: Push | null;
+  /** Uncommitted paths and commits after the last push (or the round's head), as a `git status`-like summary. */
+  leftover: string;
+}
+
+const agentPushes = async (fix: Fix, worktree: Worktree, target: PushTarget): Promise<AgentPushes> => {
+  const { ctx, deps } = fix;
+  // A push the tool recorded but stopped before marking counts when the remote branch is at its commit.
+  await settleUnfinished(deps, target, fix.remote);
+  const pushed = deps.stores.pushes.latestPushed(ctx.jobId);
+  const { files: overlayFiles } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
   const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
-  const guard = await stageAndGuard({ worktreePath: worktree.path, stewardFiles, secretValues: secrets });
-  if (!guard.ok) return decide(fix, handingBack(facts, result, guard.reason, guard.detail), mr);
-
-  const workspaceEnv = buildWorkspaceEnv(jobPort(deps));
-  // The original base, so a filtered check covers the whole MR and not only this round's commit.
-  const checked = await runSetup(stewardChecks(settings.checks, loop.baseSha), worktree.path, workspaceEnv, {
-    timeoutMs: settings.checksTimeoutMinutes * MINUTE_MS,
-    tailBytes: CHECK_TAIL_BYTES,
-    ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-  });
-  if (deps.signal?.aborted === true) return { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
-  if (!checked.ok) return decide(fix, handingBack(facts, result, "the steward's checks failed", deps.redactor.redact(checked.tail)), mr);
-
-  // The brain runs for up to an hour; never commit or push for a ticket that was closed meanwhile.
-  let latest: TicketBundle;
-  try {
-    latest = await deps.tracker.fetchTicket(loop.issueId);
-  } catch (err) {
-    return { status: "failed", error: errorMessage(err), retryable: true };
-  }
-  if (CLOSED_STATE_TYPES.includes(latest.state.type)) return publishStop(deps, loop, "the ticket was closed", false);
-
-  const hooksDir = join(paths.jobDir, "hooks");
-  await installHookWrappers(worktree.path, hooksDir);
-  const committed = await commitWithHooks({
-    worktreePath: worktree.path,
-    hooksDir,
-    messagePath: join(paths.jobDir, "COMMIT_MSG"),
-    message: commitMessage(ctx.identifier, result.commitMessage),
-    author: settings.commitAuthor,
-    env: workspaceEnv,
-  });
-  if (!committed.ok) return decide(fix, handingBack(facts, result, "kickoff's commit hooks rejected the change", deps.redactor.redact(committed.output)), mr);
-  // Exactly one commit whose parent is the previous head, passing the same guard as what was staged.
-  const verified = await guardCommit({ worktreePath: worktree.path, baseSha: loop.headSha, sha: committed.sha, stewardFiles, secretValues: secrets });
-  if (!verified.ok) return decide(fix, handingBack(facts, result, verified.reason, verified.detail), mr);
-
-  await saveBundle(worktree.path, loop.headSha, join(paths.jobDir, FIX_BUNDLE));
-  const stored: StoredFix = { ...facts, result, handback: null };
-  // Together, so a retry always finds the commit to push alongside the result whose replies it publishes.
-  transaction(deps.stores.db, () => {
-    deps.stores.jobs.saveFixResult(ctx.jobId, stored);
-    deps.stores.loops.update(loop.id, { pendingPush: { sha: committed.sha, pushed: false } });
-  });
-  return publishStored({ ...fix, loop: reload(fix) }, stored, mr);
+  const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: pushed?.sha ?? fix.loop.headSha, stewardFiles });
+  return { pushed, leftover: deps.redactor.redact(work.summary) };
 };
 
-/** The decision for a valid result: hand back, publish a `no_changes` round, or commit the change. */
-const handleResult = (fix: Fix, worktree: Worktree, facts: RoundFacts, result: FixResult, open: number, mr: MergeRequestInfo): Promise<JobOutcome> => {
+/**
+ * The decision for a valid result: hand back, or publish a `changed` or `no_changes` round. The steward never commits or
+ * pushes for the agent: a change counts only once the push tool pushed it, and leftover work hands back.
+ */
+const handleResult = async (fix: Fix, worktree: Worktree, target: PushTarget, facts: RoundFacts, result: FixResult, open: number, mr: MergeRequestInfo): Promise<JobOutcome> => {
   if (result.outcome === "failed") return decide(fix, handingBack(facts, result, "the agent could not finish", result.failureDetail ?? ""), mr);
-  if (result.outcome === "changed") return commitChange(fix, worktree, facts, result, mr);
+  let agent: AgentPushes;
+  try {
+    agent = await agentPushes(fix, worktree, target);
+  } catch (err) {
+    return decide(fix, handingBack(facts, result, "the agent's push could not be confirmed", errorMessage(err)), mr);
+  }
+  if (result.outcome === "changed") {
+    if (agent.pushed === null) return decide(fix, handingBack(facts, result, "the agent did not push its change", agent.leftover), mr);
+    if (agent.leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", agent.leftover), mr);
+    return decide(fix, { ...facts, result, handback: null }, mr);
+  }
+  if (agent.pushed !== null) return decide(fix, handingBack(facts, result, "the agent pushed a change but reported no changes", agent.pushed.sha), mr);
+  if (agent.leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", agent.leftover), mr);
   if (open === 0 && facts.pipeline !== "failed") {
     return decide(fix, handingBack(facts, result, `Greptile scored ${facts.score}/5 with nothing open and the agent changed nothing`), mr);
   }
@@ -323,11 +287,16 @@ const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Wor
     return prepareFailed(deps, err);
   }
 
+  // The agent pushes onto the loop's head through the push tool; the target is fixed here, never chosen by the agent.
+  const push: PushTarget = {
+    jobId: ctx.jobId, worktreePath: worktree.path, identifier: loop.identifier, issueId: loop.issueId,
+    mode: "fastForward", branch: loop.branch, baseSha: loop.baseSha, loopId: loop.id, port: jobPort(deps),
+  };
   let run: BrainRun;
   try {
     run = await (deps.runBrain ?? runBrainDetached)(
       deps.config.brain,
-      brainInput(deps, paths, worktree, prompt, env, "fix", { limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns }, resumeSessionId: sessionId }),
+      brainInput(deps, paths, worktree, prompt, env, "fix", { limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns }, resumeSessionId: sessionId, push }),
       deps.redactor,
       { ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
     );
@@ -348,7 +317,7 @@ const runRound = async (fix: Fix, observed: Observed, onWorktree: (worktree: Wor
 
   const validated = validateFixResult(run.output, findings);
   if (!validated.ok) return decide(fix, handingBack(facts, null, "the agent's result was invalid", validated.error), mr);
-  return handleResult(fix, worktree, facts, validated.result, findings.length, mr);
+  return handleResult(fix, worktree, push, facts, validated.result, findings.length, mr);
 };
 
 const executeFix = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
@@ -379,10 +348,13 @@ const executeFix = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (work
   if (stopped !== null) return stopped;
   const stored = deps.stores.jobs.get(ctx.jobId)?.fixResult ?? null;
   if (stored !== null) return publishStored(fix, stored, observed.mr);
+  // A rerun after the agent pushed (the attempt was interrupted later) never runs the brain again over its own push.
+  const earlier = deps.stores.pushes.latest(ctx.jobId);
+  if (earlier !== null) return publishHandback(deps, reload(fix), "an earlier attempt stopped after the agent pushed", earlier.sha);
   return runRound(fix, observed, onWorktree);
 };
 
-/** The fix job: resumes the loop's brain session on the review's findings, then pushes, replies and resolves, or hands back. */
+/** The fix job: resumes the loop's brain session on the review's findings with the push tool, then replies and resolves, or hands back. */
 export const runFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   const workspace: { worktree: Worktree | null } = { worktree: null };
   const outcome = redactOutcome(

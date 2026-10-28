@@ -5,7 +5,6 @@ export const FixResultSchema = z.object({
   outcome: z.enum(["changed", "no_changes", "failed"]),
   /** One entry per Greptile finding: fixed it, or declined it with a reason. */
   threads: z.array(z.object({ discussionId: z.string(), action: z.enum(["fixed", "declined"]), reply: z.string() })),
-  commitMessage: z.string(),
   summary: z.string(),
   checksRun: z.array(z.string()),
   failureDetail: z.string().nullable(),
@@ -35,7 +34,6 @@ export const validateFixResult = (output: unknown, findings: Finding[]): { ok: t
   const missing = [...expected].filter((id) => !seen.has(id));
   if (missing.length > 0) return { ok: false, error: `missing threads: ${missing.join(", ")}` };
 
-  if (result.outcome === "changed" && result.commitMessage.trim() === "") return { ok: false, error: "commitMessage is empty" };
   if (result.outcome === "no_changes" && result.threads.some((t) => t.action !== "declined")) {
     return { ok: false, error: "no_changes requires every thread to be declined" };
   }

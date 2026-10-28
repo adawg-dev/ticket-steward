@@ -71,7 +71,7 @@ const restorePrior = (deps: PushDeps, prior: Prior): void => {
  * A push recorded but not marked (the steward stopped between the push and its record): landed when the remote branch
  * is at its commit, so the next push starts from there instead of being refused by the lease.
  */
-const settleUnfinished = async (deps: PushDeps, target: PushTarget, remote: RemoteCredentials): Promise<void> => {
+export const settleUnfinished = async (deps: PushDeps, target: PushTarget, remote: RemoteCredentials): Promise<void> => {
   const latest = deps.stores.pushes.latest(target.jobId);
   if (latest === null || latest.pushedAt !== null) return;
   const site = await lsRemoteSite({ jobDir: jobDirOf(deps.config.dataDir, target.jobId) }, remote);

@@ -26,6 +26,14 @@ describe("renderFixPrompt", () => {
     expect(out).toContain("pnpm lint");
     expect(out).not.toMatch(/@greptile/i);
   });
+  it("has the agent commit with the identifier and push through the push tool", async () => {
+    const out = renderFixPrompt(await readFile("prompts/fix.md", "utf8"), input);
+    expect(out).toContain("starts with `ENG-1: `");
+    expect(out).toContain("Call the `push` tool");
+    expect(out).toContain("on top of `deadbeef`");
+    expect(out).not.toContain("commitMessage");
+    expect(out).not.toContain("Never run `git commit`");
+  });
   it("omits optional sections when empty", async () => {
     const out = renderFixPrompt(await readFile("prompts/fix.md", "utf8"), { ...input, findings: [], ciFailures: [], personCommits: [], newComments: [], hasChecks: false });
     expect(out).not.toContain("tweak copy");

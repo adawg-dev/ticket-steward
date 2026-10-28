@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { validateFixResult, type FixResult } from "../../src/greptile/result.js";
+import { FixResultSchema, validateFixResult, type FixResult } from "../../src/greptile/result.js";
 import type { Finding } from "../../src/greptile/summary.js";
 
 const finding = (discussionId: string): Finding => ({ discussionId, body: "b", filePath: "a.ts", lineStart: 1, lineEnd: 1, suggestedCode: null });
 const base = (over: Partial<FixResult>): FixResult => ({
   outcome: "changed",
   threads: [{ discussionId: "d1", action: "fixed", reply: "Fixed it." }],
-  commitMessage: "fix: thing",
   summary: "did it",
   checksRun: [],
   failureDetail: null,
@@ -38,13 +37,14 @@ describe("validateFixResult", () => {
     expect(validateFixResult(base({ threads: [t("d1", "fixed", "thanks @greptileai"), t("d2")] }), findings)).toMatchObject({ ok: false });
   });
   it("rejects no_changes with a fixed thread", () => {
-    expect(validateFixResult(base({ outcome: "no_changes", commitMessage: "", threads: [t("d1"), t("d2", "declined")] }), findings)).toMatchObject({ ok: false });
+    expect(validateFixResult(base({ outcome: "no_changes", threads: [t("d1"), t("d2", "declined")] }), findings)).toMatchObject({ ok: false });
   });
   it("accepts no_changes when every thread is declined", () => {
-    expect(validateFixResult(base({ outcome: "no_changes", commitMessage: "", threads: [t("d1", "declined"), t("d2", "declined")] }), findings).ok).toBe(true);
+    expect(validateFixResult(base({ outcome: "no_changes", threads: [t("d1", "declined"), t("d2", "declined")] }), findings).ok).toBe(true);
   });
-  it("rejects changed with an empty commit message", () => {
-    expect(validateFixResult(base({ commitMessage: " ", threads: [t("d1"), t("d2")] }), findings)).toMatchObject({ ok: false });
+  it("accepts a result without a commit message: the agent wrote its own when it committed", () => {
+    expect(validateFixResult(base({ threads: [t("d1"), t("d2")] }), findings).ok).toBe(true);
+    expect(FixResultSchema.shape).not.toHaveProperty("commitMessage");
   });
   it("rejects failed without failureDetail and empty summary", () => {
     expect(validateFixResult(base({ outcome: "failed", threads: [t("d1"), t("d2")] }), findings)).toMatchObject({ ok: false });

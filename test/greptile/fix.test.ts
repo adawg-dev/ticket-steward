@@ -1,6 +1,9 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
+import type { BrainInput, BrainRun } from "../../src/brain/types.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
@@ -10,6 +13,8 @@ import { runFix } from "../../src/greptile/fix.js";
 import { runRestart } from "../../src/greptile/start.js";
 import { LOOP_MARKER } from "../../src/greptile/publish.js";
 import type { FixResult } from "../../src/greptile/result.js";
+import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
+import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
@@ -50,7 +55,6 @@ const summaryBody = (score: number, sha: string, reviews = 3): string =>
 const changed = (discussionId: string): FixResult => ({
   outcome: "changed",
   threads: [{ discussionId, action: "fixed", reply: "Added the null check." }],
-  commitMessage: "Check for a null chunk",
   summary: "Added the null check the review asked for.",
   checksRun: ["tsc: ok"],
   failureDetail: null,
@@ -59,7 +63,6 @@ const changed = (discussionId: string): FixResult => ({
 const declined = (discussionId: string): FixResult => ({
   outcome: "no_changes",
   threads: [{ discussionId, action: "declined", reply: "The chunk can never be null here: the reader filters empty reads." }],
-  commitMessage: "",
   summary: "Declined: the finding does not apply.",
   checksRun: [],
   failureDetail: null,
@@ -98,7 +101,63 @@ const makeConfig = (): StewardConfig => ({
   },
 });
 
-const makeDeps = (brain: FakeBrain): PipelineDeps => ({
+/** The push target the steward gave the run's push server, read back from its command line. */
+const pushTargetOf = (input: BrainInput): PushTarget | null => {
+  const args = input.mcpServers.push?.args;
+  if (args === undefined) return null;
+  return PushTargetSchema.parse(JSON.parse(args[args.indexOf("--target") + 1] ?? "null"));
+};
+
+/** The agent's commit in its worktree. */
+const agentCommit = async (workspace: string, subject: string, file = "src/adapter.ts", content = "export const adapter = 3;\n"): Promise<string> => {
+  await mkdir(join(workspace, file, ".."), { recursive: true });
+  await writeFile(join(workspace, file), content);
+  await git(workspace, ["add", "--", file]);
+  await git(workspace, ["commit", "-q", "-m", subject]);
+  return git(workspace, ["rev-parse", "HEAD"]);
+};
+
+type AgentStep = (workspace: string, push: () => Promise<PushResult>) => Promise<void>;
+
+/** Commits the null check and pushes it, as the prompt asks. */
+const commitAndPush: AgentStep = async (workspace, push) => {
+  await agentCommit(workspace, "API-1: Check for a null chunk");
+  await push();
+};
+
+/**
+ * A brain that acts like the agent: `act` commits in the worktree and calls the push tool, here the real push service
+ * with the target the steward put on the push server's command line, bound to the job's deps by `makeDeps`.
+ */
+class AgentBrain extends FakeBrain {
+  deps: PipelineDeps | null = null;
+  readonly pushes: PushResult[] = [];
+
+  constructor(options: FakeBrainOptions, private readonly act: AgentStep) {
+    super(options);
+  }
+
+  override async run(input: BrainInput, onMessage: (line: string) => void): Promise<BrainRun> {
+    const run = await super.run(input, onMessage);
+    const target = pushTargetOf(input);
+    await this.act(input.workspacePath, async () => {
+      if (target === null || this.deps === null) throw new Error("the run has no push tool");
+      // The MCP server turns a thrown error into a refusal; so does this stand-in.
+      const pushed = await pushFromWorktree({ deps: this.deps, target, branchType: null }).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: String(err) }));
+      this.pushes.push(pushed);
+      return pushed;
+    });
+    return run;
+  }
+}
+
+const makeDeps = (brain: FakeBrain): PipelineDeps => {
+  const deps = baseDeps(brain);
+  if (brain instanceof AgentBrain) brain.deps = deps;
+  return deps;
+};
+
+const baseDeps = (brain: FakeBrain): PipelineDeps => ({
   config: makeConfig(),
   secrets: { GITLAB_PUSH_TOKEN: "glpat-push-token-value" },
   configPath: join(repo.root, "steward.config.ts"),
@@ -114,7 +173,8 @@ const makeDeps = (brain: FakeBrain): PipelineDeps => ({
   runBrain: (_config, input) => brain.run(input, () => undefined),
 });
 
-const editing = (options: FakeBrainOptions): FakeBrain => new FakeBrain({ editWorkspace: { "src/adapter.ts": "export const adapter = 3;\n" }, sessionId: "session-2", ...options });
+/** An agent that commits and pushes its fix (or does what `act` says), then returns its result. */
+const editing = (options: FakeBrainOptions, act: AgentStep = commitAndPush): AgentBrain => new AgentBrain({ sessionId: "session-2", ...options }, act);
 
 /** A loop at round 0 whose implement push is the branch head, now fixing. */
 const createLoop = (): number => {
@@ -175,7 +235,7 @@ afterEach(async () => {
 });
 
 describe("runFix", () => {
-  it("resumes the session, pushes one fast-forward commit, replies, resolves and queues the next await", async () => {
+  it("resumes the session with the push tool; the agent's fast-forward push is replied to, resolved and the next await queued", async () => {
     const id = createLoop();
     const brain = editing({ result: changed(finding) });
 
@@ -189,6 +249,8 @@ describe("runFix", () => {
     expect(brain.lastInput().resumeSessionId).toBe("session-1");
     expect(brain.lastInput().output).toBe("fix");
     expect(brain.lastInput().timeoutMs).toBe(120_000);
+    expect(pushTargetOf(brain.lastInput())).toMatchObject({ mode: "fastForward", branch: BRANCH, baseSha, loopId: id, identifier: "API-1", issueId: "issue-1" });
+    expect(brain.pushes).toEqual([{ ok: true, branch: BRANCH, sha: pushed, commits: 1 }]);
     expect(brain.lastInput().workspacePath).toBe(join(repo.dataDir, "work", "ticket-API-1"));
     expect(gitlab.replies).toHaveLength(1);
     expect(gitlab.replies[0]?.discussionId).toBe(finding);
@@ -352,8 +414,10 @@ describe("runFix", () => {
     // The await job finds Greptile's 3/5 on the person's head and queues the fix.
     stores.loops.update(id, { state: "fixing" });
     const brain = editing({ result: changed(finding) });
+    const fixDeps: PipelineDeps = { ...deps, brain, runBrain: (_config, input) => brain.run(input, () => undefined) };
+    brain.deps = fixDeps;
 
-    const outcome = await runFix(claim(id), { ...deps, brain, runBrain: (_config, input) => brain.run(input, () => undefined) });
+    const outcome = await runFix(claim(id), fixDeps);
 
     expect(outcome).toEqual({ status: "succeeded" });
     expect(brain.lastInput().prompt).toContain("- add docs/notes.md");
@@ -379,7 +443,8 @@ describe("runFix", () => {
 
     expect(first.status).toBe("publish_failed");
     const pushed = await git(repo.repo, ["rev-parse", BRANCH]);
-    expect(loopOf(id)).toMatchObject({ state: "fixing", headSha, pendingPush: { sha: pushed, pushed: true } });
+    // The push tool moved the loop's head, so the gate reads the MR at the pushed commit as the loop's own.
+    expect(loopOf(id)).toMatchObject({ state: "fixing", headSha: pushed, pendingPush: { sha: pushed, pushed: true } });
     gitlab.mr = { ...gitlab.mr, sha: pushed };
 
     const second_ = await runFix(retry(ctx), makeDeps(brain));
@@ -390,20 +455,138 @@ describe("runFix", () => {
     expect(gitlab.resolved).toEqual([finding, second]);
     expect(await git(repo.repo, ["rev-parse", BRANCH])).toBe(pushed);
     expect(loopOf(id)).toMatchObject({ round: 1, headSha: pushed, state: "awaiting_review", pendingPush: null });
-    expect(loopOf(id).history).toHaveLength(1);
+    expect(loopOf(id).history).toEqual([expect.objectContaining({ round: 0, headSha, outcome: "changed" })]);
+    expect(brain.pushes).toHaveLength(1);
   });
 
-  it("hands back when the push is rejected because the branch moved", async () => {
+  it("settles a push the tool recorded but never marked from the MR's head on retry, without pushing again", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) });
+    gitlab.replyToDiscussion = async () => {
+      throw new Error("GitLab down");
+    };
+    const ctx = claim(id);
+    expect((await runFix(ctx, makeDeps(brain))).status).toBe("publish_failed");
+    const pushed = await git(repo.repo, ["rev-parse", BRANCH]);
+    // As if the push server stopped between the push landing and its record.
+    stores.loops.update(id, { headSha, pendingPush: { sha: pushed, pushed: false } });
+    gitlab.replyToDiscussion = FakeGitLabMr.prototype.replyToDiscussion.bind(gitlab);
+    gitlab.mr = { ...gitlab.mr, sha: pushed };
+
+    const outcome = await runFix(retry(ctx), makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(brain.runs).toBe(1);
+    expect(brain.pushes).toHaveLength(1);
+    expect(loopOf(id)).toMatchObject({ round: 1, headSha: pushed, state: "awaiting_review", pendingPush: null });
+  });
+
+  it("hands back on retry when a push the tool recorded never reached the MR", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) });
+    gitlab.replyToDiscussion = async () => {
+      throw new Error("GitLab down");
+    };
+    const ctx = claim(id);
+    expect((await runFix(ctx, makeDeps(brain))).status).toBe("publish_failed");
+    const pushed = await git(repo.repo, ["rev-parse", BRANCH]);
+    stores.loops.update(id, { headSha, pendingPush: { sha: pushed, pushed: false } });
+
+    const outcome = await runFix(retry(ctx), makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the push did not complete" });
+    expect(brain.runs).toBe(1);
+    expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("hands back without running the brain again when an interrupted attempt had pushed", async () => {
+    const id = createLoop();
+    const brain = editing({ fail: true, error: INTERRUPTED_ERROR });
+    const ctx = claim(id);
+    expect(await runFix(ctx, makeDeps(brain))).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+    const pushed = await git(repo.repo, ["rev-parse", BRANCH]);
+    expect(pushed).not.toBe(headSha);
+    stores.jobs.finish(ctx.jobId, { status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+    stores.jobs.claimById(ctx.jobId);
+    const next = { ...ctx, attempt: stores.attempts.start(ctx.jobId).number };
+    gitlab.mr = { ...gitlab.mr, sha: pushed };
+
+    const outcome = await runFix(next, makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: an earlier attempt stopped after the agent pushed" });
+    expect(brain.runs).toBe(1);
+    expect(brain.pushes).toHaveLength(1);
+    expect(loopOf(id)).toMatchObject({ state: "handed_back", headSha: pushed });
+  });
+
+  it("hands back when the agent reports a change it did not push", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) }, async (workspace) => {
+      await agentCommit(workspace, "API-1: Check for a null chunk");
+    });
+
+    const outcome = await runFix(claim(id), makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent did not push its change" });
+    expect(await git(repo.repo, ["rev-parse", BRANCH])).toBe(headSha);
+    expect(gitlab.replies).toEqual([]);
+    expect(loopOf(id)).toMatchObject({ state: "handed_back", headSha, pendingPush: null });
+    expect(gitlab.notes.join("\n")).toContain("commits not pushed:");
+    expect(gitlab.notes.join("\n")).toContain("API-1: Check for a null chunk");
+  });
+
+  it("hands back when the push tool refused because the branch moved", async () => {
     await git(repo.repo, ["checkout", "-q", BRANCH]);
     const moved = await commitFile(repo.repo, "docs/notes.md", "notes\n");
     await git(repo.repo, ["checkout", "-q", "main"]);
     const id = createLoop();
+    const brain = editing({ result: changed(finding) });
 
-    const outcome = await runFix(claim(id), makeDeps(editing({ result: changed(finding) })));
+    const outcome = await runFix(claim(id), makeDeps(brain));
 
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the push was rejected" });
+    expect(brain.pushes).toEqual([expect.objectContaining({ ok: false, reason: "the push was rejected" })]);
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent did not push its change" });
     expect(await git(repo.repo, ["rev-parse", BRANCH])).toBe(moved);
     expect(gitlab.replies).toEqual([]);
+    expect(loopOf(id)).toMatchObject({ state: "handed_back", headSha, pendingPush: null });
+  });
+
+  it("hands back when the agent pushed but left uncommitted work behind", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) }, async (workspace, push) => {
+      await commitAndPush(workspace, push);
+      await writeFile(join(workspace, "src/extra.ts"), "export const extra = 1;\n");
+    });
+
+    const outcome = await runFix(claim(id), makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent left unpushed work" });
+    expect(gitlab.replies).toEqual([]);
+    expect(gitlab.notes.join("\n")).toContain("src/extra.ts");
+    expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("hands back a no_changes round that left edits behind", async () => {
+    const id = createLoop();
+    const brain = editing({ result: declined(finding) }, async (workspace) => {
+      await writeFile(join(workspace, "src/adapter.ts"), "export const adapter = 4;\n");
+    });
+
+    const outcome = await runFix(claim(id), makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent left unpushed work" });
+    expect(gitlab.notes.some((note) => note.includes("@greptileai"))).toBe(false);
+    expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("hands back a no_changes round whose agent pushed anyway", async () => {
+    const id = createLoop();
+    const brain = editing({ result: declined(finding) });
+
+    const outcome = await runFix(claim(id), makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent pushed a change but reported no changes" });
+    expect(gitlab.notes.some((note) => note.includes("@greptileai"))).toBe(false);
     expect(loopOf(id).state).toBe("handed_back");
   });
 
