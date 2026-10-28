@@ -321,9 +321,11 @@ file in the job dir (not a ref, which the mirror's `--prune` fetch would delete)
 runs from a fresh scratch bare repo in the job dir with hooks disabled, with
 `--force-with-lease`, so it can never force a branch or create one that exists. Each
 token-carrying `ls-remote` runs from a steward-made directory or scratch repo, never the
-mirror or worktree. After the run the steward opens the MR; it hands back "the agent did not
-push its change" when nothing was pushed, and "the agent left unpushed work" (listing it)
-when uncommitted changes or unpushed commits remain.
+mirror or worktree. The steward never opens the MR; the kickoff pipeline does once the
+branch lands. After the run the steward only reads what the agent did: it hands back "the
+agent did not push its change" when nothing was pushed, and "the agent left unpushed work"
+(listing it) when uncommitted changes or unpushed commits remain. It never commits or pushes
+for the agent.
 
 **The secret scan is best-effort.** It catches accidental leaks: a plain-text overlay or
 steward secret in an added line or the commit message. A diff it cannot read or that is too
@@ -339,9 +341,9 @@ are the answer, not an error. Only a push or label-change failure is `publish_fa
 
 **`steward implement KEY [--dry-run]`.** Enqueues when `serve` is running, otherwise runs
 inline under `run.lock`. It never swaps labels and re-runs even after a prior success; the
-existing-branch check still prevents a second push. `--dry-run` runs up to and including the
-checks, prints the diff stat and the would-be commit message, and never commits, pushes or
-writes to Linear.
+existing-branch check still prevents a second push. `--dry-run` runs the agent without the
+push tool, then prints the agent's work on the base (its commits and uncommitted changes) or
+the hand-back it would make; nothing is pushed or written to Linear.
 
 One implement job can hold the worker for about 90 minutes (setup, up to 60 of brain,
 checks); other heavy jobs queue behind it unless `slots` gives the worker more lanes.
@@ -352,14 +354,14 @@ on the MR once the pipeline opens it). The first real push is also what proves t
 token's Developer access: doctor's `push token` line only runs `ls-remote`.
 
 Whatever the trigger, the steward never works on a Done or Canceled ticket. The state is
-checked at intake, when a job starts, after the agent finishes and before every label change
-or push; a closed ticket fails the job without retry. This applies to `steward implement` too.
+checked at intake, when a job starts, by the push tool before every push (which it refuses),
+and before every label change; a closed ticket fails the job without retry. This applies to `steward implement` too.
 
 ### 1.7b Greptile fix loop (optional)
 
 With a `greptile` block the steward does not stop at the push. It waits for the pipeline to open the merge request, waits for
-Greptile's review, resumes the implementing brain session to fix or decline each finding, pushes one commit per round and
-repeats until the review passes or it hands the ticket back. It needs `implement`, `codehost.kind: "gitlab"` and
+Greptile's review, resumes the implementing brain session to fix or decline each finding (the agent pushes its fix,
+one or more commits, through the push tool) and repeats until the review passes or it hands the ticket back. It needs `implement`, `codehost.kind: "gitlab"` and
 `brain.kind: "claude-code"`.
 
 ```ts
@@ -420,8 +422,9 @@ stay as they are).
 **Hand-back reasons.** The ticket becomes `ready-for-human`, and the MR gets a note with the reason, the last Greptile
 score and any detail (an output tail, paths); a loop whose MR never appeared only changes the label. Reasons:
 no MR was opened; a person pushed to the branch; Greptile failed or never reviewed the head; no finished pipeline, or it
-failed or was canceled; the fix could not be verified (checks, secret guard, no single commit); or the score is still
-below 5/5 after `maxRounds` fix rounds. The brain can also hand back itself when it cannot fix a finding. A round with no
+failed or was canceled; the agent did not push its change, left unpushed work, pushed a change but reported no changes,
+or its push could not be confirmed; or the score is still below 5/5 after `maxRounds` fix rounds. The push tool's own
+refusals (checks, secret guard, commit subjects) go back to the agent to fix, not to a person. The brain can also hand back itself when it cannot fix a finding. A round with no
 push hands back when Greptile's summary has no `Reviews (N)` counter, since its next review could not be told apart. A
 loop whose await, fix or hand-back job fails for good (out of attempts, or a crash) is handed back with that job's error
 within a few minutes, so it never sits in a running state with nothing to move it. Retryable errors only add up while
@@ -528,7 +531,7 @@ curl -s https://steward.example.com/health
 For a ticket outside Linear's webhook path:
 
 ```bash
-steward implement KEY-123 --dry-run    # runs up to the checks and prints the would-be commit; takes run.lock (refused while serve runs)
+steward implement KEY-123 --dry-run    # runs the agent without the push tool and prints its unpushed work; takes run.lock (refused while serve runs)
 steward implement KEY-123              # enqueues if serve is running, otherwise runs inline under run.lock
 ```
 
@@ -547,7 +550,7 @@ same ticket (or the same merge request) never run at once.
 setuid). Instead systemd listens on `/run/steward-slot.sock` (owner root, group `steward`, mode 0660) and,
 for each connection, starts one `steward-slot@.service` instance that runs
 `/usr/local/sbin/steward-slot --socket` as root. The helper reads one request line, `<command> <n>` (`up|down|status|ports
-<n>`, or `check`; `n` 1–9, at most 64 bytes), runs it, and replies with the command's output followed by a last line `exit <code>`,
+<n>`, or `check`; `n` 1–20, at most 64 bytes), runs it, and replies with the command's output followed by a last line `exit <code>`,
 and refuses anything else with `exit 2`. The brain's policy also denies `sudo` and `docker`. The accepted
 risk: the agent runs as `steward`, so it can connect to the socket and `down` another slot; that slot's
 job then fails and is retried.

@@ -64,7 +64,7 @@ steward implement KEY-123 --dry-run
 | `steward mirror init` \| `fetch` | Create or refresh the bare mirror. |
 | `steward overlay sync --from <path> [--allow-pattern <re>]` | Copy gitignored `.env*` files from a checkout into the overlay; refuses prod-looking values unless allowed. |
 | `steward serve` | Webhook server and worker; takes `run.lock`. |
-| `steward implement <KEY\|UUID> [--dry-run]` | Implement one ticket on a new branch: enqueue if `serve` is up, else run inline; never swaps labels. `--dry-run` runs up to the checks and prints the would-be commit. |
+| `steward implement <KEY\|UUID> [--dry-run]` | Implement one ticket on a new branch: enqueue if `serve` is up, else run inline; never swaps labels. `--dry-run` runs the agent without the push tool and prints its unpushed work. |
 | `steward jobs [--status s] [--limit n]` | List jobs. |
 | `steward jobs show <id>` | Job row with its stored result, attempts, transcript path, artifacts listing. |
 | `steward jobs retry <id>` | Runs the job again: requeues it for `serve` when that is running, otherwise runs it inline under the run lock (publish-only when an implement result is stored; a leftover enrich job fails). |

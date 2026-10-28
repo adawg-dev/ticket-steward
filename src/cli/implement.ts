@@ -16,7 +16,7 @@ export const registerImplement = (program: Command, ctx: CliContext): void => {
     .command("implement")
     .description("implement one ticket on a new branch: enqueue when serve is running, otherwise run inline")
     .argument("<key>", "issue key or UUID")
-    .option("--dry-run", "run up to the steward's checks, print the would-be commit, write nothing", false)
+    .option("--dry-run", "run the agent without the push tool, print its unpushed work, write nothing", false)
     .action(async (key: string, opts: { dryRun: boolean }) => {
       const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);
       const { config } = runtime.loaded;
