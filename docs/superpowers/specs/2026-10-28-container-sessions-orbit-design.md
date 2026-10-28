@@ -261,12 +261,11 @@ image must use the native binary.
 
 ## Order of work
 
-1. Container stack (Part 1) including migration of the live host. Shippable alone.
-2a. Linear becomes labels-only and enrich is removed (Part 2b). Independent of 1; do it first if convenient, since it
-    shrinks the code the later parts touch.
-2. Session retention and worktree re-creation, then the `chat` job kind with Linear and GitLab sources, then
-   `steward chat` (Part 2).
-3. Orbit in the image and agent config (Part 3). Can run in parallel with 2 after 1.
+1. Linear becomes labels-only and enrich is removed (Part 2b). Independent of the container; first, since it shrinks
+   the code the later parts touch.
+2. Container stack (Part 1) including migration of the live host. Shippable alone.
+3. Session retention and worktree re-creation, then the `chat` job kind on MR notes, then `steward chat` (Part 2).
+4. Orbit in the image and agent config (Part 3). Can run in parallel with 3 after 2.
 
 ## Left to the builder
 
