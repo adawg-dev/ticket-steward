@@ -1,13 +1,19 @@
-import { jobKindFor, type IssueJobKind } from "../core/intake.js";
-import { StoredBrainResultSchema, type BrainResult, type StoredBrainResult } from "../core/result.js";
 import type { JobOutcome } from "../core/types.js";
 import { StoredFixSchema, type StoredFix } from "../greptile/result.js";
 import { StoredImplementSchema, type StoredImplement } from "../implement/result.js";
 import type { TriggerEvent } from "../tracker/types.js";
 import { nowIso, readStored, type Database } from "./db.js";
 
-/** Issue jobs (enrich, implement) and the fix loop's steps (await_review, fix, restart). */
-export type JobKind = "enrich" | "implement" | "await_review" | "fix" | "restart";
+/** Issue jobs (implement) and the fix loop's steps (await_review, fix, restart). */
+export type JobKind = "implement" | "await_review" | "fix" | "restart";
+
+/** Kinds a job row may carry: today's, plus `enrich` (removed 2026-10-28), kept so its history still lists. Such a job never runs. */
+export type StoredJobKind = JobKind | "enrich";
+
+/** The error `failRetiredKinds` gives a queued or running job of a removed kind. */
+export const RETIRED_KIND_ERROR = "enrich was removed; this job will not run";
+
+const JOB_KINDS: readonly JobKind[] = ["implement", "await_review", "fix", "restart"];
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "publish_failed" | "skipped";
 
@@ -16,13 +22,11 @@ export interface Job {
   issueId: string;
   identifier: string;
   teamKey: string;
-  kind: JobKind;
+  kind: StoredJobKind;
   subject: string | null;
   trigger: TriggerEvent;
   status: JobStatus;
   attempts: number;
-  result: StoredBrainResult | null;
-  resultSha: string | null;
   implementResult: StoredImplement | null;
   /** A fix job's validated result or hand-back, so a retry publishes it instead of running the brain again. */
   fixResult: StoredFix | null;
@@ -45,20 +49,18 @@ export interface Job {
   unreadable: StoredColumn[];
 }
 
-export type StoredColumn = "trigger" | "result" | "implement_result" | "fix_result";
+export type StoredColumn = "trigger" | "implement_result" | "fix_result";
 
 interface JobRow {
   id: number;
   issue_id: string;
   identifier: string;
   team_key: string;
-  kind: JobKind;
+  kind: StoredJobKind;
   subject: string | null;
   trigger: string;
   status: JobStatus;
   attempts: number;
-  result: string | null;
-  result_sha: string | null;
   implement_result: string | null;
   fix_result: string | null;
   branch: string | null;
@@ -101,8 +103,6 @@ const toJob = (row: JobRow): Job => {
     trigger: readTrigger(row, unreadable),
     status: row.status,
     attempts: row.attempts,
-    result: readStored(row.result, "result", StoredBrainResultSchema, unreadable),
-    resultSha: row.result_sha,
     implementResult: readStored(row.implement_result, "implement_result", StoredImplementSchema, unreadable),
     fixResult: readStored(row.fix_result, "fix_result", StoredFixSchema, unreadable),
     branch: row.branch,
@@ -140,7 +140,7 @@ export const loopSubject = (loopId: number): string => `loop:${loopId}`;
 const jobColumns = (event: TriggerEvent): JobColumns => {
   const ticket = { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey };
   if (event.kind === "loop") return { ...ticket, kind: event.step === "await" ? "await_review" : event.step, subject: loopSubject(event.loopId) };
-  return { ...ticket, kind: jobKindFor(event), subject: null };
+  return { ...ticket, kind: "implement", subject: null };
 };
 
 const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, wake_requested = 0, started_at = ?";
@@ -151,7 +151,7 @@ export class JobStore {
   private readonly existsSucceeded;
   private readonly claimOldest;
   private readonly claimOne;
-  private readonly storeResult;
+  private readonly failRetired;
   private readonly storeImplement;
   private readonly storeFix;
   private readonly storeCommit;
@@ -182,7 +182,7 @@ export class JobStore {
     this.selectQueued = db.prepare<[string, JobKind], JobRow>(
       "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' AND kind = ? ORDER BY id LIMIT 1",
     );
-    this.existsSucceeded = db.prepare<[string, IssueJobKind], { found: number }>(
+    this.existsSucceeded = db.prepare<[string, JobKind], { found: number }>(
       // A handed-back implement job also finishes succeeded; only one that pushed a branch implemented the ticket.
       "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded' AND kind = ? AND (kind <> 'implement' OR pushed_at IS NOT NULL)) AS found",
     );
@@ -201,7 +201,10 @@ export class JobStore {
        RETURNING *`,
     );
     this.claimOne = db.prepare<[string, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
-    this.storeResult = db.prepare<[string, string, number]>("UPDATE jobs SET result = ?, result_sha = ? WHERE id = ?");
+    this.failRetired = db.prepare<[string, string]>(
+      `UPDATE jobs SET status = 'failed', error = ?, finished_at = ?, wake_requested = 0
+       WHERE status IN ('queued', 'running') AND kind NOT IN (${JOB_KINDS.map((kind) => `'${kind}'`).join(", ")})`,
+    );
     this.storeImplement = db.prepare<[string, number]>("UPDATE jobs SET implement_result = ? WHERE id = ?");
     this.storeFix = db.prepare<[string, number]>("UPDATE jobs SET fix_result = ? WHERE id = ?");
     this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ? WHERE id = ?");
@@ -273,12 +276,12 @@ export class JobStore {
     return Number(lastInsertRowid);
   }
 
-  findQueued(issueId: string, kind: JobKind = "enrich"): Job | null {
+  findQueued(issueId: string, kind: JobKind = "implement"): Job | null {
     const row = this.selectQueued.get(issueId, kind);
     return row === undefined ? null : toJob(row);
   }
 
-  hasSucceeded(issueId: string, kind: IssueJobKind = "enrich"): boolean {
+  hasSucceeded(issueId: string, kind: JobKind = "implement"): boolean {
     return this.existsSucceeded.get(issueId, kind)?.found === 1;
   }
 
@@ -312,10 +315,6 @@ export class JobStore {
   claimById(id: number): Job | null {
     const row = this.claimOne.get(nowIso(), id);
     return row === undefined ? null : toJob(row);
-  }
-
-  saveResult(id: number, result: BrainResult, sha: string): void {
-    this.storeResult.run(JSON.stringify(result), sha, id);
   }
 
   /** Ends the job with its outcome; a deferred one is not an end, so it goes back to the queue through `defer`. */
@@ -375,6 +374,11 @@ export class JobStore {
     const rows =
       filter.status === undefined ? this.selectAll.all(filter.limit) : this.selectByStatus.all(filter.status, filter.limit);
     return rows.map(toJob);
+  }
+
+  /** Fails every queued or running job of a kind no worker runs any more (enrich); returns how many. Called at worker start. */
+  failRetiredKinds(): number {
+    return this.failRetired.run(RETIRED_KIND_ERROR, nowIso()).changes;
   }
 
   requeueInterrupted(maxAttempts: number): { requeued: number; failed: number } {

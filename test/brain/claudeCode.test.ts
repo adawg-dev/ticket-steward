@@ -1,7 +1,7 @@
 import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createClaudeCodeBrain, type QueryImpl } from "../../src/brain/claudeCode.js";
 import type { BrainInput } from "../../src/brain/types.js";
-import { brainResultJsonSchema } from "../../src/core/result.js";
+import { fixResultJsonSchema } from "../../src/greptile/result.js";
 import { implementResultJsonSchema } from "../../src/implement/result.js";
 
 const input: BrainInput = {
@@ -15,7 +15,7 @@ const input: BrainInput = {
   model: "claude-test",
   mcpServers: {},
   denyPaths: [],
-  output: "enrich",
+  output: "fix",
 };
 
 const usage = { inputTokens: 10, outputTokens: 20, costUsd: 0.5 };
@@ -97,13 +97,13 @@ describe("claude-code brain", () => {
     expect(queryMock).toHaveBeenCalledTimes(1);
   });
 
-  it("asks for the enrichment schema when the input is an enrichment", async () => {
+  it("asks for the fix schema when the input is a fix", async () => {
     const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
 
     await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, onMessage);
 
     const captured = queryMock.mock.calls[0]?.[0].options;
-    expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: brainResultJsonSchema });
+    expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: fixResultJsonSchema });
   });
 
   it("asks for the implement schema when the input is an implement", async () => {

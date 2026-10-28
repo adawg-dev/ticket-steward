@@ -51,7 +51,7 @@ describe("brainInput", () => {
   const paths = jobPaths(ctx(false), fullDeps);
 
   it("uses the configured brain limits by default", () => {
-    const input = brainInput(fullDeps, paths, worktree, "prompt", {}, "enrich");
+    const input = brainInput(fullDeps, paths, worktree, "prompt", {}, "implement");
     expect(input.timeoutMs).toBe(1_800_000);
     expect(input.maxTurns).toBe(80);
   });
@@ -64,12 +64,12 @@ describe("brainInput", () => {
   });
 
   it("denies the sessions dir to the agent", () => {
-    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "enrich").denyPaths).toContain("/data/sessions");
+    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement").denyPaths).toContain("/data/sessions");
   });
 
   it("passes the session to resume only when given", () => {
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "fix", { resumeSessionId: "s0" }).resumeSessionId).toBe("s0");
-    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "enrich")).not.toHaveProperty("resumeSessionId");
+    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement")).not.toHaveProperty("resumeSessionId");
   });
 });
 

@@ -3,7 +3,7 @@ import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Command } from "commander";
 import { fail, println, type CliContext } from "./context.js";
-import { defaultPromptPath, envExamplePath, fixPromptPath } from "./paths.js";
+import { envExamplePath, fixPromptPath, implementPromptPath } from "./paths.js";
 
 const CONFIG_TEMPLATE = `import { defineConfig } from "ticket-steward";
 
@@ -11,7 +11,7 @@ export default defineConfig({
   dataDir: "/var/lib/ticket-steward",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
   // brain: { kind: "openai-agents", model: "gpt-6-luna", reasoningEffort: "high", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear", teams: ["ENG"], gatewayIssues: "enrich", bugLabels: ["Bug"] }, // "skip" only if ticket-gateway enriches through the steward itself
+  tracker: { kind: "linear", teams: ["ENG"], labels: {} }, // labels default to ready-for-agent, agent-implemented, ...
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "org/repo" },
   // codehost: { kind: "github", owner: "org", repo: "repo" },
   workspace: {
@@ -26,8 +26,11 @@ export default defineConfig({
     keepOnFailure: true,
   },
   retention: { keptWorktrees: 3, days: 30 },
-  prompt: "./prompts/enrich.md",
   server: { port: 3020, publicUrl: "https://steward.example.com" },
+  implement: {
+    prompt: "./prompts/implement.md",
+    commitAuthor: { name: "Ticket Steward", email: "steward@example.com" }, // GITLAB_PUSH_TOKEN in .env pushes as this author
+  },
 });
 `;
 
@@ -53,14 +56,14 @@ const optionalTargets = (dir: string): Target[] => [
 const targets = (dir: string): Target[] => [
   { path: join(dir, "steward.config.ts"), write: (): Promise<void> => writeFile(join(dir, "steward.config.ts"), CONFIG_TEMPLATE) },
   { path: join(dir, ".env.example"), write: (): Promise<void> => copyFile(envExamplePath, join(dir, ".env.example")) },
-  { path: join(dir, "prompts", "enrich.md"), write: (): Promise<void> => copyFile(defaultPromptPath, join(dir, "prompts", "enrich.md")) },
+  { path: join(dir, "prompts", "implement.md"), write: (): Promise<void> => copyFile(implementPromptPath, join(dir, "prompts", "implement.md")) },
   { path: join(dir, "skills", "README.md"), write: (): Promise<void> => writeFile(join(dir, "skills", "README.md"), SKILLS_README) },
 ];
 
 export const registerInit = (program: Command, ctx: CliContext): void => {
   program
     .command("init")
-    .description("write steward.config.ts, .env.example, prompts/enrich.md, prompts/fix.md and skills/ into a directory")
+    .description("write steward.config.ts, .env.example, prompts/implement.md, prompts/fix.md and skills/ into a directory")
     .argument("[dir]", "target directory", process.cwd())
     .action(async (dir: string) => {
       const files = targets(resolve(dir));

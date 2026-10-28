@@ -59,7 +59,6 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string }): P
   const config: StewardConfig = {
     ...parsed,
     dataDir: resolveFromConfigDir(configDir, parsed.dataDir),
-    prompt: resolveFromConfigDir(configDir, parsed.prompt),
     workspace: {
       ...parsed.workspace,
       overlayDir: resolveFromConfigDir(configDir, parsed.workspace.overlayDir),

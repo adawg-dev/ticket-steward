@@ -25,9 +25,7 @@ const IssueSchema = z.object({
 type IssuePayload = z.infer<typeof IssueSchema>;
 
 export interface TriggerLabels {
-  triage: string;
-  /** Absent when implement is not configured: the label is then not a trigger, so a ticket created with both labels triages. */
-  implement?: string;
+  implement: string;
 }
 
 /** True when the payload carries `name` and it is new: present on a create, or absent from updatedFrom.labelIds on an update. */
@@ -40,12 +38,8 @@ const newlyAdded = (payload: IssuePayload, name: string): boolean => {
   return previous !== undefined && previous !== null && !previous.includes(label.id);
 };
 
-/** Implement wins when both labels arrive together: the direct path skips triage. */
-const labelAction = (payload: IssuePayload, labels: TriggerLabels): LabelAction | null => {
-  if (labels.implement !== undefined && newlyAdded(payload, labels.implement)) return "implement";
-  if (newlyAdded(payload, labels.triage)) return "triage";
-  return null;
-};
+const labelAction = (payload: IssuePayload, labels: TriggerLabels | undefined): LabelAction | null =>
+  labels !== undefined && newlyAdded(payload, labels.implement) ? "implement" : null;
 
 export const parseEvent = (
   headers: { event: string | undefined; delivery: string | undefined },
@@ -58,8 +52,8 @@ export const parseEvent = (
   if (!parsed.success) return null;
   const { id, identifier, description, team, state } = parsed.data.data;
   const base = { issueId: id, identifier, teamKey: team.key, deliveryId: delivery, description: description ?? "", stateType: state?.type ?? null };
-  if (opts.labels === undefined) return parsed.data.action === "create" ? { kind: "issue.created", ...base } : null;
   const action = labelAction(parsed.data, opts.labels);
-  if (action === null) return null;
-  return { kind: parsed.data.action === "create" ? "issue.created" : "issue.labeled", ...base, action };
+  // A created ticket without the implement label still reaches intake, which skips it with a reason; other updates are ignored.
+  if (parsed.data.action === "create") return action === null ? { kind: "issue.created", ...base } : { kind: "issue.created", ...base, action };
+  return action === null ? null : { kind: "issue.labeled", ...base, action };
 };

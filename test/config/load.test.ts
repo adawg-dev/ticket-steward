@@ -9,7 +9,7 @@ import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: "./data",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich", bugLabels: ["Bug"] },
+  tracker: { kind: "linear", teams: ["API"], labels: {} },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "concentrateai/kickoff" },
   workspace: {
     fetchUrl: "https://gitlab.com/concentrateai/kickoff.git",
@@ -19,11 +19,21 @@ export default defineConfig({
     setup: ["pnpm install --frozen-lockfile --ignore-scripts"],
     port: 4100,
   },
-  prompt: "./prompts/enrich.md",
   server: { port: 3020, publicUrl: "https://steward.example.com" },
+  implement: { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } },
   ${overrides}
 });
 `;
+
+/** implement is required, and implement requires the push token. */
+const PUSH = "GITLAB_PUSH_TOKEN=glpat-push-token-value\n";
+const pushSecret = { GITLAB_PUSH_TOKEN: "glpat-push-token-value" };
+
+/** Writes the config and a .env holding the push token plus `env`. */
+const writeSource = async (target: string, source = configSource(), env = ""): Promise<void> => {
+  await writeFile(target, source);
+  await writeFile(join(target, "..", ".env"), `${PUSH}${env}`);
+};
 
 let dir: string;
 
@@ -39,7 +49,7 @@ afterEach(async () => {
 
 describe("loadConfig", () => {
   it("loads a valid config from cwd with defaults applied", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource());
+    await writeSource(join(dir, "steward.config.ts"));
     const loaded = await loadConfig({ cwd: dir });
     expect(loaded.configPath).toBe(join(dir, "steward.config.ts"));
     expect(loaded.configDir).toBe(dir);
@@ -48,14 +58,14 @@ describe("loadConfig", () => {
     expect(loaded.config.workspace.setupTimeoutMinutes).toBe(15);
     expect(loaded.config.workspace.keepOnFailure).toBe(true);
     expect(loaded.config.retention).toEqual({ keptWorktrees: 3, days: 30 });
-    expect(loaded.secrets).toEqual({});
+    expect(loaded.secrets).toEqual(pushSecret);
   });
 
   it("loads from an explicit configPath in a nested directory", async () => {
     const nested = join(dir, "etc", "steward");
     await mkdir(nested, { recursive: true });
     const configPath = join(nested, "steward.config.ts");
-    await writeFile(configPath, configSource());
+    await writeSource(configPath);
     const loaded = await loadConfig({ configPath });
     expect(loaded.configPath).toBe(configPath);
     expect(loaded.configDir).toBe(nested);
@@ -76,28 +86,25 @@ describe("loadConfig", () => {
 
   it("resolves path fields against the config dir and expands ~", async () => {
     vi.stubEnv("HOME", "/home/steward");
-    await writeFile(join(dir, "steward.config.ts"), configSource());
+    await writeSource(join(dir, "steward.config.ts"));
     const { config } = await loadConfig({ cwd: dir });
     expect(config.dataDir).toBe(join(dir, "data"));
     expect(config.workspace.skillsDir).toBe(join(dir, "skills"));
-    expect(config.prompt).toBe(join(dir, "prompts", "enrich.md"));
+    expect(config.implement?.prompt).toBe(join(dir, "prompts", "implement.md"));
     expect(config.workspace.overlayDir).toBe("/home/steward/overlay");
   });
 
   it("leaves an absent skillsDir undefined", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource().replace(`skillsDir: "./skills",`, ""));
+    await writeSource(join(dir, "steward.config.ts"), configSource().replace(`skillsDir: "./skills",`, ""));
     const { config } = await loadConfig({ cwd: dir });
     expect(config.workspace.skillsDir).toBeUndefined();
   });
 
   it("parses .env into secrets without touching process.env", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource());
-    await writeFile(
-      join(dir, ".env"),
-      "LINEAR_API_KEY=lin_api_test\nLINEAR_WEBHOOK_SECRET=whsec\nANTHROPIC_API_KEY=sk-ant-test\n",
-    );
+    await writeSource(join(dir, "steward.config.ts"), configSource(), "LINEAR_API_KEY=lin_api_test\nLINEAR_WEBHOOK_SECRET=whsec\nANTHROPIC_API_KEY=sk-ant-test\n");
     const { secrets } = await loadConfig({ cwd: dir });
     expect(secrets).toEqual({
+      ...pushSecret,
       LINEAR_API_KEY: "lin_api_test",
       LINEAR_WEBHOOK_SECRET: "whsec",
       ANTHROPIC_API_KEY: "sk-ant-test",
@@ -108,32 +115,29 @@ describe("loadConfig", () => {
   });
 
   it("drops .env keys that are not known secrets", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource());
-    await writeFile(join(dir, ".env"), "OPENAI_API_KEY=sk-openai\nSOMETHING_ELSE=nope\n");
+    await writeSource(join(dir, "steward.config.ts"), configSource(), "OPENAI_API_KEY=sk-openai\nSOMETHING_ELSE=nope\n");
     const { secrets } = await loadConfig({ cwd: dir });
-    expect(secrets).toEqual({ OPENAI_API_KEY: "sk-openai" });
+    expect(secrets).toEqual({ ...pushSecret, OPENAI_API_KEY: "sk-openai" });
   });
 
   it("drops the removed Linear OAuth client credentials", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource());
-    await writeFile(join(dir, ".env"), "LINEAR_CLIENT_ID=lin-client\nLINEAR_CLIENT_SECRET=lin-secret\nLINEAR_API_KEY=lin_api_test\n");
+    await writeSource(join(dir, "steward.config.ts"), configSource(), "LINEAR_CLIENT_ID=lin-client\nLINEAR_CLIENT_SECRET=lin-secret\nLINEAR_API_KEY=lin_api_test\n");
     const { secrets } = await loadConfig({ cwd: dir });
-    expect(secrets).toEqual({ LINEAR_API_KEY: "lin_api_test" });
+    expect(secrets).toEqual({ ...pushSecret, LINEAR_API_KEY: "lin_api_test" });
   });
 });
 
 describe("loadConfig after the MR reviewer was removed", () => {
   it("drops a leftover review block", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource(`review: { botUsername: "steward-bot", prompt: "./prompts/review.md" },`));
+    await writeSource(join(dir, "steward.config.ts"), configSource(`review: { botUsername: "steward-bot", prompt: "./prompts/review.md" },`));
     const { config } = await loadConfig({ cwd: dir });
     expect("review" in config).toBe(false);
   });
 
   it("reads the GitLab webhook secrets the fix loop's wake-ups are verified with", async () => {
-    await writeFile(join(dir, "steward.config.ts"), configSource());
-    await writeFile(join(dir, ".env"), "GITLAB_WEBHOOK_SECRET=gl-secret\nGITLAB_WEBHOOK_SIGNING_TOKEN=gl-signing\n");
+    await writeSource(join(dir, "steward.config.ts"), configSource(), "GITLAB_WEBHOOK_SECRET=gl-secret\nGITLAB_WEBHOOK_SIGNING_TOKEN=gl-signing\n");
     const { secrets } = await loadConfig({ cwd: dir });
-    expect(secrets).toEqual({ GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_WEBHOOK_SIGNING_TOKEN: "gl-signing" });
+    expect(secrets).toEqual({ ...pushSecret, GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_WEBHOOK_SIGNING_TOKEN: "gl-signing" });
   });
 });
 
@@ -156,7 +160,7 @@ describe("SecretsSchema", () => {
 
 describe("resolveFromConfigDir", () => {
   it("resolves a relative path against the config dir", () => {
-    expect(resolveFromConfigDir("/etc/steward", "./prompts/enrich.md")).toBe("/etc/steward/prompts/enrich.md");
+    expect(resolveFromConfigDir("/etc/steward", "./prompts/implement.md")).toBe("/etc/steward/prompts/implement.md");
   });
 
   it("keeps an absolute path", () => {
@@ -178,7 +182,6 @@ describe("implement secrets", () => {
       tracker: { kind: "linear", labels: {} },
       codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
       workspace: { fetchUrl: "https://gitlab.example/acme/repo.git", baseBranch: "dev", overlayDir: "./overlay", setup: [], port: 4100 },
-      prompt: "./prompts/enrich.md",
       server: { port: 3020, publicUrl: "https://steward.example" },
       implement: { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } },
     };

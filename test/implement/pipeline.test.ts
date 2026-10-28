@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { INTERRUPTED_ERROR, type BrainInput, type BrainRun } from "../../src/brain/types.js";
 import type { StewardConfig } from "../../src/config/schema.js";
-import type { PipelineDeps } from "../../src/core/pipeline.js";
+import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import type { ImplementResult } from "../../src/implement/result.js";
@@ -19,7 +19,7 @@ import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
 
 const IMPLEMENT_PROMPT = fileURLToPath(new URL("../../prompts/implement.md", import.meta.url));
-const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
+const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const issue: TicketBundle = {
   id: "issue-1",
@@ -60,11 +60,10 @@ let port: number;
 const makeConfig = (implement: Partial<NonNullable<StewardConfig["implement"]>> = {}): StewardConfig => ({
   dataDir: repo.dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich", bugLabels: ["Bug"], labels: LABELS },
+  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: { fetchUrl: repo.repo, baseBranch: "main", overlayDir: repo.overlayDir, setup: [], setupTimeoutMinutes: 1, port, keepOnFailure: false },
   retention: { keptWorktrees: 3, days: 30 },
-  prompt: repo.promptPath,
   server: { port: 3020, publicUrl: "https://steward.example" },
   implement: {
     prompt: IMPLEMENT_PROMPT,

@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
 import { parseGitlabEvent, verifyGitlabWebhook, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
-import { jobKindFor, shouldEnqueue, type IntakeDecision } from "../core/intake.js";
+import { shouldEnqueue, type IntakeDecision } from "../core/intake.js";
 import { logger } from "../log.js";
 import { loopSubject, transaction, type Job, type Loop, type Stores } from "../store/index.js";
 import { parseEvent, verifySignature } from "../tracker/linear/webhook.js";
@@ -45,17 +45,13 @@ const intake = (deps: ServerDeps, event: WebhookEvent): Intake =>
   transaction(deps.stores.db, () => {
     const { jobs, deliveries, loops } = deps.stores;
     if (!deliveries.markSeen(event.deliveryId)) return { action: "duplicate" };
-    const kind = jobKindFor(event);
-    if (kind === "implement" && deps.config.implement === undefined) {
-      return { action: "skip", reason: "implement is not configured" };
-    }
-    const loop = kind === "implement" ? loops.latestForIssue(event.issueId) : null;
-    const queuedKind = loop?.state === "handed_back" ? "restart" : kind;
+    if (deps.config.implement === undefined) return { action: "skip", reason: "implement is not configured" };
+    const loop = loops.latestForIssue(event.issueId);
+    const queuedKind = loop?.state === "handed_back" ? "restart" : "implement";
     const decision = shouldEnqueue({
       event,
       allowlist: deps.config.tracker.teams,
-      gatewayIssues: deps.config.tracker.gatewayIssues,
-      priorSuccess: jobs.hasSucceeded(event.issueId, kind),
+      priorSuccess: jobs.hasSucceeded(event.issueId, "implement"),
       hasQueuedJob: jobs.findQueued(event.issueId, queuedKind) !== null,
       loop,
     });
@@ -97,8 +93,7 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
     if (body === undefined) return reply.code(400).send({ ok: false });
 
     const labels = deps.config.tracker.labels;
-    // ready-for-agent triggers only with an implement block; intake's "implement is not configured" skip stays as a backstop.
-    const triggers = labels === undefined ? undefined : { triage: labels.triage, ...(deps.config.implement === undefined ? {} : { implement: labels.implement }) };
+    const triggers = labels === undefined ? undefined : { implement: labels.implement };
     const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body, { labels: triggers });
     if (event === null || event.kind === "cli") return { ok: true, action: "ignored" };
 

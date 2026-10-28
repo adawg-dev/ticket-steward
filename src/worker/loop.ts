@@ -2,8 +2,8 @@ import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { MAX_SLOTS, RESOURCE_GUARD_DEFAULTS, type ResourceGuardConfig } from "../config/schema.js";
 import { acquireRunLock } from "../core/lock.js";
-import { sessionsDir } from "../core/workspace.js";
-import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
+import { redactOutcome, sessionsDir } from "../core/workspace.js";
+import type { PipelineDeps } from "../core/deps.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { runAwaitReview } from "../greptile/await.js";
 import { runFix } from "../greptile/fix.js";
@@ -11,7 +11,7 @@ import { runRestart } from "../greptile/start.js";
 import { handBackStranded } from "../greptile/stranded.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
-import { unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
+import { RETIRED_KIND_ERROR, unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
 import { loopProtection, sweep } from "../workspace/retention.js";
 import { holdReason, sampleResources, type Hold, type ResourceSample } from "./resources.js";
 
@@ -22,8 +22,6 @@ export interface WorkerOptions {
   sweepMs?: number;
   /** How often running fix loops left with no job are handed back. */
   strandedMs?: number;
-  runJob?: typeof runJob;
-  publishOnly?: typeof publishOnly;
   runImplement?: typeof runImplement;
   publishImplementOnly?: typeof publishImplementOnly;
   runAwaitReview?: typeof runAwaitReview;
@@ -98,8 +96,6 @@ class Worker {
   private readonly pollMs: number;
   private readonly maxAttempts: number;
   private readonly backoffMs: number[];
-  private readonly execute: typeof runJob;
-  private readonly republish: typeof publishOnly;
   private readonly implement: typeof runImplement;
   private readonly republishImplement: typeof publishImplementOnly;
   private readonly awaitReview: typeof runAwaitReview;
@@ -131,8 +127,6 @@ class Worker {
     this.pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
     this.maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.backoffMs = deps.backoffMs ?? DEFAULT_BACKOFF_MS;
-    this.execute = deps.runJob ?? runJob;
-    this.republish = deps.publishOnly ?? publishOnly;
     this.implement = deps.runImplement ?? runImplement;
     this.republishImplement = deps.publishImplementOnly ?? publishImplementOnly;
     this.awaitReview = deps.runAwaitReview ?? runAwaitReview;
@@ -141,8 +135,10 @@ class Worker {
     this.guard = deps.config.resourceGuard ?? RESOURCE_GUARD_DEFAULTS;
     this.resources = deps.resources ?? sampleResources;
     this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
+    // Before requeueing: a running job of a removed kind must fail, not go back to the queue.
+    const retired = deps.stores.jobs.failRetiredKinds();
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
-    logger.info({ requeued, failed, slots: this.lanes.length }, "worker started");
+    logger.info({ requeued, failed, retired, slots: this.lanes.length }, "worker started");
     this.sweepTimer = setInterval(() => void this.sweepWhenIdle(), deps.sweepMs ?? DEFAULT_SWEEP_MS).unref();
     this.strandedTimer = setInterval(() => void this.rescueStranded(), deps.strandedMs ?? DEFAULT_STRANDED_MS).unref();
     process.once("SIGTERM", this.onSigterm);
@@ -278,7 +274,8 @@ class Worker {
     try {
       switch (job.kind) {
         case "enrich":
-          return job.result === null ? await this.execute(ctx, deps) : await this.republish(ctx, deps);
+          // failRetiredKinds fails these at start; one requeued by hand still never runs.
+          return { status: "failed", error: RETIRED_KIND_ERROR, retryable: false };
         case "implement":
           return job.implementResult === null ? await this.implement(ctx, deps) : await this.republishImplement(ctx, deps);
         case "await_review":

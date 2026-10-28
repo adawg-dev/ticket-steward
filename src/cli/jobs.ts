@@ -43,7 +43,7 @@ const retryMode = (job: Job): string => {
     if (job.pushedAt === null) return `job ${job.id}: publish-only (push ${job.branch ?? "?"} from the bundle, then comment and labels)`;
     return `job ${job.id}: publish-only (${job.branch ?? "?"} already pushed; comment and labels only)`;
   }
-  return job.result === null ? `job ${job.id}: full run` : `job ${job.id}: publish-only (result stored at ${job.resultSha})`;
+  return `job ${job.id}: fails (${job.kind} was removed)`;
 };
 
 const pretty = (value: unknown): string => JSON.stringify(value, null, 2);
@@ -97,27 +97,25 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
 
   jobs
     .command("show")
-    .description("job row, attempts, transcript paths, artifacts and stored result")
+    .description("job row (with its stored result), attempts, transcript paths and artifacts")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
       const { config } = await loadFromProgram(program, ctx);
       const stores = openStores(config.dataDir);
       const job = stores.jobs.get(id);
       if (job === null) return fail(ctx, `job ${id} not found`);
-      const { result, ...row } = job;
       const attempts = stores.attempts.forJob(id);
-      println(ctx, `# job\n${pretty(row)}`);
+      println(ctx, `# job\n${pretty(job)}`);
       println(ctx, `# attempts\n${pretty(attempts)}`);
       println(ctx, `# transcripts\n${attempts.map((attempt) => attempt.transcriptPath ?? "(none)").join("\n")}`);
       println(ctx, `# artifacts (${artifactsDir(config.dataDir, id)})\n${(await listArtifacts(artifactsDir(config.dataDir, id))).join("\n")}`);
-      println(ctx, `# result\n${pretty(result)}`);
       const loop = loopOf(stores, job);
       if (loop !== null) println(ctx, [`# loop`, loopHeader(loop), ...roundLines(loop)].join("\n"));
     });
 
   jobs
     .command("retry")
-    .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when a result is stored")
+    .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when an implement result is stored")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
       const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);

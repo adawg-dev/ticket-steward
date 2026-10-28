@@ -5,7 +5,7 @@ import type { Brain, BrainInput, BrainRun } from "../brain/types.js";
 import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { createCodeHost } from "../codehost/index.js";
 import type { LoadedConfig } from "../config/load.js";
-import type { PipelineDeps } from "../core/pipeline.js";
+import type { PipelineDeps } from "../core/deps.js";
 import { collectSecretValues, Redactor } from "../core/redact.js";
 import { openStores, type Stores } from "../store/index.js";
 import { createLinearTracker } from "../tracker/linear/index.js";
@@ -61,7 +61,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promi
     redactor: await buildRedactor(loaded),
     now: () => new Date(),
     ...(injectedBrain === undefined ? {} : brainRunner(injectedBrain)),
-    // serve gives each worker loop its own slot; inline runs (enrich|implement KEY, jobs retry) use slot 1 under run.lock.
+    // serve gives each worker loop its own slot; inline runs (implement KEY, jobs retry) use slot 1 under run.lock.
     ...(config.slots === undefined ? {} : { slot: { n: 1, client: new SlotClient(config.slots, ctx.factories?.slotRunner) } }),
   };
   return { loaded, stores, tracker, deps };

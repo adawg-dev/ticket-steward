@@ -102,7 +102,7 @@ Two separate tokens, deliberately:
 sudo -u steward -H bash -lc 'cd /etc/ticket-steward && steward init'
 ```
 
-`init` writes `steward.config.ts`, `.env.example`, `prompts/enrich.md` and `skills/` and
+`init` writes `steward.config.ts`, `.env.example`, `prompts/implement.md`, `prompts/fix.md` and `skills/` and
 refuses to overwrite existing files. Replace the generated config with the kickoff
 example and fill in the secrets:
 
@@ -202,62 +202,62 @@ comment and upload appears as the user who owns the key, so give it a user of it
 4. As a workspace admin, open Settings → API → Webhooks and create a webhook with the URL
    `https://steward.example.com/webhooks/linear` (`<server.publicUrl>/webhooks/linear`).
    Select only the **Issues** data-change event, and scope it to the allowlisted teams or
-   to all public teams. The steward acts on issue creation (or, with `tracker.labels`, on a
-   workflow label being added, §1.7a) and ignores every other delivery.
+   to all public teams. The steward acts only on a ticket created with, or first given, the
+   `ready-for-agent` label (§1.7a): a ticket created without it is skipped ("no implement
+   label") and every other delivery is ignored.
 5. Copy the webhook's signing secret into `.env` as `LINEAR_WEBHOOK_SECRET`.
 
 There is no authorization step: the key is read from `.env` when the process starts.
 `steward doctor` (next section) confirms it works and names the user it authenticates as.
 
-**ticket-gateway.** ticket-gateway issues arrive through the same Issues webhook. Nothing
-else to configure.
+**ticket-gateway.** ticket-gateway issues arrive through the same Issues webhook and are
+treated like any other ticket: nothing happens until a person adds `ready-for-agent`.
 
-Config reference: `tracker.gatewayIssues` is `"enrich"` (default) or `"skip"`. Keep
-`"enrich"` while the gateway runs with `enrichment.mode: off`; use `"skip"` only in the
-future sidecar mode, where the gateway enriches through the steward itself (`auto`/`on`).
-Any other combination either enriches gateway tickets twice or never enriches them.
-`steward enrich <KEY>` always runs, whatever `gatewayIssues` says.
+**Enrich was removed on 2026-10-28.** The steward no longer triages tickets or writes an
+Enrichment section; `ready-for-agent` covers it, and implement still reads the agent brief of
+tickets enriched before then. The steward no longer rewrites descriptions or uploads files;
+its Linear writes are labels plus the implement and fix-loop comments, which move to the MR
+next, leaving Linear labels-only. A config still carrying the enrich keys
+fails to load with "`<key>` was removed with enrich": delete top-level `prompt`,
+`tracker.gatewayIssues`, `tracker.bugLabels` and `tracker.labels.triage`, and the
+`prompts/enrich.md` file. `implement` (with `tracker.labels` and `GITLAB_PUSH_TOKEN`) is
+now required. Enrich jobs left queued or running in the database are failed with "enrich was
+removed; this job will not run" when the worker starts; finished ones stay in `steward jobs`
+as history. The `needs-triage` label is no longer read and can be deleted in Linear.
 
 ### 1.7a Label workflows
 
-Setting `tracker.labels` (use `labels: {}` for the default names) switches the steward from
-"enrich every new ticket" to label-driven work: it acts only on a ticket created with, or
-first given, one of two labels. Two decisions stay with people: **whether a ticket is
-triaged** (add `needs-triage`) and **whether an agent implements it** (add
-`ready-for-agent`). The steward never applies either label, never opens a merge request, and
-its git work stops at pushing one new branch; the kickoff pipeline opens the MR.
+`tracker.labels` (use `labels: {}` for the default names) is required. The steward acts only on
+a ticket created with, or first given, the `ready-for-agent` label; the decision **whether an
+agent implements a ticket** stays with people. The steward never applies that label, never
+opens a merge request, and its git work stops at pushing one new branch; the kickoff pipeline
+opens the MR.
 
-Create five labels in Linear at the workspace level (names match case-insensitively; override
-any of them under `tracker.labels`: `triage`, `implement`, `needsInfo`, `readyForHuman`,
-`implemented`). Putting the five in one Linear label group is fine and keeps a ticket on one
-stage at a time: the steward swaps a label in a single update, and a retried publish does not
-post its comment twice):
+Create four labels in Linear at the workspace level, plus `agent-approved` with a `greptile`
+block (names match case-insensitively; override any of them under `tracker.labels`:
+`implement`, `needsInfo`, `readyForHuman`, `implemented`, `approved`). Putting them in one
+Linear label group is fine and keeps a ticket on one stage at a time: the steward swaps a label
+in a single update, and a retried publish does not post its comment twice):
 
 | Label | Applied by | Meaning |
 | --- | --- | --- |
-| `needs-triage` | person | Triage this ticket. |
-| `needs-info` | steward | Something only a person can supply is missing; the questions are in a comment. |
-| `ready-for-human` | steward | Specified enough to build (triage), or an agent tried and handed back (implement). |
 | `ready-for-agent` | person | Implement this ticket. |
+| `needs-info` | steward | Something only a person can supply is missing; the questions are in a comment. |
+| `ready-for-human` | steward | An agent tried and handed back. |
 | `agent-implemented` | steward | An agent pushed a branch for this ticket. |
 
 ```
-needs-triage ──triage job──▶ needs-info       (questions commented)
-                        └──▶ ready-for-human  (enrichment + agent brief)
-                                   │ person adds ready-for-agent
 ready-for-agent ──implement job──▶ agent-implemented  (branch pushed)
-   ▲ (also directly, skipping triage)  ├──▶ ready-for-human  (tried, failed; nothing pushed)
-                                       └──▶ needs-info       (too vague; nothing changed)
+                                   ├──▶ ready-for-human  (tried, failed; nothing pushed)
+                                   └──▶ needs-info       (too vague; nothing changed)
 ```
 
 A label counts only when it is first added (or present when the ticket is created); removing
-and re-adding it does not re-run a ticket that already has an Enrichment section (triage) or an
-implement job that pushed a branch (a hand-back does not count, so adding `ready-for-agent` again after fixing the ticket re-runs it). With an `implement` block configured, an update that adds both labels
-runs implement only; without one, `ready-for-agent` is not a trigger and the ticket triages.
-Triage is the enrich job plus a verdict. Labels change last in every publish, so a failure
-earlier leaves the trigger label on the ticket and the job `publish_failed`
-(`steward jobs retry <id>` re-publishes without re-running the brain or pushing again).
-`steward enrich KEY` and `steward implement KEY` never swap labels.
+and re-adding it does not re-run a ticket with an implement job that pushed a branch (a
+hand-back does not count, so adding `ready-for-agent` again after fixing the ticket re-runs
+it). Labels change last in every publish, so a failure earlier leaves the trigger label on the
+ticket and the job `publish_failed` (`steward jobs retry <id>` re-publishes without re-running
+the brain or pushing again). `steward implement KEY` never swaps labels.
 
 **Push token.** Implementation needs `GITLAB_PUSH_TOKEN` in `.env`: a GitLab **project access
 token** with the **Developer** role and only the **`write_repository`** scope. Never give it
@@ -280,13 +280,13 @@ load fails otherwise.
 
 ```ts
 implement: {
-  prompt: "./prompts/implement.md",   // copy <ticket-steward>/prompts/implement.md; `steward init` does not write it
+  prompt: "./prompts/implement.md",   // `steward init` writes it; otherwise copy <ticket-steward>/prompts/implement.md
   checks: ["pnpm turbo check-types lint --filter='...[{{baseSha}}]'"], // default []; run by the steward after the brain
   commitAuthor: { name: "Ticket Steward", email: "steward@concentrate.ai" },
   // defaults:
   // branchTypes: ["feature", "fix", "chore", "refactor"],
   // checksTimeoutMinutes: 20,
-  // timeoutMinutes: 60,              // brain timeout for implement jobs (triage keeps brain.timeoutMinutes)
+  // timeoutMinutes: 60,              // brain timeout for implement jobs
   // maxTurns: 150,                   // brain turns for implement jobs
   // protectedBranches: ["main", "staging", "dev"],
 }
@@ -329,10 +329,10 @@ Linear write failure is `publish_failed`.
 inline under `run.lock`. It never swaps labels and re-runs even after a prior success; the
 existing-branch check still prevents a second push. `--dry-run` runs up to and including the
 checks, prints the diff stat and the would-be commit message, and never commits, pushes or
-writes to Linear. The `tracker.gatewayIssues` rule does not apply to implement.
+writes to Linear.
 
 One implement job can hold the worker for about 90 minutes (setup, up to 60 of brain,
-checks); triage jobs queue behind it.
+checks); other heavy jobs queue behind it unless `slots` gives the worker more lanes.
 
 To smoke-test, label a throwaway ticket `ready-for-agent` and watch for the pushed branch,
 the comment and the swap to `agent-implemented`. The first real push is also what proves the
@@ -340,8 +340,7 @@ token's Developer access: doctor's `push token` line only runs `ls-remote`.
 
 Whatever the trigger, the steward never works on a Done or Canceled ticket. The state is
 checked at intake, when a job starts, after the agent finishes and before every Linear write
-or push; a closed ticket fails the job without retry. This applies to `steward enrich` and
-`steward implement` too.
+or push; a closed ticket fails the job without retry. This applies to `steward implement` too.
 
 ### 1.7b Greptile fix loop (optional)
 
@@ -454,18 +453,17 @@ curl -s https://steward.example.com/health
 
 ### 1.9 Smoke test
 
-1. Create a ticket in an allowlisted team from the Bugs template. Within a few minutes
-   the description gains an `## Enrichment` section between the steward markers and a
-   comment "Enrichment added (job N, confidence …)".
-2. Run `steward enrich KEY-123` on an existing ticket; with `serve` running it is
-   enqueued and gets the same section and comment.
-3. `steward jobs` lists both jobs as `succeeded`.
+1. Create a throwaway ticket in an allowlisted team without any label. `steward jobs`
+   shows no job for it, and the journal logs the delivery as `skip` ("no implement label").
+2. Add `ready-for-agent`. Within the job's run time a branch is pushed and the label swaps
+   to `agent-implemented` (or the ticket is handed back), as in §1.7a.
+3. `steward jobs` lists the implement job as `succeeded`.
 
 For a ticket outside Linear's webhook path:
 
 ```bash
-steward enrich KEY-123 --dry-run    # prints the rendered section and recorded writes; writes nothing, but takes run.lock (refused while serve runs)
-steward enrich KEY-123              # enqueues if serve is running, otherwise runs inline under run.lock
+steward implement KEY-123 --dry-run    # runs up to the checks and prints the would-be commit; takes run.lock (refused while serve runs)
+steward implement KEY-123              # enqueues if serve is running, otherwise runs inline under run.lock
 ```
 
 ### 1.10 Worker slots (optional)
@@ -548,10 +546,10 @@ instance itself is capped at 300 s), create the worktree, copy the overlay with 
 brain with `STEWARD_PORT` set to the slot's app port, publish, and `down` the slot. A slot that does not
 come up fails the job as retryable with `setup failed: slot <n>: …` and the helper's output tail in the
 attempt's `setupTail`. `steward serve` brings every slot down when it starts and when it stops;
-retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward enrich|implement KEY` without serve runs on slot 1.
+retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward implement KEY` without serve runs on slot 1.
 
-**Resource guard.** On by default, with or without `slots`. Before a lane claims a heavy job (enrich,
-implement, fix, restart) the worker checks the host: available memory (`MemAvailable`) must be at least
+**Resource guard.** On by default, with or without `slots`. Before a lane claims a heavy job (implement,
+fix, restart) the worker checks the host: available memory (`MemAvailable`) must be at least
 `minAvailableMemoryMb` and the 1-minute load average per CPU at most `maxLoadPerCpu`, and the last heavy
 start must be at least `startSpacingSeconds` ago (the load average lags about a minute, so a burst of
 tickets would otherwise all start before it rises). While it holds, the job stays queued and the lane only
@@ -640,25 +638,21 @@ steward jobs show 42
 
 1. **The job row.** `status` is one of `queued`, `running`, `succeeded`, `failed`,
    `publish_failed`, `skipped`. `attempts` counts claims. `trigger` says whether the job
-   came from `issue.created` or `cli`. `error` is the last failure reason; `interrupted` means the process died mid-run
-   and the job was requeued or failed on restart. `resultSha` is the commit the enrichment
-   was computed against.
+   came from `issue.created`, `issue.labeled`, `cli` or a fix loop. `error` is the last failure reason; `interrupted` means the process died mid-run
+   and the job was requeued or failed on restart. `implementResult` (implement jobs) and
+   `fixResult` (fix jobs) hold the validated result or hand-back; a stored implement result
+   makes `steward jobs retry <id>` publish-only. Jobs of kind `enrich` are history from
+   before 2026-10-28 and never run again.
 2. **Attempts.** One row per claim: `startedAt`/`finishedAt` (a missing `finishedAt` on
    a non-running job means a crash), `error`, `setupTail` (the last 16 KB of the
    `workspace.setup` commands' output; the first thing to read when a job failed before the
-   brain ran), `preWriteDescription` (the ticket description as read just before the
-   steward wrote the section; compare with the ticket if the merge looks wrong),
+   brain ran), `preWriteDescription` (only on old enrich attempts),
    `transcriptPath` and `usage` (tokens and cost). A `succeeded` job whose attempt has an
-   `error` succeeded with a warning: the description was written but the comment failed.
+   `error` succeeded with a warning, for example a hand-back or a failed comment.
 3. **Transcript path.** `dataDir/jobs/<id>/attempt-<n>.jsonl`, one redacted JSON line per
    brain message. `tail -f` it while a job is running.
-4. **Artifacts listing.** Everything the brain wrote under `dataDir/jobs/<id>/artifacts`,
-   whether or not it was accepted for upload.
-5. **Stored result.** The validated `BrainResult` (`template`, `summary`, `enrichment`,
-   `attachments`, `confidence`). Present when the brain finished; its presence is what
-   makes `steward jobs retry <id>` publish-only.
-
-6. **Loop.** For `await_review`, `fix` and `restart` jobs, and for an implement job that
+4. **Artifacts listing.** Everything the brain wrote under `dataDir/jobs/<id>/artifacts`.
+5. **Loop.** For `await_review`, `fix` and `restart` jobs, and for an implement job that
    started a fix loop (§1.7b): the loop's state and one line per round, such as
    `round 1: 3/5 head abc1234 pipeline success fixed 2 declined 1 changed`.
 
@@ -671,16 +665,12 @@ running the brain again. Between automatic attempts the job shows as `queued` wi
 retry.
 
 ```bash
-steward jobs retry 42     # requeues for serve when it is running, otherwise runs inline; publish-only when a result is stored
+steward jobs retry 42     # requeues for serve when it is running, otherwise runs inline; publish-only when an implement result is stored
 steward jobs gc           # run retention now: worktrees, artifacts, transcripts, deliveries
 ```
 
 Failed jobs keep their worktree under `dataDir/work/<id>-<attempt>` when
 `workspace.keepOnFailure` is true; retention keeps the newest `retention.keptWorktrees`.
-
-**Reproduction recipes.** When the brain reproduces a bug ticket, the recipe is part of
-the job's stored result and of the ticket's Enrichment section; the steward keeps no copy
-of the recipe's files, which go with the worktree.
 
 ## 5. Linear API key rejected
 
@@ -715,9 +705,7 @@ journalctl -u ticket-steward --since -1h
 curl -s https://steward.example.com/health | jq
 steward doctor
 steward jobs --status publish_failed
-steward templates                 # the templates the brain sees, for allowlisted teams
-steward prompt show               # current prompt template
-steward prompt render KEY-123     # the exact prompt a job for KEY-123 would get
+steward templates                 # the Linear issue templates, for allowlisted teams
 ```
 
 Stopping: `systemctl stop ticket-steward` sends SIGTERM. The worker stops claiming,

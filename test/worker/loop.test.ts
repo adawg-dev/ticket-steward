@@ -6,14 +6,14 @@ import type { Mock } from "vitest";
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { acquireRunLock } from "../../src/core/lock.js";
-import type { PipelineDeps, publishOnly, runJob } from "../../src/core/pipeline.js";
+import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
-import type { BrainResult } from "../../src/core/result.js";
 import type { JobOutcome, RunContext } from "../../src/core/types.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { SlotClient } from "../../src/workspace/slots.js";
+import type { publishImplementOnly, runImplement } from "../../src/implement/pipeline.js";
 import { startWorker, type WorkerDeps, type WorkerHandle } from "../../src/worker/loop.js";
 import type { ResourceSample } from "../../src/worker/resources.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
@@ -34,29 +34,22 @@ const createdTrigger: TriggerEvent = {
   deliveryId: "delivery-1",
   description: "The adapter loses the final chunk.",
   stateType: null,
+  action: "implement",
 };
 
-const brainResult: BrainResult = {
-  template: { matched: "Bugs", conforms: false, missing: ["Repro Steps"] },
-  summary: "The adapter truncates the final chunk.",
-  enrichment: "See `src/adapter.ts:12`.",
-  attachments: [],
-  confidence: "high",
-  repro: null,
-  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
-};
+const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 let dataDir: string;
 let stores: Stores;
 let tracker: FakeTracker;
-let runJobMock: Mock<typeof runJob>;
-let publishOnlyMock: Mock<typeof publishOnly>;
+let runImplementMock: Mock<typeof runImplement>;
+let publishImplementOnlyMock: Mock<typeof publishImplementOnly>;
 let worker: WorkerHandle | null;
 
 const makeConfig = (): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich", bugLabels: ["Bug"] },
+  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",
@@ -68,7 +61,6 @@ const makeConfig = (): StewardConfig => ({
     keepOnFailure: true,
   },
   retention: { keptWorktrees: 3, days: 30 },
-  prompt: join(dataDir, "prompt.md"),
   server: { port: 3020, publicUrl: "https://steward.example" },
   resourceGuard: { enabled: false, minAvailableMemoryMb: 4096, maxLoadPerCpu: 1.5, startSpacingSeconds: 30 },
 });
@@ -81,14 +73,14 @@ const makeDeps = (overrides: Partial<WorkerDeps> = {}): WorkerDeps => ({
   configPath: join(dataDir, "steward.config.ts"),
   binPath: join(dataDir, "bin", "steward.js"),
   tracker,
-  brain: new FakeBrain({ result: brainResult }),
+  brain: new FakeBrain({ result: {} }),
   codehost: new FakeCodeHost(),
   mirror: new Mirror(join(dataDir, "repo.git"), "https://gitlab.example/acme/repo.git"),
   stores,
   redactor: new Redactor([]),
   now: () => NOW,
-  runJob: runJobMock,
-  publishOnly: publishOnlyMock,
+  runImplement: runImplementMock,
+  publishImplementOnly: publishImplementOnlyMock,
   pollMs: 5,
   backoffMs: [5, 5],
   resources: () => AMPLE,
@@ -119,7 +111,7 @@ const onSlots = (runner: FakeSlotRunner, config: StewardConfig = slotConfig()): 
   slot: { n: 1, client: new SlotClient(SLOTS, runner.run) },
 });
 
-/** A runJob that holds each job until `release(jobId)`, or answers INTERRUPTED when the worker aborts. */
+/** A runImplement that holds each job until `release(jobId)`, or answers INTERRUPTED when the worker aborts. */
 const heldRuns = () => {
   const releases = new Map<number, (outcome: JobOutcome) => void>();
   const slots = new Map<number, number | undefined>();
@@ -176,8 +168,8 @@ describe("startWorker", () => {
     dataDir = await mkdtemp(join(tmpdir(), "steward-worker-"));
     stores = openStores(dataDir);
     tracker = new FakeTracker();
-    runJobMock = vi.fn<typeof runJob>().mockResolvedValue(SUCCEEDED);
-    publishOnlyMock = vi.fn<typeof publishOnly>().mockResolvedValue(SUCCEEDED);
+    runImplementMock = vi.fn<typeof runImplement>().mockResolvedValue(SUCCEEDED);
+    publishImplementOnlyMock = vi.fn<typeof publishImplementOnly>().mockResolvedValue(SUCCEEDED);
     worker = null;
   });
 
@@ -187,19 +179,25 @@ describe("startWorker", () => {
     await rm(dataDir, { recursive: true, force: true });
   });
 
-  it("dispatches implement jobs to runImplement and republish to publishImplementOnly", async () => {
-    const runImplement = vi.fn(async () => ({ status: "succeeded" }) as const);
-    const handle = start({ runImplement });
-    const jobId = stores.jobs.enqueue({ ...createdTrigger, action: "implement" });
+  it("fails a queued enrich job left from before enrich was removed, before claiming anything", async () => {
+    const insert = stores.db.prepare(
+      "INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at, kind) VALUES ('issue-1', 'API-1', 'API', ?, 'queued', ?, 'enrich')",
+    );
+    const retired = Number(insert.run(JSON.stringify({ ...createdTrigger, action: undefined }), new Date().toISOString()).lastInsertRowid);
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    start();
+
     await waitForStatus(jobId, "succeeded");
-    expect(runImplement).toHaveBeenCalledTimes(1);
-    await handle.stop();
+
+    expect(stores.jobs.get(retired)).toMatchObject({ status: "failed", error: "enrich was removed; this job will not run", attempts: 0 });
+    expect(stores.attempts.forJob(retired)).toEqual([]);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
   });
 
   it("dispatches an implement job with a saved result to publishImplementOnly, not runImplement", async () => {
     const runImplement = vi.fn(async () => ({ status: "succeeded" }) as const);
     const publishImplementOnly = vi.fn(async () => ({ status: "succeeded" }) as const);
-    const jobId = stores.jobs.enqueue({ ...createdTrigger, action: "implement" });
+    const jobId = stores.jobs.enqueue(createdTrigger);
     stores.jobs.saveImplementResult(jobId, { result: null, handback: { label: "readyForHuman", reason: "a branch for API-1 already exists", detail: "feature/API-1-x" } });
     const handle = start({ runImplement, publishImplementOnly });
     await waitForStatus(jobId, "succeeded");
@@ -223,9 +221,9 @@ describe("startWorker", () => {
       trigger: createdTrigger,
       dryRun: false,
     };
-    expect(runJobMock).toHaveBeenCalledTimes(1);
-    expect(runJobMock.mock.calls[0]?.[0]).toEqual(expectedCtx);
-    expect(publishOnlyMock).not.toHaveBeenCalled();
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock.mock.calls[0]?.[0]).toEqual(expectedCtx);
+    expect(publishImplementOnlyMock).not.toHaveBeenCalled();
     expect(stores.jobs.get(jobId)?.attempts).toBe(1);
     const attempts = stores.attempts.forJob(jobId);
     expect(attempts.length).toBe(1);
@@ -236,7 +234,7 @@ describe("startWorker", () => {
   });
 
   it("records a success warning on the attempt row", async () => {
-    runJobMock.mockResolvedValue({ status: "succeeded", warning: "comment failed" });
+    runImplementMock.mockResolvedValue({ status: "succeeded", warning: "comment failed" });
     const jobId = stores.jobs.enqueue(createdTrigger);
     start();
 
@@ -248,7 +246,7 @@ describe("startWorker", () => {
 
   it("leaves a deferred job queued until the given time, its attempt closed and given back", async () => {
     const until = new Date(Date.now() + 3_600_000);
-    runJobMock.mockResolvedValue({ status: "deferred", until });
+    runImplementMock.mockResolvedValue({ status: "deferred", until });
     const jobId = stores.jobs.enqueue(createdTrigger);
     start();
 
@@ -262,7 +260,7 @@ describe("startWorker", () => {
     expect(job?.attempts).toBe(0);
     expect(job?.error).toBeNull();
     expect(stores.attempts.forJob(jobId)[0]?.error).toBeNull();
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
   });
 
   it("dispatches an await_review job to runAwaitReview", async () => {
@@ -273,7 +271,7 @@ describe("startWorker", () => {
     await waitForStatus(jobId, "succeeded");
 
     expect(runAwaitReview).toHaveBeenCalledTimes(1);
-    expect(runJobMock).not.toHaveBeenCalled();
+    expect(runImplementMock).not.toHaveBeenCalled();
   });
 
   it("dispatches a fix job to runFix", async () => {
@@ -284,7 +282,7 @@ describe("startWorker", () => {
     await waitForStatus(jobId, "succeeded");
 
     expect(runFix).toHaveBeenCalledTimes(1);
-    expect(runJobMock).not.toHaveBeenCalled();
+    expect(runImplementMock).not.toHaveBeenCalled();
   });
 
   it("dispatches a restart job to runRestart", async () => {
@@ -295,7 +293,7 @@ describe("startWorker", () => {
     await waitForStatus(jobId, "succeeded");
 
     expect(runRestart).toHaveBeenCalledTimes(1);
-    expect(runJobMock).not.toHaveBeenCalled();
+    expect(runImplementMock).not.toHaveBeenCalled();
   });
 
   it("hands back a loop whose fix job failed for good, with the job's error", async () => {
@@ -368,14 +366,14 @@ describe("startWorker", () => {
   });
 
   it("retries a retryable failure after the backoff and succeeds on the second attempt", async () => {
-    runJobMock.mockResolvedValueOnce(RETRYABLE).mockResolvedValueOnce(SUCCEEDED);
+    runImplementMock.mockResolvedValueOnce(RETRYABLE).mockResolvedValueOnce(SUCCEEDED);
     const jobId = stores.jobs.enqueue(createdTrigger);
     start();
 
     await waitForStatus(jobId, "succeeded");
 
-    expect(runJobMock).toHaveBeenCalledTimes(2);
-    expect(runJobMock.mock.calls[1]?.[0].attempt).toBe(2);
+    expect(runImplementMock).toHaveBeenCalledTimes(2);
+    expect(runImplementMock.mock.calls[1]?.[0].attempt).toBe(2);
     expect(stores.jobs.get(jobId)?.attempts).toBe(2);
     const attempts = stores.attempts.forJob(jobId);
     expect(attempts.length).toBe(2);
@@ -384,7 +382,7 @@ describe("startWorker", () => {
   });
 
   it("keeps a retryable failure queued with not_before while it waits for the backoff", async () => {
-    runJobMock.mockResolvedValue(RETRYABLE);
+    runImplementMock.mockResolvedValue(RETRYABLE);
     const jobId = stores.jobs.enqueue(createdTrigger);
     start({ backoffMs: [60_000] });
 
@@ -398,24 +396,24 @@ describe("startWorker", () => {
     expect(job?.error).toBe("mirror fetch failed");
     expect(job?.finishedAt).toBeNull();
     expect(stores.jobs.findQueued("issue-1")?.id).toBe(jobId);
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
   });
 
   it("runs the second attempt from a fresh worker when the first one stopped during the backoff", async () => {
-    runJobMock.mockResolvedValueOnce(RETRYABLE).mockResolvedValueOnce(SUCCEEDED);
+    runImplementMock.mockResolvedValueOnce(RETRYABLE).mockResolvedValueOnce(SUCCEEDED);
     const jobId = stores.jobs.enqueue(createdTrigger);
     const first = start({ backoffMs: [50] });
     await vi.waitFor(() => {
       expect(stores.jobs.get(jobId)?.notBefore).toEqual(expect.any(String));
     });
     await first.stop();
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
 
     start({ backoffMs: [50] });
 
     await waitForStatus(jobId, "succeeded");
-    expect(runJobMock).toHaveBeenCalledTimes(2);
-    expect(runJobMock.mock.calls[1]?.[0].attempt).toBe(2);
+    expect(runImplementMock).toHaveBeenCalledTimes(2);
+    expect(runImplementMock.mock.calls[1]?.[0].attempt).toBe(2);
     expect(stores.jobs.get(jobId)?.notBefore).toBeNull();
   });
 
@@ -435,7 +433,7 @@ describe("startWorker", () => {
   });
 
   it("fails a job with an unreadable stored implement_result without re-running it, and keeps processing", async () => {
-    const runImplement = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const runImplement = vi.fn<typeof runImplementMock>().mockResolvedValue(SUCCEEDED);
     const publishImplementOnly = vi.fn(async () => ({ status: "succeeded" }) as const);
     const badId = stores.jobs.enqueue({ ...createdTrigger, action: "implement" });
     stores.db.prepare("UPDATE jobs SET implement_result = ? WHERE id = ?").run('{"handback":"x"}', badId);
@@ -447,7 +445,7 @@ describe("startWorker", () => {
     expect(bad?.status).toBe("failed");
     expect(bad?.error).toContain("implement_result");
     expect(bad?.attempts).toBe(1);
-    expect(runImplement).not.toHaveBeenCalled();
+    expect(runImplement.mock.calls.map(([ctx]) => ctx.jobId)).toEqual([laterId]);
     expect(publishImplementOnly).not.toHaveBeenCalled();
     await handle.stop();
   });
@@ -461,7 +459,7 @@ describe("startWorker", () => {
     await waitForStatus(laterId, "succeeded");
     expect(stores.jobs.get(badId)?.status).toBe("failed");
     expect(stores.jobs.get(badId)?.error).toContain("trigger");
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
     await handle.stop();
   });
 
@@ -478,7 +476,7 @@ describe("startWorker", () => {
   });
 
   it("SIGTERM aborts the in-flight job, marks the attempt interrupted and leaves the job queued", async () => {
-    runJobMock.mockImplementationOnce(
+    runImplementMock.mockImplementationOnce(
       (_ctx, deps) =>
         new Promise<JobOutcome>((resolve) => {
           deps.signal?.addEventListener("abort", () => resolve(INTERRUPTED), { once: true });
@@ -503,12 +501,12 @@ describe("startWorker", () => {
     expect(stores.jobs.get(jobId)?.attempts).toBe(1);
     expect(stores.jobs.get(jobId)?.notBefore).toBeNull();
     expect(stores.jobs.get(laterJobId)?.status).toBe("queued");
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
     expect(handle.state()).toEqual({ running: [] });
   });
 
   it("fails an interrupted job that has used its last attempt", async () => {
-    runJobMock.mockResolvedValue(INTERRUPTED);
+    runImplementMock.mockResolvedValue(INTERRUPTED);
     const jobId = stores.jobs.enqueue(createdTrigger);
     stores.jobs.claimById(jobId);
     stores.jobs.finish(jobId, RETRYABLE);
@@ -525,36 +523,36 @@ describe("startWorker", () => {
   });
 
   it("fails after the last retryable attempt", async () => {
-    runJobMock.mockResolvedValue(RETRYABLE);
+    runImplementMock.mockResolvedValue(RETRYABLE);
     const jobId = stores.jobs.enqueue(createdTrigger);
     start();
 
     await vi.waitFor(() => {
-      expect(runJobMock).toHaveBeenCalledTimes(3);
+      expect(runImplementMock).toHaveBeenCalledTimes(3);
     });
     await waitForStatus(jobId, "failed");
 
     expect(stores.jobs.get(jobId)?.attempts).toBe(3);
     expect(stores.jobs.get(jobId)?.error).toBe("mirror fetch failed");
     await sleep(20);
-    expect(runJobMock).toHaveBeenCalledTimes(3);
+    expect(runImplementMock).toHaveBeenCalledTimes(3);
   });
 
   it("does not retry a terminal failure", async () => {
-    runJobMock.mockResolvedValue({ status: "failed", error: "invalid output", retryable: false });
+    runImplementMock.mockResolvedValue({ status: "failed", error: "invalid output", retryable: false });
     const jobId = stores.jobs.enqueue(createdTrigger);
     start();
 
     await waitForStatus(jobId, "failed");
     await sleep(20);
 
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
     expect(stores.jobs.get(jobId)?.attempts).toBe(1);
   });
 
   it("resumes at publish for a job whose result is stored after a publish failure", async () => {
-    runJobMock.mockImplementationOnce(async (ctx) => {
-      stores.jobs.saveResult(ctx.jobId, brainResult, "abc1234");
+    runImplementMock.mockImplementationOnce(async (ctx) => {
+      stores.jobs.saveImplementResult(ctx.jobId, { result: null, handback: { label: "readyForHuman", reason: "the agent could not finish", detail: "" } });
       return { status: "publish_failed", error: "linear 502" };
     });
     const jobId = stores.jobs.enqueue(createdTrigger);
@@ -562,16 +560,16 @@ describe("startWorker", () => {
 
     await waitForStatus(jobId, "succeeded");
 
-    expect(runJobMock).toHaveBeenCalledTimes(1);
-    expect(publishOnlyMock).toHaveBeenCalledTimes(1);
-    expect(publishOnlyMock.mock.calls[0]?.[0].attempt).toBe(2);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
+    expect(publishImplementOnlyMock).toHaveBeenCalledTimes(1);
+    expect(publishImplementOnlyMock.mock.calls[0]?.[0].attempt).toBe(2);
     expect(stores.jobs.get(jobId)?.attempts).toBe(2);
     expect(stores.attempts.forJob(jobId)[0]?.error).toBe("linear 502");
   });
 
   it("stop() waits for the in-flight job, stops claiming and releases the lock", async () => {
     let finish: (outcome: JobOutcome) => void = () => undefined;
-    runJobMock.mockImplementationOnce(
+    runImplementMock.mockImplementationOnce(
       () =>
         new Promise<JobOutcome>((resolve) => {
           finish = resolve;
@@ -621,7 +619,7 @@ describe("startWorker", () => {
     expect(stores.jobs.get(interruptedId)?.attempts).toBe(2);
     expect(stores.jobs.get(exhaustedId)?.status).toBe("failed");
     expect(stores.jobs.get(exhaustedId)?.error).toBe(INTERRUPTED_ERROR);
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
   });
 
   it("claims nothing while the tracker reports a rejected API key", async () => {
@@ -631,11 +629,11 @@ describe("startWorker", () => {
     await sleep(30);
 
     expect(stores.jobs.get(jobId)?.status).toBe("queued");
-    expect(runJobMock).not.toHaveBeenCalled();
+    expect(runImplementMock).not.toHaveBeenCalled();
   });
 
   it("stops claiming after a job hits a rejected API key and keeps that job queued with its attempt refunded", async () => {
-    runJobMock.mockImplementationOnce(async () => {
+    runImplementMock.mockImplementationOnce(async () => {
       tracker.rejectApiKey();
       return { status: "failed", error: "Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked.", retryable: true };
     });
@@ -648,7 +646,7 @@ describe("startWorker", () => {
     });
     await sleep(30);
 
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
     expect(stores.jobs.get(firstId)?.status).toBe("queued");
     expect(stores.jobs.get(firstId)?.attempts).toBe(0);
     expect(stores.jobs.get(firstId)?.notBefore).toBeNull();
@@ -657,7 +655,7 @@ describe("startWorker", () => {
   });
 
   it("does not fail a job on its last attempt when that attempt hits a rejected API key", async () => {
-    runJobMock.mockImplementationOnce(async () => {
+    runImplementMock.mockImplementationOnce(async () => {
       tracker.rejectApiKey();
       return { status: "publish_failed", error: "Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked." };
     });
@@ -671,7 +669,7 @@ describe("startWorker", () => {
 
     expect(stores.jobs.get(jobId)?.status).toBe("queued");
     expect(stores.jobs.get(jobId)?.attempts).toBe(0);
-    expect(runJobMock).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
   });
 
   it("sweeps worktrees beyond the kept count on start", async () => {
@@ -689,7 +687,7 @@ describe("startWorker", () => {
 
   it("runs jobs for two tickets at once, one per slot", async () => {
     const held = heldRuns();
-    runJobMock.mockImplementation(held.impl);
+    runImplementMock.mockImplementation(held.impl);
     const first = stores.jobs.enqueue(createdTrigger);
     const second = stores.jobs.enqueue(issue2);
     const handle = start(onSlots(fakeSlotRunner()));
@@ -708,20 +706,20 @@ describe("startWorker", () => {
 
   it("runs two jobs for the same ticket one after the other", async () => {
     const held = heldRuns();
-    runJobMock.mockImplementation(held.impl);
-    const runImplement = vi.fn(async () => ({ status: "succeeded" }) as const);
+    runImplementMock.mockImplementation(held.impl);
     const first = stores.jobs.enqueue(createdTrigger);
-    const second = stores.jobs.enqueue({ ...createdTrigger, action: "implement", deliveryId: "delivery-2" });
-    const handle = start({ ...onSlots(fakeSlotRunner()), runImplement });
+    const second = stores.jobs.enqueue({ ...createdTrigger, deliveryId: "delivery-2" });
+    const handle = start(onSlots(fakeSlotRunner()));
 
     await vi.waitFor(() => expect(handle.state().running.map((entry) => entry.jobId)).toEqual([first]));
     await sleep(30);
-    expect(runImplement).not.toHaveBeenCalled();
+    expect(runImplementMock).toHaveBeenCalledTimes(1);
     expect(stores.jobs.get(second)?.status).toBe("queued");
 
     held.release(first);
+    await vi.waitFor(() => expect(runImplementMock).toHaveBeenCalledTimes(2));
+    held.release(second);
     await waitForStatus(second, "succeeded");
-    expect(runImplement).toHaveBeenCalledTimes(1);
   });
 
   it("brings every slot of the helper's range down at startup before claiming, whatever slots.count is", async () => {
@@ -735,7 +733,7 @@ describe("startWorker", () => {
 
   it("stop aborts every running job, waits for all of them, brings every slot down, then releases the lock", async () => {
     const held = heldRuns();
-    runJobMock.mockImplementation(held.impl);
+    runImplementMock.mockImplementation(held.impl);
     const runner = fakeSlotRunner();
     const first = stores.jobs.enqueue(createdTrigger);
     const second = stores.jobs.enqueue(issue2);
@@ -758,7 +756,7 @@ describe("startWorker", () => {
     const other = stores.jobs.enqueue(issue2);
     const interrupted = stores.jobs.enqueue(createdTrigger);
     let interruptedRuns = 0;
-    runJobMock.mockImplementation((ctx, deps) => {
+    runImplementMock.mockImplementation((ctx, deps) => {
       if (ctx.jobId !== interrupted) return held.impl(ctx, deps);
       interruptedRuns += 1;
       return Promise.resolve(interruptedRuns === 1 ? INTERRUPTED : SUCCEEDED);
@@ -775,7 +773,7 @@ describe("startWorker", () => {
 
   it("skips the timer's sweep while a job runs and sweeps once the worker is idle", async () => {
     const held = heldRuns();
-    runJobMock.mockImplementation(held.impl);
+    runImplementMock.mockImplementation(held.impl);
     const jobId = stores.jobs.enqueue(createdTrigger);
     const handle = start({ ...onSlots(fakeSlotRunner(), { ...slotConfig(), retention: { keptWorktrees: 0, days: 30 } }), sweepMs: 10 });
     await vi.waitFor(() => expect(handle.state().running).toHaveLength(1));
@@ -809,7 +807,7 @@ describe("startWorker", () => {
       await waitForStatus(waitId, "succeeded");
       await sleep(30);
       expect(stores.jobs.get(heavy)?.status).toBe("queued");
-      expect(runJobMock).not.toHaveBeenCalled();
+      expect(runImplementMock).not.toHaveBeenCalled();
 
       sample = AMPLE;
       await waitForStatus(heavy, "succeeded");
@@ -829,7 +827,7 @@ describe("startWorker", () => {
 
     it("starts heavy jobs at least startSpacingSeconds apart, even with free slots", async () => {
       const held = heldRuns();
-      runJobMock.mockImplementation(held.impl);
+      runImplementMock.mockImplementation(held.impl);
       const first = stores.jobs.enqueue(createdTrigger);
       const second = stores.jobs.enqueue(issue2);
       const handle = start(onSlots(fakeSlotRunner(), guarded(0.3)));

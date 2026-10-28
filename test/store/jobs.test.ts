@@ -1,7 +1,7 @@
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { TriggerEvent } from "../../src/tracker/types.js";
-import { brainResult, createdEvent, freshDataDir, secondEvent } from "./helpers.js";
+import { createdEvent, freshDataDir, secondEvent } from "./helpers.js";
 
 let stores: Stores;
 
@@ -18,16 +18,16 @@ describe("JobStore", () => {
   it("loads a job whose stored results are unreadable, nulls them and names the columns, and still lists every job", () => {
     const good = stores.jobs.enqueue(createdEvent);
     const bad = stores.jobs.enqueue(secondEvent);
-    stores.db.prepare("UPDATE jobs SET result = ?, implement_result = ? WHERE id = ?").run('{"summary":1}', "not json", bad);
+    stores.db.prepare("UPDATE jobs SET fix_result = ?, implement_result = ? WHERE id = ?").run('{"summary":1}', "not json", bad);
 
     expect(stores.jobs.list({ limit: 10 }).map((job) => job.id)).toEqual([bad, good]);
     const job = stores.jobs.get(bad);
-    expect(job?.result).toBeNull();
+    expect(job?.fixResult).toBeNull();
     expect(job?.implementResult).toBeNull();
-    expect(job?.unreadable).toEqual(["result", "implement_result"]);
+    expect(job?.unreadable).toEqual(["implement_result", "fix_result"]);
     expect(stores.jobs.get(good)?.unreadable).toEqual([]);
     expect(stores.jobs.claimNext()?.id).toBe(good);
-    expect(stores.jobs.claimNext()?.unreadable).toEqual(["result", "implement_result"]);
+    expect(stores.jobs.claimNext()?.unreadable).toEqual(["implement_result", "fix_result"]);
   });
 
   it("fails review jobs left from before the reviewer was removed", () => {
@@ -55,6 +55,27 @@ describe("JobStore", () => {
     }
   });
 
+  it("failRetiredKinds fails queued and running enrich jobs and keeps their history readable", () => {
+    const insert = stores.db.prepare(
+      "INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, 'enrich')",
+    );
+    const trigger = JSON.stringify({ ...createdEvent, action: undefined });
+    const queued = Number(insert.run("issue-1", "API-1", "API", trigger, "queued", new Date().toISOString()).lastInsertRowid);
+    const running = Number(insert.run("issue-1", "API-1", "API", trigger, "running", new Date().toISOString()).lastInsertRowid);
+    const done = Number(insert.run("issue-1", "API-1", "API", trigger, "succeeded", new Date().toISOString()).lastInsertRowid);
+    const current = stores.jobs.enqueue(createdEvent);
+
+    expect(stores.jobs.failRetiredKinds()).toBe(2);
+
+    for (const id of [queued, running]) {
+      expect(stores.jobs.get(id)).toMatchObject({ kind: "enrich", status: "failed", error: "enrich was removed; this job will not run", finishedAt: expect.any(String) });
+    }
+    expect(stores.jobs.get(done)).toMatchObject({ kind: "enrich", status: "succeeded", error: null });
+    expect(stores.jobs.get(current)).toMatchObject({ kind: "implement", status: "queued" });
+    expect(stores.jobs.list({ limit: 10 }).map((job) => job.kind)).toEqual(["implement", "enrich", "enrich", "enrich"]);
+    expect(stores.jobs.failRetiredKinds()).toBe(0);
+  });
+
   it("enqueue then get returns a queued job carrying the trigger", () => {
     const id = stores.jobs.enqueue(createdEvent);
 
@@ -67,8 +88,7 @@ describe("JobStore", () => {
     expect(job?.trigger).toEqual(createdEvent);
     expect(job?.status).toBe("queued");
     expect(job?.attempts).toBe(0);
-    expect(job?.result).toBeNull();
-    expect(job?.resultSha).toBeNull();
+    expect(job?.kind).toBe("implement");
     expect(job?.error).toBeNull();
     expect(job?.startedAt).toBeNull();
     expect(job?.finishedAt).toBeNull();
@@ -108,13 +128,13 @@ describe("JobStore", () => {
   });
 
   it("claimNext with waitsOnly skips older heavy jobs and claims the oldest due await_review", () => {
-    const enrich = stores.jobs.enqueue(createdEvent);
+    const heavy = stores.jobs.enqueue(createdEvent);
     const awaitId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-2", identifier: "API-2", teamKey: "API", loopId: 4, step: "await" });
 
     expect(stores.jobs.claimNext({ waitsOnly: true })?.id).toBe(awaitId);
     expect(stores.jobs.claimNext({ waitsOnly: true })).toBeNull();
-    expect(stores.jobs.get(enrich)?.status).toBe("queued");
-    expect(stores.jobs.claimNext()?.id).toBe(enrich);
+    expect(stores.jobs.get(heavy)?.status).toBe("queued");
+    expect(stores.jobs.claimNext()?.id).toBe(heavy);
   });
 
   it("findQueued returns the queued job for the issue", () => {
@@ -129,6 +149,7 @@ describe("JobStore", () => {
     stores.jobs.claimNext();
     expect(stores.jobs.hasSucceeded("issue-1")).toBe(false);
 
+    stores.jobs.markPushed(id);
     stores.jobs.finish(id, { status: "succeeded" });
 
     expect(stores.jobs.hasSucceeded("issue-1")).toBe(true);
@@ -149,17 +170,6 @@ describe("JobStore", () => {
     expect(reclaimed?.attempts).toBe(2);
     expect(stores.jobs.claimById(id)).toBeNull();
     expect(stores.jobs.claimById(999)).toBeNull();
-  });
-
-  it("saveResult then get shows the stored result and sha", () => {
-    const id = stores.jobs.enqueue(createdEvent);
-    stores.jobs.claimNext();
-
-    stores.jobs.saveResult(id, brainResult, "1a2b3c4");
-
-    const job = stores.jobs.get(id);
-    expect(job?.result).toEqual(brainResult);
-    expect(job?.resultSha).toBe("1a2b3c4");
   });
 
   it("scheduleRetry keeps the job queued but hidden from claimNext until not_before", () => {
@@ -286,15 +296,15 @@ describe("implement jobs", () => {
     expect(stores.jobs.get(id)?.kind).toBe("implement");
   });
 
-  it("scopes findQueued and hasSucceeded by kind", () => {
+  it("scopes findQueued and hasSucceeded by kind, implement by default", () => {
     const id = stores.jobs.enqueue(implementEvent);
-    expect(stores.jobs.findQueued("issue-1")).toBeNull();
-    expect(stores.jobs.findQueued("issue-1", "implement")?.id).toBe(id);
+    expect(stores.jobs.findQueued("issue-1")?.id).toBe(id);
+    expect(stores.jobs.findQueued("issue-1", "restart")).toBeNull();
     stores.jobs.claimById(id);
     stores.jobs.markPushed(id);
     stores.jobs.finish(id, { status: "succeeded" });
-    expect(stores.jobs.hasSucceeded("issue-1")).toBe(false);
-    expect(stores.jobs.hasSucceeded("issue-1", "implement")).toBe(true);
+    expect(stores.jobs.hasSucceeded("issue-1")).toBe(true);
+    expect(stores.jobs.hasSucceeded("issue-1", "fix")).toBe(false);
   });
 
   it("does not count a handed-back implement job (nothing pushed) as implemented", () => {
@@ -340,15 +350,15 @@ describe("claimNext with running jobs", () => {
   };
 
   it("skips a job whose ticket has a running job, takes the next one, and takes the skipped one once the ticket is free", () => {
-    const enrich = stores.jobs.enqueue(createdEvent);
-    expect(stores.jobs.claimNext()?.id).toBe(enrich);
+    const heavy = stores.jobs.enqueue(createdEvent);
+    expect(stores.jobs.claimNext()?.id).toBe(heavy);
     const implement = stores.jobs.enqueue(implementIssue1);
     const other = stores.jobs.enqueue(secondEvent);
 
     expect(stores.jobs.claimNext()?.id).toBe(other);
     expect(stores.jobs.claimNext()).toBeNull();
 
-    stores.jobs.finish(enrich, { status: "succeeded" });
+    stores.jobs.finish(heavy, { status: "succeeded" });
     expect(stores.jobs.claimNext()?.id).toBe(implement);
   });
 

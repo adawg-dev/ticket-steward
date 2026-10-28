@@ -1,11 +1,11 @@
 import { acquireRunLock } from "../core/lock.js";
-import { publishOnly, redactOutcome, runJob } from "../core/pipeline.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
+import { redactOutcome } from "../core/workspace.js";
 import { runAwaitReview } from "../greptile/await.js";
 import { runFix } from "../greptile/fix.js";
 import { runRestart } from "../greptile/start.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
-import { unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
+import { RETIRED_KIND_ERROR, unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
 import { errorMessage, fail, println, type CliContext } from "./context.js";
 import { sleep } from "./probe.js";
 import type { Runtime } from "./runtime.js";
@@ -19,13 +19,13 @@ const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
   return { error: outcome.error };
 };
 
-/** Dispatches the way the worker does: implement and loop jobs go to their pipelines, a stored result means publish-only. */
+/** Dispatches the way the worker does: implement and loop jobs go to their pipelines, a stored implement result means publish-only. */
 const dispatch = (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutcome> => {
   const unreadable = unreadableOutcome(job);
   if (unreadable !== null) return Promise.resolve(unreadable);
   switch (job.kind) {
     case "enrich":
-      return job.result === null ? runJob(ctx, runtime.deps) : publishOnly(ctx, runtime.deps);
+      return Promise.resolve({ status: "failed", error: RETIRED_KIND_ERROR, retryable: false });
     case "implement":
       return job.implementResult === null ? runImplement(ctx, runtime.deps) : publishImplementOnly(ctx, runtime.deps);
     case "await_review":

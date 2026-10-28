@@ -1,7 +1,8 @@
-import { closedReason, jobKindFor, shouldEnqueue, STEWARD_BEGIN, STEWARD_END } from "../../src/core/intake.js";
+import { closedReason, shouldEnqueue } from "../../src/core/intake.js";
 import type { TriggerEvent } from "../../src/tracker/types.js";
 
-const created: TriggerEvent = {
+/** A created ticket without the implement label. */
+const unlabeled: TriggerEvent = {
   kind: "issue.created",
   issueId: "issue-1",
   identifier: "API-1",
@@ -11,17 +12,29 @@ const created: TriggerEvent = {
   stateType: "triage",
 };
 
+const created: TriggerEvent = { ...unlabeled, action: "implement" };
+
 const labeled: TriggerEvent = { ...created, kind: "issue.labeled" };
 
-const cli: TriggerEvent = { kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API" };
+const cli: TriggerEvent = { kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" };
 
-const base = { allowlist: ["API"], gatewayIssues: "enrich" as const, priorSuccess: false, hasQueuedJob: false, loop: null };
-
-const gatewayFooter = "\n\n---\n\n_Routed by ticket-gateway · class `gateway` (p=0.91, margin 0.40, auto) → API · reported by Ana via Slack /ticket_";
+const base = { allowlist: ["API"], priorSuccess: false, hasQueuedJob: false, loop: null };
 
 describe("shouldEnqueue", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("skips a created ticket without the implement label", () => {
+    expect(shouldEnqueue({ ...base, event: unlabeled })).toEqual({ action: "skip", reason: "no implement label" });
+  });
+
+  it("enqueues a created ticket that carries the implement label", () => {
+    expect(shouldEnqueue({ ...base, event: created })).toEqual({ action: "enqueue" });
+  });
+
+  it("skips a labeled event without the implement label", () => {
+    expect(shouldEnqueue({ ...base, event: { ...unlabeled, kind: "issue.labeled" } })).toEqual({ action: "skip", reason: "no implement label" });
   });
 
   it("skips issue.created for a team outside the allowlist", () => {
@@ -38,17 +51,6 @@ describe("shouldEnqueue", () => {
     expect(shouldEnqueue({ ...base, event: created, allowlist: [] })).toEqual({ action: "enqueue" });
   });
 
-  it("skips issue.created when a prior run succeeded", () => {
-    const decision = shouldEnqueue({ ...base, event: created, priorSuccess: true });
-    expect(decision.action).toBe("skip");
-  });
-
-  it("skips issue.created when the description already holds the steward marker", () => {
-    const description = `Body\n\n${STEWARD_BEGIN}\n## Enrichment\n${STEWARD_END}`;
-    const decision = shouldEnqueue({ ...base, event: { ...created, description } });
-    expect(decision.action).toBe("skip");
-  });
-
   it("does not skip cli when a prior run succeeded", () => {
     expect(shouldEnqueue({ ...base, event: cli, priorSuccess: true })).toEqual({ action: "enqueue" });
   });
@@ -61,25 +63,8 @@ describe("shouldEnqueue", () => {
     expect(shouldEnqueue({ ...base, event: cli, hasQueuedJob: true })).toEqual({ action: "attach" });
   });
 
-  it("enqueues issue.created otherwise", () => {
-    expect(shouldEnqueue({ ...base, event: created })).toEqual({ action: "enqueue" });
-  });
-
   it("enqueues cli otherwise", () => {
     expect(shouldEnqueue({ ...base, event: cli })).toEqual({ action: "enqueue" });
-  });
-
-  it("enqueues a gateway issue by default", () => {
-    expect(shouldEnqueue({ ...base, event: { ...created, description: `Body${gatewayFooter}` } })).toEqual({ action: "enqueue" });
-  });
-
-  it("skips a gateway issue when gatewayIssues is skip", () => {
-    const decision = shouldEnqueue({ ...base, gatewayIssues: "skip", event: { ...created, description: `Body${gatewayFooter}` } });
-    expect(decision).toEqual({ action: "skip", reason: "API-1 was created by ticket-gateway, which enriches its own tickets (tracker.gatewayIssues: skip)" });
-  });
-
-  it("still enqueues a non-gateway issue when gatewayIssues is skip", () => {
-    expect(shouldEnqueue({ ...base, gatewayIssues: "skip", event: created })).toEqual({ action: "enqueue" });
   });
 
   it.each(["completed", "canceled"])("skips issue.created for a %s ticket", (stateType) => {
@@ -95,34 +80,10 @@ describe("shouldEnqueue", () => {
   it("enqueues issue.labeled otherwise", () => {
     expect(shouldEnqueue({ ...base, event: labeled })).toEqual({ action: "enqueue" });
   });
-
-  it("skips issue.labeled when a prior run succeeded", () => {
-    expect(shouldEnqueue({ ...base, event: labeled, priorSuccess: true }).action).toBe("skip");
-  });
-
-  it("skips issue.labeled when the description already holds the steward marker", () => {
-    const description = `Body\n\n${STEWARD_BEGIN}\n## Enrichment\n${STEWARD_END}`;
-    expect(shouldEnqueue({ ...base, event: { ...labeled, description } }).action).toBe("skip");
-  });
-
-  it("never skips a cli run", () => {
-    expect(shouldEnqueue({ ...base, gatewayIssues: "skip", event: cli })).toEqual({ action: "enqueue" });
-  });
 });
 
 describe("implement intake", () => {
-  const implementEvent: TriggerEvent = { ...created, kind: "issue.labeled", action: "implement" };
-
-  it("maps action implement to the implement job kind", () => {
-    expect(jobKindFor(implementEvent)).toBe("implement");
-    expect(jobKindFor(created)).toBe("enrich");
-    expect(jobKindFor({ ...cli, action: "implement" })).toBe("implement");
-  });
-
-  it("enqueues an implement event on an already-enriched ticket", () => {
-    const description = `Body\n\n${STEWARD_BEGIN}\n## Enrichment\n${STEWARD_END}`;
-    expect(shouldEnqueue({ ...base, event: { ...implementEvent, description } })).toEqual({ action: "enqueue" });
-  });
+  const implementEvent: TriggerEvent = labeled;
 
   it("skips an implement event when a prior implement job succeeded", () => {
     expect(shouldEnqueue({ ...base, event: implementEvent, priorSuccess: true })).toEqual({ action: "skip", reason: "API-1 was already implemented" });

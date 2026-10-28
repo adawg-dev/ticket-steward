@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { jobKindFor, shouldEnqueue } from "../core/intake.js";
+import { shouldEnqueue } from "../core/intake.js";
 import type { RunContext } from "../core/types.js";
 import { runImplement } from "../implement/pipeline.js";
 import { ReadOnlyTracker } from "../tracker/readOnly.js";
@@ -24,14 +24,12 @@ export const registerImplement = (program: Command, ctx: CliContext): void => {
       const { id, identifier, teamKey } = await runtime.tracker.resolveIssueId(key);
       const event: TriggerEvent = { kind: "cli", issueId: id, identifier, teamKey, action: "implement" };
       const { jobs } = runtime.stores;
-      const kind = jobKindFor(event);
       const decision = shouldEnqueue({
         event,
         allowlist: config.tracker.teams,
-        gatewayIssues: config.tracker.gatewayIssues,
         priorSuccess: false,
         loop: null,
-        hasQueuedJob: opts.dryRun ? false : jobs.findQueued(id, kind) !== null,
+        hasQueuedJob: opts.dryRun ? false : jobs.findQueued(id) !== null,
       });
       if (decision.action === "skip") return fail(ctx, decision.reason);
       if (opts.dryRun) {
@@ -42,7 +40,7 @@ export const registerImplement = (program: Command, ctx: CliContext): void => {
         if (outcome.status === "succeeded" && outcome.warning !== undefined) println(ctx, outcome.warning);
         return reportOutcome(ctx, 0, outcome.status === "succeeded" ? { status: "succeeded" } : outcome);
       }
-      if (decision.action === "attach") return println(ctx, `${identifier} already has queued implement job ${jobs.findQueued(id, kind)?.id}`);
+      if (decision.action === "attach") return println(ctx, `${identifier} already has queued implement job ${jobs.findQueued(id)?.id}`);
       const jobId = jobs.enqueue(event);
       if (await answers(ctx.fetchImpl, localHealthUrl(config.server.port), HEALTH_TIMEOUT_MS)) {
         println(ctx, `steward serve is running; enqueued job ${jobId}`);

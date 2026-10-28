@@ -5,7 +5,7 @@ user-invocable: true
 argument-hint: "<persona> [path]"
 ---
 
-You are verifying authenticated user-app behavior as a specific seeded persona, from inside a steward worktree. The port is never fixed: the steward hands you `$STEWARD_PORT` in the environment and rewrote the overlay env files to point at it. Every URL, probe and cleanup step below uses `$STEWARD_PORT`. Screenshots go into the artifacts directory the prompt gave you (referred to as `$ARTIFACTS_DIR` below); list them in the `attachments` field of your result.
+You are verifying authenticated user-app behavior as a specific seeded persona, from inside a steward worktree. The port is never fixed: the steward hands you `$STEWARD_PORT` in the environment and rewrote the overlay env files to point at it. Every URL, probe and cleanup step below uses `$STEWARD_PORT`. Screenshots go into the artifacts directory the prompt gave you (referred to as `$ARTIFACTS_DIR` below); mention them in your result.
 
 ## Inputs
 
@@ -101,13 +101,13 @@ Use the Playwright MCP tools (`browser_navigate`, `browser_wait_for`, `browser_t
 
 ### 4. Record what you saw
 
-Carry into your enrichment and attachments:
+Carry into your result summary:
 - The persona and the final URL the browser landed at.
 - A one-sentence summary of what's on the page (avatar initial, page title, any error boundary).
 - Any meaningful console errors with file/line if present.
-- Each screenshot as an `attachments` entry: `{ "file": "verify-<persona>-<path-slug>.png", "caption": "<what it shows>" }` (path relative to `$ARTIFACTS_DIR`).
+- The screenshot paths under `$ARTIFACTS_DIR` (`verify-<persona>-<path-slug>.png`) and what each shows.
 
-Do **not** paste the full accessibility snapshot into the enrichment — it's large and noisy. Describe what you see.
+Do **not** paste the full accessibility snapshot into your result — it's large and noisy. Describe what you see.
 
 ### 5. Cleanup
 
@@ -133,7 +133,7 @@ The steward kills anything left in the job's process group afterwards, but leavi
 The most common breakages, ranked by frequency:
 
 1. **Dev server did not come up within the poll window** → check `$ARTIFACTS_DIR/next-dev.log` (a compile error, a missing overlay env file, or `pnpm install` having been skipped in setup). Report it; do not retry in a loop.
-2. **Overlay `.env` for user-app missing `ENABLE_DEV_AUTH_BYPASS=true`** → dev-auth route 404s (this is the gate). If it's set but login still fails, check `NEXT_PUBLIC_DESCOPE_PROJECT_ID` and `DESCOPE_MANAGEMENT_KEY` — the route uses the Descope Management SDK to mint cookies and 500s without them. These live in the steward's overlay, which you cannot edit; say so in the enrichment.
+2. **Overlay `.env` for user-app missing `ENABLE_DEV_AUTH_BYPASS=true`** → dev-auth route 404s (this is the gate). If it's set but login still fails, check `NEXT_PUBLIC_DESCOPE_PROJECT_ID` and `DESCOPE_MANAGEMENT_KEY` — the route uses the Descope Management SDK to mint cookies and 500s without them. These live in the steward's overlay, which you cannot edit; say so in your result.
 3. **Persona not seeded** → dev-auth route returns 400 with a hint and the list of available personas. Run the seed.
 4. **`TG_READ_CONN_STR` / `TG_WRITE_CONN_STR` not pointing at the local timescale** → dashboard SSR throws "relation X does not exist" inside an error boundary; the page renders 200 but shows "Something went wrong". Overlay issue again; report it.
-5. **Unrelated downstream bug** → page renders an error boundary. Note it in the enrichment with the console error; don't try to fix it.
+5. **Unrelated downstream bug** → page renders an error boundary. Note it in your result with the console error; don't try to fix it.

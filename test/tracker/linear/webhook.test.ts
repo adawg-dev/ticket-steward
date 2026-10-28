@@ -101,14 +101,14 @@ describe("parseEvent", () => {
   });
 
   describe("with labels", () => {
-    const opts = { labels: { triage: "needs-triage", implement: "ready-for-agent" } };
+    const opts = { labels: { implement: "ready-for-agent" } };
     const TRIAGE = { id: "label-triage", name: "needs-triage" };
     const AGENT = { id: "label-agent", name: "ready-for-agent" };
     const actionOf = (event: ReturnType<typeof parseEvent>) => (event === null ? undefined : event.action);
     const withLabels = (labels: Array<{ id: string; name: string }>) => ({ ...issueCreateBody, data: { ...issueCreateBody.data, labels } });
 
-    it("maps a create carrying needs-triage to issue.created with action triage", () => {
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([TRIAGE]), opts)).toEqual({
+    it("maps a create carrying ready-for-agent to issue.created with action implement", () => {
+      expect(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([AGENT]), opts)).toEqual({
         kind: "issue.created",
         issueId: "issue-uuid-1",
         identifier: "API-42",
@@ -116,29 +116,18 @@ describe("parseEvent", () => {
         deliveryId: "d-1",
         description: "Something is broken",
         stateType: "triage",
-        action: "triage",
+        action: "implement",
       });
     });
 
-    it("maps a create carrying ready-for-agent to action implement", () => {
-      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([AGENT]), opts))).toBe("implement");
-    });
-
-    it("prefers implement when both labels arrive together", () => {
-      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([TRIAGE, AGENT]), opts))).toBe("implement");
-    });
-
-    it("triages a create carrying both labels when no implement label is given", () => {
-      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([TRIAGE, AGENT]), { labels: { triage: "needs-triage" } }))).toBe("triage");
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([AGENT]), { labels: { triage: "needs-triage" } })).toBeNull();
+    it("maps a create without ready-for-agent to issue.created with no action, for intake to skip", () => {
+      const event = parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([TRIAGE]), opts);
+      expect(event?.kind).toBe("issue.created");
+      expect(actionOf(event)).toBeUndefined();
     });
 
     it("matches label names case-insensitively", () => {
-      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([{ id: "x", name: "Needs-Triage" }]), opts))).toBe("triage");
-    });
-
-    it("ignores a create without either label", () => {
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueCreateBody, opts)).toBeNull();
+      expect(actionOf(parseEvent({ event: "Issue", delivery: "d-1" }, withLabels([{ id: "x", name: "Ready-For-Agent" }]), opts))).toBe("implement");
     });
 
     it("maps an update that just added ready-for-agent to issue.labeled", () => {
@@ -148,12 +137,16 @@ describe("parseEvent", () => {
       expect(actionOf(event)).toBe("implement");
     });
 
+    it("ignores an update that added another label", () => {
+      expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueUpdateBody([TRIAGE], { labelIds: [] }), opts)).toBeNull();
+    });
+
     it("ignores an update where the labels did not change", () => {
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueUpdateBody([TRIAGE], { title: "Old" }), opts)).toBeNull();
+      expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueUpdateBody([AGENT], { title: "Old" }), opts)).toBeNull();
     });
 
     it("ignores an update where the label was already there", () => {
-      expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueUpdateBody([TRIAGE], { labelIds: ["label-triage"] }), opts)).toBeNull();
+      expect(parseEvent({ event: "Issue", delivery: "d-1" }, issueUpdateBody([AGENT], { labelIds: ["label-agent"] }), opts)).toBeNull();
     });
   });
 

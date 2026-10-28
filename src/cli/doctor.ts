@@ -174,7 +174,7 @@ const implementChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
       name: "linear labels",
       run: async () => {
         const apiKey = secrets.LINEAR_API_KEY ?? "";
-        const names = [labels.triage, labels.implement, labels.needsInfo, labels.readyForHuman, labels.implemented, ...(config.greptile === undefined ? [] : [labels.approved])];
+        const names = [labels.implement, labels.needsInfo, labels.readyForHuman, labels.implemented, ...(config.greptile === undefined ? [] : [labels.approved])];
         const response = await ctx.fetchImpl(LINEAR_GRAPHQL_URL, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: apiKey },

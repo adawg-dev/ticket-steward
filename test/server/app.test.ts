@@ -16,7 +16,7 @@ let stores: Stores;
 let tracker: FakeTracker;
 let app: FastifyInstance;
 
-const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
+const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const IMPLEMENT = {
   prompt: "./prompts/implement.md",
@@ -29,10 +29,10 @@ const IMPLEMENT = {
   protectedBranches: ["main", "staging", "dev"],
 };
 
-const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich", labels?: typeof LABELS, implement?: typeof IMPLEMENT): StewardConfig => ({
+const makeConfig = (implement: typeof IMPLEMENT | null = IMPLEMENT): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues, bugLabels: ["Bug"], ...(labels === undefined ? {} : { labels }) },
+  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",
@@ -44,16 +44,17 @@ const makeConfig = (gatewayIssues: "enrich" | "skip" = "enrich", labels?: typeof
     keepOnFailure: true,
   },
   retention: { keptWorktrees: 3, days: 30 },
-  prompt: join(dataDir, "prompt.md"),
   server: { port: 3020, publicUrl: "https://steward.example" },
-  ...(implement === undefined ? {} : { implement }),
+  ...(implement === null ? {} : { implement }),
 });
 
-const issueCreatePayload = (teamKey = "API", description = "The adapter loses the final chunk.") =>
+const AGENT_LABEL = { id: "label-agent", name: "ready-for-agent" };
+
+const issueCreatePayload = (teamKey = "API", description = "The adapter loses the final chunk.", labels = [AGENT_LABEL]) =>
   JSON.stringify({
     action: "create",
     type: "Issue",
-    data: { id: "issue-1", identifier: `${teamKey}-1`, description, team: { key: teamKey } },
+    data: { id: "issue-1", identifier: `${teamKey}-1`, description, team: { key: teamKey }, labels },
   });
 
 const sign = (body: string): string => createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
@@ -107,14 +108,14 @@ describe("buildServer", () => {
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
-    it("queues a job for a signed Issue create", async () => {
+    it("queues an implement job for a signed Issue create carrying the implement label", async () => {
       const response = await post("Issue", "delivery-1", issueCreatePayload());
 
       expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ok: true, action: "enqueue" });
       const jobs = stores.jobs.list({ limit: 10 });
       expect(jobs.length).toBe(1);
-      expect(jobs[0]?.status).toBe("queued");
-      expect(jobs[0]?.issueId).toBe("issue-1");
+      expect(jobs[0]).toMatchObject({ status: "queued", issueId: "issue-1", kind: "implement" });
       expect(jobs[0]?.trigger).toEqual({
         kind: "issue.created",
         issueId: "issue-1",
@@ -123,20 +124,12 @@ describe("buildServer", () => {
         deliveryId: "delivery-1",
         description: "The adapter loses the final chunk.",
         stateType: null,
+        action: "implement",
       });
     });
 
-    it("skips a gateway-created issue when gatewayIssues is skip", async () => {
-      await app.close();
-      app = buildServer({
-        config: makeConfig("skip"),
-        secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
-        stores,
-        tracker,
-        workerState: () => WORKER_IDLE,
-      });
-      const description = "Body\n\n---\n\n_Routed by ticket-gateway · class `gateway` (p=0.91, margin 0.40, auto) → API · reported by Ana via Slack /ticket_";
-      const response = await post("Issue", "delivery-1", issueCreatePayload("API", description));
+    it("skips a signed Issue create without the implement label", async () => {
+      const response = await post("Issue", "delivery-1", issueCreatePayload("API", "The adapter loses the final chunk.", [{ id: "label-triage", name: "needs-triage" }]));
 
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ ok: true, action: "skip" });
@@ -166,8 +159,23 @@ describe("buildServer", () => {
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
-    describe("with labels", () => {
-      const labelUpdate = (stateType: string, previousLabelIds: string[]) =>
+    it("skips a labelled ticket when implement is not configured", async () => {
+      await app.close();
+      app = buildServer({
+        config: makeConfig(null),
+        secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
+        stores,
+        tracker,
+        workerState: () => WORKER_IDLE,
+      });
+      const response = await post("Issue", "delivery-1", issueCreatePayload());
+
+      expect(response.json()).toEqual({ ok: true, action: "skip" });
+      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+    });
+
+    describe("when a label is added", () => {
+      const labelUpdate = (stateType: string, labels: Array<{ id: string; name: string }>, previousLabelIds: string[]) =>
         JSON.stringify({
           action: "update",
           type: "Issue",
@@ -177,76 +185,32 @@ describe("buildServer", () => {
             description: "The adapter loses the final chunk.",
             team: { key: "API" },
             state: { name: "Todo", type: stateType },
-            labels: [{ id: "label-triage", name: "needs-triage" }],
+            labels,
           },
           updatedFrom: { labelIds: previousLabelIds },
         });
 
-      const readyForAgentUpdate = () =>
-        JSON.stringify({
-          action: "update",
-          type: "Issue",
-          data: {
-            id: "issue-1",
-            identifier: "API-1",
-            description: "Body\n\n<!-- ticket-steward:begin -->\n## Enrichment\n<!-- ticket-steward:end -->",
-            team: { key: "API" },
-            state: { name: "Todo", type: "unstarted" },
-            labels: [{ id: "label-agent", name: "ready-for-agent" }],
-          },
-          updatedFrom: { labelIds: [] },
-        });
+      const readyForAgentUpdate = (stateType = "unstarted") => labelUpdate(stateType, [AGENT_LABEL], []);
 
-      const rebuild = async (implement?: typeof IMPLEMENT) => {
-        await app.close();
-        app = buildServer({
-          config: makeConfig("enrich", LABELS, implement),
-          secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
-          stores,
-          tracker,
-          workerState: () => WORKER_IDLE,
-        });
-      };
-
-      beforeEach(async () => {
-        await app.close();
-        app = buildServer({
-          config: makeConfig("enrich", LABELS),
-          secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
-          stores,
-          tracker,
-          workerState: () => WORKER_IDLE,
-        });
-      });
-
-      it("ignores an Issue create without the label", async () => {
-        const response = await post("Issue", "delivery-1", issueCreatePayload());
-
-        expect(response.json()).toEqual({ ok: true, action: "ignored" });
-        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
-      });
-
-      it("queues a job when the label is added", async () => {
-        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", []));
+      it("queues an implement job when ready-for-agent is added", async () => {
+        const response = await post("Issue", "delivery-9", readyForAgentUpdate());
 
         expect(response.json()).toEqual({ ok: true, action: "enqueue" });
-        expect(stores.jobs.list({ limit: 10 })[0]?.trigger.kind).toBe("issue.labeled");
-        expect(stores.jobs.list({ limit: 10 })[0]?.trigger).toMatchObject({ kind: "issue.labeled", action: "triage" });
+        expect(stores.jobs.list({ limit: 10 })[0]).toMatchObject({ kind: "implement", trigger: { kind: "issue.labeled", action: "implement" } });
       });
 
       it("skips a Done ticket when the label is added", async () => {
-        const response = await post("Issue", "delivery-1", labelUpdate("completed", []));
+        const response = await post("Issue", "delivery-1", readyForAgentUpdate("completed"));
 
         expect(response.json()).toEqual({ ok: true, action: "skip" });
         expect(stores.jobs.list({ limit: 10 })).toEqual([]);
       });
 
-      it("queues an implement job when ready-for-agent is added to an enriched ticket", async () => {
-        await rebuild(IMPLEMENT);
-        const response = await post("Issue", "delivery-9", readyForAgentUpdate());
+      it("ignores a label other than ready-for-agent", async () => {
+        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", [{ id: "label-triage", name: "needs-triage" }], []));
 
-        expect(response.json()).toEqual({ ok: true, action: "enqueue" });
-        expect(stores.jobs.list({ limit: 10 })[0]?.kind).toBe("implement");
+        expect(response.json()).toEqual({ ok: true, action: "ignored" });
+        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
       });
 
       const createLoop = (state: "awaiting_review" | "handed_back"): number => {
@@ -262,7 +226,6 @@ describe("buildServer", () => {
       };
 
       it("queues a restart job when ready-for-agent is added to a handed-back loop", async () => {
-        await rebuild(IMPLEMENT);
         const loopId = createLoop("handed_back");
         const before = stores.jobs.list({ limit: 10 }).length;
         const response = await post("Issue", "delivery-9", readyForAgentUpdate());
@@ -276,7 +239,6 @@ describe("buildServer", () => {
       });
 
       it("skips ready-for-agent while the loop is awaiting a review", async () => {
-        await rebuild(IMPLEMENT);
         createLoop("awaiting_review");
         const response = await post("Issue", "delivery-9", readyForAgentUpdate());
 
@@ -284,38 +246,8 @@ describe("buildServer", () => {
         expect(stores.jobs.list({ status: "queued", limit: 10 })).toEqual([]);
       });
 
-      it("ignores ready-for-agent when implement is not configured", async () => {
-        const response = await post("Issue", "delivery-9", readyForAgentUpdate());
-
-        expect(response.json()).toEqual({ ok: true, action: "ignored" });
-        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
-      });
-
-      it("triages a ticket created with both labels when implement is not configured", async () => {
-        const body = JSON.stringify({
-          action: "create",
-          type: "Issue",
-          data: {
-            id: "issue-1",
-            identifier: "API-1",
-            description: "The adapter loses the final chunk.",
-            team: { key: "API" },
-            state: { name: "Todo", type: "unstarted" },
-            labels: [
-              { id: "label-triage", name: "needs-triage" },
-              { id: "label-agent", name: "ready-for-agent" },
-            ],
-          },
-        });
-
-        const response = await post("Issue", "delivery-10", body);
-
-        expect(response.json()).toEqual({ ok: true, action: "enqueue" });
-        expect(stores.jobs.list({ limit: 10 })[0]).toMatchObject({ kind: "enrich", trigger: { kind: "issue.created", action: "triage" } });
-      });
-
       it("ignores an update to a ticket that already had the label", async () => {
-        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", ["label-triage"]));
+        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", [AGENT_LABEL], [AGENT_LABEL.id]));
 
         expect(response.json()).toEqual({ ok: true, action: "ignored" });
         expect(stores.jobs.list({ limit: 10 })).toEqual([]);

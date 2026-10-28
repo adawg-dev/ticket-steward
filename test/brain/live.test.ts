@@ -8,7 +8,7 @@ import { runBrainDetached } from "../../src/brain/spawn.js";
 import type { BrainInput } from "../../src/brain/types.js";
 import type { BrainConfig } from "../../src/config/schema.js";
 import { Redactor } from "../../src/core/redact.js";
-import { BrainResultSchema } from "../../src/core/result.js";
+import { ImplementResultSchema } from "../../src/implement/result.js";
 
 const exec = promisify(execFile);
 const live = process.env.STEWARD_LIVE_BRAIN === "1";
@@ -16,10 +16,10 @@ const live = process.env.STEWARD_LIVE_BRAIN === "1";
 const claudeCode: BrainConfig = { kind: "claude-code", model: process.env.STEWARD_LIVE_CLAUDE_MODEL ?? "claude-sonnet-4-5", maxTurns: 12, timeoutMinutes: 5 };
 const openaiAgents: BrainConfig = { kind: "openai-agents", model: process.env.STEWARD_LIVE_OPENAI_MODEL ?? "gpt-5", maxTurns: 12, timeoutMinutes: 5 };
 
-const PROMPT = `You are enriching a ticket titled "Greeting is lowercase" for a tiny repository.
+const PROMPT = `You are implementing a ticket titled "Greeting is lowercase" for a tiny repository.
 The ticket says: "hello.ts prints a lowercase greeting; it should be capitalized."
-Look at the repository in the working directory, locate the relevant file, and return the structured result.
-Set template.matched to null, template.conforms to true, template.missing to [], attachments to [], and reference files as relative/path.ts:line.`;
+Fix it in the working directory without committing, then return the structured result.
+Set outcome to "implemented", branchType to "fix", questions to [] and failureDetail to null.`;
 
 let dir: string;
 
@@ -41,7 +41,7 @@ const liveInput = (brain: BrainConfig): BrainInput => ({
   model: brain.model,
   mcpServers: {},
   denyPaths: [],
-  output: "enrich",
+  output: "implement",
 });
 
 describe.skipIf(!live)("live brain contract", () => {
@@ -61,15 +61,15 @@ describe.skipIf(!live)("live brain contract", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("claude-code returns output that validates as BrainResult", async () => {
+  it("claude-code returns output that validates as ImplementResult", async () => {
     const run = await runBrainDetached(claudeCode, liveInput(claudeCode), new Redactor([]));
     expect(run.ok).toBe(true);
-    expect(BrainResultSchema.safeParse(run.output).success).toBe(true);
+    expect(ImplementResultSchema.safeParse(run.output).success).toBe(true);
   }, 360_000);
 
-  it("openai-agents returns output that validates as BrainResult", async () => {
+  it("openai-agents returns output that validates as ImplementResult", async () => {
     const run = await runBrainDetached(openaiAgents, liveInput(openaiAgents), new Redactor([]));
     expect(run.ok).toBe(true);
-    expect(BrainResultSchema.safeParse(run.output).success).toBe(true);
+    expect(ImplementResultSchema.safeParse(run.output).success).toBe(true);
   }, 360_000);
 });

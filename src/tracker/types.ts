@@ -1,4 +1,5 @@
-export type LabelAction = "triage" | "implement";
+/** The only label that starts work; enrich and its triage label were removed on 2026-10-28. */
+export type LabelAction = "implement";
 
 export type TriggerEvent =
   | {
@@ -9,7 +10,7 @@ export type TriggerEvent =
       deliveryId: string;
       description: string;
       stateType: string | null;
-      /** Which configured label started this; absent when labels are not configured (every new ticket is triaged). */
+      /** Set when the event added the implement label; absent on a created ticket without it, which intake skips. */
       action?: LabelAction;
     }
   | { kind: "cli"; issueId: string; identifier: string; teamKey: string; action?: LabelAction }

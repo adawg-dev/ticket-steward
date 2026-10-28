@@ -23,7 +23,7 @@ const input = (overrides: Partial<BrainInput>): BrainInput => ({
   model: "fake",
   mcpServers: {},
   denyPaths: [],
-  output: "enrich",
+  output: "implement",
   ...overrides,
 });
 

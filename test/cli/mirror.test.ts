@@ -18,7 +18,6 @@ beforeEach(async () => {
   configPath = await writeConfig(dir, {
     dataDir,
     overlayDir: join(dir, "overlay"),
-    promptPath: join(dir, "prompt.md"),
     fetchUrl: source,
     port: 4100,
     serverPort: 3020,

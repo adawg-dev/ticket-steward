@@ -1,5 +1,4 @@
 import { query, type HookCallback, type McpServerConfig, type Options, type SDKMessage, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
-import { brainResultJsonSchema } from "../core/result.js";
 import { fixResultJsonSchema } from "../greptile/result.js";
 import { implementResultJsonSchema } from "../implement/result.js";
 import { evaluateTool } from "./policy.js";
@@ -8,7 +7,6 @@ import type { Brain, BrainInput, BrainOutput, BrainUsage, OnMessage } from "./ty
 const ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*"];
 const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
 const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = {
-  enrich: brainResultJsonSchema,
   implement: implementResultJsonSchema,
   fix: fixResultJsonSchema,
 };

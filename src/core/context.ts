@@ -37,24 +37,3 @@ export const renderTicketMarkdown = (bundle: TicketBundle): string =>
     "",
     renderAttachments(bundle.attachments),
   ].join("\n");
-
-export const renderTemplatesMarkdown = (bundle: TicketBundle): string =>
-  bundle.templates.length === 0
-    ? "_No templates configured._"
-    : bundle.templates
-        // Linear returns team templates both from the workspace and from the team.
-        .filter((t, i, all) => all.findIndex((o) => o.name === t.name && o.body === t.body) === i)
-        .map(({ name, description, requiredFields, body }) =>
-          [
-            `## ${name}`,
-            "",
-            description,
-            "",
-            `Required fields: ${listOrNone(requiredFields)}`,
-            "",
-            "```markdown",
-            body,
-            "```",
-          ].join("\n"),
-        )
-        .join("\n\n");

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { StewardConfig } from "../../src/config/schema.js";
-import type { PipelineDeps } from "../../src/core/pipeline.js";
+import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import { stableWorktreeName } from "../../src/core/workspace.js";
@@ -21,7 +21,7 @@ import { commitFile, git } from "../workspace/helpers.js";
 
 const IMPLEMENT_PROMPT = fileURLToPath(new URL("../../prompts/implement.md", import.meta.url));
 const FIX_PROMPT = fileURLToPath(new URL("../../prompts/fix.md", import.meta.url));
-const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
+const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 const GREPTILE = "greptile-bot";
 const BRANCH = "fix/API-1-adapter-drops-the-last-chunk";
 const NOW = new Date("2026-10-27T12:00:00.000Z");
@@ -77,11 +77,10 @@ let finding: string;
 const makeConfig = (): StewardConfig => ({
   dataDir: repo.dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich", bugLabels: ["Bug"], labels: LABELS },
+  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: { fetchUrl: repo.repo, baseBranch: "main", overlayDir: repo.overlayDir, setup: [], setupTimeoutMinutes: 1, port, keepOnFailure: false },
   retention: { keptWorktrees: 3, days: 30 },
-  prompt: repo.promptPath,
   server: { port: 3020, publicUrl: "https://steward.example" },
   implement: {
     prompt: IMPLEMENT_PROMPT,

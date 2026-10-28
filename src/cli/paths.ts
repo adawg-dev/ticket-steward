@@ -6,7 +6,7 @@ export const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 export const binPath = join(packageRoot, "bin", "steward.js");
 
-export const defaultPromptPath = join(packageRoot, "prompts", "enrich.md");
+export const implementPromptPath = join(packageRoot, "prompts", "implement.md");
 
 export const fixPromptPath = join(packageRoot, "prompts", "fix.md");
 export const envExamplePath = join(packageRoot, ".env.example");

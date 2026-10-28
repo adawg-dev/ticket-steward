@@ -6,8 +6,11 @@ const BrainBaseSchema = z.object({
   timeoutMinutes: z.number().positive(),
 });
 
+/** A key that only served enrich (removed 2026-10-28): rejected rather than stripped, so a stale config fails loudly. */
+const removedWithEnrich = (key: string) => z.never({ error: `${key} was removed with enrich (see docs/ops.md)` }).optional();
+
 const LabelsSchema = z.object({
-  triage: z.string().min(1).default("needs-triage"),
+  triage: removedWithEnrich("tracker.labels.triage"),
   implement: z.string().min(1).default("ready-for-agent"),
   needsInfo: z.string().min(1).default("needs-info"),
   readyForHuman: z.string().min(1).default("ready-for-human"),
@@ -107,12 +110,11 @@ export const StewardConfigSchema = z.object({
   tracker: z.object({
     kind: z.literal("linear"),
     teams: z.array(z.string()).default([]),
-    /** "skip" only when ticket-gateway enriches its own tickets through the steward (sidecar mode); otherwise both would enrich them. */
-    gatewayIssues: z.enum(["enrich", "skip"]).default("enrich"),
-    bugLabels: z.array(z.string()).default(["Bug"]),
-    /** Label-driven workflows; unset keeps the old behaviour of enriching every new ticket. */
+    gatewayIssues: removedWithEnrich("tracker.gatewayIssues"),
+    bugLabels: removedWithEnrich("tracker.bugLabels"),
+    /** The labels the steward reads and sets; required by implement. */
     labels: LabelsSchema.optional(),
-    /** Removed; rejected rather than stripped, since a config still carrying it would otherwise enrich every new ticket. */
+    /** Removed; rejected rather than stripped, so a config still carrying it fails loudly. */
     triggerLabel: z.never({ error: "tracker.triggerLabel was replaced by tracker.labels (see docs/ops.md)" }).optional(),
   }),
   codehost: z.discriminatedUnion("kind", [
@@ -137,11 +139,12 @@ export const StewardConfigSchema = z.object({
       days: z.number().int().positive().default(30),
     })
     .prefault({}),
-  prompt: z.string(),
+  prompt: removedWithEnrich("prompt"),
   server: z.object({
     port: z.number().int().positive(),
     publicUrl: z.string(),
   }),
+  /** Optional in the type so a missing block gets the "implement is required" message below, not zod's generic one. */
   implement: ImplementSchema.optional(),
   /** Parallel jobs on fresh per-job containers; unset keeps one job at a time on workspace.port. */
   slots: SlotsSchema.optional(),
@@ -155,6 +158,7 @@ export const StewardConfigSchema = z.object({
     if (config.codehost.kind !== "gitlab") ctx.addIssue({ code: "custom", path: ["greptile"], message: 'greptile requires codehost.kind "gitlab"' });
     if (config.brain.kind !== "claude-code") ctx.addIssue({ code: "custom", path: ["greptile"], message: 'greptile requires brain.kind "claude-code"' });
   }
+  if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["implement"], message: "implement is required" });
   if (config.implement !== undefined && config.tracker.labels === undefined) {
     ctx.addIssue({ code: "custom", path: ["implement"], message: "implement requires tracker.labels" });
   }

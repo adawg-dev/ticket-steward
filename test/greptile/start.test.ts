@@ -27,17 +27,16 @@ const labeled: TriggerEvent = {
 let dataDir: string;
 let stores: Stores;
 
-const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
+const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const depsWith = (greptile: GreptileConfig | undefined): { config: StewardConfig; stores: Stores } => {
   const config: StewardConfig = {
     dataDir,
     brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-    tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich", bugLabels: ["Bug"], labels: LABELS },
+    tracker: { kind: "linear", teams: ["API"], labels: LABELS },
     codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
     workspace: { fetchUrl: "https://gitlab.example/acme/repo.git", baseBranch: "dev", overlayDir: join(dataDir, "overlay"), setup: [], setupTimeoutMinutes: 1, port: 4100, keepOnFailure: false },
     retention: { keptWorktrees: 3, days: 30 },
-    prompt: join(dataDir, "prompt.md"),
     server: { port: 3020, publicUrl: "https://steward.example" },
     ...(greptile === undefined ? {} : { greptile }),
   };
@@ -112,7 +111,8 @@ describe("startLoop", () => {
   });
 
   it("returns null for a label trigger that is not implement", () => {
-    expect(startLoop(depsWith(GREPTILE), implementJob({ ...labeled, action: "triage" }), start)).toBeNull();
+    const unlabeled: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: "unstarted" };
+    expect(startLoop(depsWith(GREPTILE), implementJob(unlabeled), start)).toBeNull();
   });
 
   it("returns null before the push", () => {

@@ -45,7 +45,6 @@ const config = (greptile: boolean): Promise<string> =>
   writeConfig(dir, {
     dataDir: repo.dataDir,
     overlayDir: repo.overlayDir,
-    promptPath: repo.promptPath,
     fetchUrl: repo.repo,
     port,
     serverPort,

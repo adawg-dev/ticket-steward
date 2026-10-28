@@ -2,7 +2,6 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TriggerEvent } from "../../src/tracker/types.js";
-import type { BrainResult } from "../../src/core/result.js";
 
 export const freshDataDir = (): string => mkdtempSync(join(tmpdir(), "steward-store-"));
 
@@ -14,6 +13,7 @@ export const createdEvent: TriggerEvent = {
   deliveryId: "delivery-1",
   description: "A bug report",
   stateType: null,
+  action: "implement",
 };
 
 export const secondEvent: TriggerEvent = {
@@ -24,14 +24,5 @@ export const secondEvent: TriggerEvent = {
   deliveryId: "delivery-2",
   description: "Another bug report",
   stateType: null,
-};
-
-export const brainResult: BrainResult = {
-  template: { matched: "Bugs", conforms: false, missing: ["Repro Steps"] },
-  summary: "The bug is in the adapter.",
-  enrichment: "See `src/adapter.ts:12`.",
-  attachments: [],
-  confidence: "high",
-  repro: null,
-  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
+  action: "implement",
 };

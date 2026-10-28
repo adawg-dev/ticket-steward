@@ -4,7 +4,7 @@ import type { StewardConfigInput } from "../../src/config/schema.js";
 const minimalInput: StewardConfigInput = {
   dataDir: "/var/lib/ticket-steward",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear" },
+  tracker: { kind: "linear", labels: {} },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "concentrateai/kickoff" },
   workspace: {
     fetchUrl: "https://gitlab.com/concentrateai/kickoff.git",
@@ -13,8 +13,13 @@ const minimalInput: StewardConfigInput = {
     setup: [],
     port: 4100,
   },
-  prompt: "./prompts/enrich.md",
   server: { port: 3020, publicUrl: "https://steward.example.com" },
+  implement: { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } },
+};
+
+const messages = (input: unknown): string[] => {
+  const parsed = StewardConfigSchema.safeParse(input);
+  return parsed.success ? [] : parsed.error.issues.map((issue) => issue.message);
 };
 
 describe("StewardConfigSchema", () => {
@@ -29,8 +34,23 @@ describe("StewardConfigSchema", () => {
     expect(parsed.workspace.portRewrite).toBeUndefined();
     expect(parsed.retention).toEqual({ keptWorktrees: 3, days: 30 });
     expect(parsed.tracker.teams).toEqual([]);
-    expect(parsed.tracker.gatewayIssues).toBe("enrich");
-    expect(parsed.tracker.bugLabels).toEqual(["Bug"]);
+  });
+
+  it("rejects the removed enrich keys", () => {
+    const { tracker } = minimalInput;
+    const removed: Array<[string, unknown]> = [
+      ["prompt", { ...minimalInput, prompt: "./prompts/enrich.md" }],
+      ["tracker.gatewayIssues", { ...minimalInput, tracker: { ...tracker, gatewayIssues: "enrich" } }],
+      ["tracker.bugLabels", { ...minimalInput, tracker: { ...tracker, bugLabels: ["Bug"] } }],
+      ["tracker.labels.triage", { ...minimalInput, tracker: { ...tracker, labels: { triage: "needs-triage" } } }],
+    ];
+    for (const [key, input] of removed) {
+      expect(messages(input)).toEqual([`${key} was removed with enrich (see docs/ops.md)`]);
+    }
+  });
+
+  it("requires implement", () => {
+    expect(messages({ ...minimalInput, implement: undefined })).toEqual(["implement is required"]);
   });
 
   it("rejects the removed tracker.triggerLabel with a pointer to tracker.labels", () => {
@@ -43,11 +63,6 @@ describe("StewardConfigSchema", () => {
 
   it("rejects a config missing a required field", () => {
     expect(StewardConfigSchema.safeParse({ ...minimalInput, dataDir: undefined }).success).toBe(false);
-  });
-
-  it("rejects an unknown tracker.gatewayIssues value", () => {
-    const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { kind: "linear", gatewayIssues: "sometimes" } });
-    expect(result.success).toBe(false);
   });
 
   it("rejects an unknown brain kind", () => {
@@ -73,11 +88,6 @@ describe("StewardConfigSchema", () => {
   });
 });
 
-describe("tracker config", () => {
-  it("defaults bugLabels to Bug", () => {
-    expect(StewardConfigSchema.parse(minimalInput).tracker.bugLabels).toEqual(["Bug"]);
-  });
-});
 
 describe("brain.reasoningEffort", () => {
   const openai = { kind: "openai-agents", model: "gpt-6-luna", maxTurns: 80, timeoutMinutes: 30 } as const;
@@ -102,19 +112,12 @@ describe("tracker.labels and implement", () => {
   it("fills every label name with its default", () => {
     const parsed = StewardConfigSchema.parse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels } });
     expect(parsed.tracker.labels).toEqual({
-      triage: "needs-triage",
       implement: "ready-for-agent",
       needsInfo: "needs-info",
       readyForHuman: "ready-for-human",
       implemented: "agent-implemented",
       approved: "agent-approved",
     });
-  });
-
-  it("leaves labels and implement unset by default", () => {
-    const parsed = StewardConfigSchema.parse(minimalInput);
-    expect(parsed.tracker.labels).toBeUndefined();
-    expect(parsed.implement).toBeUndefined();
   });
 
   it("fills implement defaults", () => {
@@ -131,7 +134,7 @@ describe("tracker.labels and implement", () => {
   });
 
   it("rejects implement without tracker.labels", () => {
-    const result = StewardConfigSchema.safeParse({ ...minimalInput, implement });
+    const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { kind: "linear" }, implement });
     expect(result.success).toBe(false);
   });
 
@@ -146,11 +149,6 @@ describe("greptile config", () => {
   const implement = { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } };
   const greptile = { botUsername: "g", prompt: "./prompts/fix.md" };
   const valid = { ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement, brain: { kind: "claude-code", model: "m", maxTurns: 1, timeoutMinutes: 1 }, codehost: { kind: "gitlab", baseUrl: "https://gitlab.example.com", project: "g/p" }, greptile };
-  const messages = (input: unknown): string[] => {
-    const result = StewardConfigSchema.safeParse(input);
-    return result.success ? [] : result.error.issues.map((issue) => issue.message);
-  };
-
   it("parses with every default", () => {
     const parsed = StewardConfigSchema.parse(valid);
     expect(parsed.greptile).toEqual({

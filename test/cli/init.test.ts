@@ -23,14 +23,14 @@ describe("steward init", () => {
     expect(existsSync(join(dir, "steward.config.ts"))).toBe(true);
     expect(existsSync(join(dir, ".env.example"))).toBe(true);
     expect(existsSync(join(dir, "skills", "README.md"))).toBe(true);
-    expect(await readFile(join(dir, "prompts", "enrich.md"), "utf8")).toBe(await readFile(resolve("prompts/enrich.md"), "utf8"));
+    expect(await readFile(join(dir, "prompts", "implement.md"), "utf8")).toBe(await readFile(resolve("prompts/implement.md"), "utf8"));
     expect(await readFile(join(dir, "prompts", "fix.md"), "utf8")).toBe(await readFile(resolve("prompts/fix.md"), "utf8"));
     expect(await readFile(join(dir, ".env.example"), "utf8")).toBe(await readFile(resolve(".env.example"), "utf8"));
     expect(await readFile(join(dir, ".env.example"), "utf8")).toMatch(/^LINEAR_API_KEY=$/m);
     expect(await readFile(join(dir, ".env.example"), "utf8")).not.toContain("LINEAR_CLIENT_");
     expect((await readFile(join(dir, "steward.config.ts"), "utf8")).startsWith('import { defineConfig } from "ticket-steward";')).toBe(true);
     expect(stdout()).toBe(
-      [`wrote ${join(dir, "steward.config.ts")}`, `wrote ${join(dir, ".env.example")}`, `wrote ${join(dir, "prompts", "enrich.md")}`, `wrote ${join(dir, "skills", "README.md")}`, `wrote ${join(dir, "prompts", "fix.md")}`, ""].join("\n"),
+      [`wrote ${join(dir, "steward.config.ts")}`, `wrote ${join(dir, ".env.example")}`, `wrote ${join(dir, "prompts", "implement.md")}`, `wrote ${join(dir, "skills", "README.md")}`, `wrote ${join(dir, "prompts", "fix.md")}`, ""].join("\n"),
     );
   });
 
@@ -45,7 +45,7 @@ describe("steward init", () => {
         "refusing to overwrite existing files:",
         `  ${join(dir, "steward.config.ts")}`,
         `  ${join(dir, ".env.example")}`,
-        `  ${join(dir, "prompts", "enrich.md")}`,
+        `  ${join(dir, "prompts", "implement.md")}`,
         `  ${join(dir, "skills", "README.md")}`,
         "",
       ].join("\n"),
@@ -64,10 +64,12 @@ describe("steward init", () => {
   it("generates a config that loads", async () => {
     const { ctx } = makeContext();
     await buildProgram(ctx).parseAsync(["node", "steward", "init", dir]);
+    // As an operator would: .env.example copied to .env and the push token filled in.
+    await writeFile(join(dir, ".env"), "GITLAB_PUSH_TOKEN=glpat-push-token-value\n");
 
     const loaded = await ctx.loadConfig({ cwd: dir });
 
-    expect(loaded.config.prompt).toBe(join(dir, "prompts", "enrich.md"));
+    expect(loaded.config.implement?.prompt).toBe(join(dir, "prompts", "implement.md"));
     expect(loaded.config.workspace.skillsDir).toBe(join(dir, "skills"));
   });
 });

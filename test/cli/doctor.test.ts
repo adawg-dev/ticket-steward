@@ -76,7 +76,6 @@ describe("steward doctor", () => {
     const configPath = await writeConfig(dir, {
       dataDir: repo.dataDir,
       overlayDir: repo.overlayDir,
-      promptPath: repo.promptPath,
       fetchUrl: repo.repo,
       port,
       serverPort: await freeTcpPort(),
@@ -99,19 +98,22 @@ describe("steward doctor", () => {
     expect(lines[9]).toBe("[ok] overlay: 1 file(s)");
     expect(lines[10]).toBe(`[ok] skills: ${skillsDir}`);
     expect(lines[11]).toBe("[fail] linear api key: viewer query answered 503");
-    expect(lines[12]).toBe("[fail] public url: https://steward.example/health answered 503");
-    expect(lines[13]).toBe("[ok] codehost mcp: tools: recent_changes, permalink");
-    expect(lines[14]?.startsWith("[ok] playwright mcp: ")).toBe(true);
-    expect(lines[15]).toBe(`[ok] chromium: ${join(browsers, "chromium-1000")}`);
-    expect(lines[16]).toBe(`[ok] port: ${port} is free`);
-    expect(lines.length).toBe(17);
+    // implement is required, so its checks always run.
+    expect(lines[12]).toBe("[fail] linear labels: issueLabels answered 503");
+    expect(lines[13]).toBe(`[ok] push token: GITLAB_PUSH_TOKEN reaches ${repo.repo}`);
+    expect(lines[14]).toBe("[fail] branch protection: protected_branches answered 503");
+    expect(lines[15]).toBe("[fail] public url: https://steward.example/health answered 503");
+    expect(lines[16]).toBe("[ok] codehost mcp: tools: recent_changes, permalink");
+    expect(lines[17]?.startsWith("[ok] playwright mcp: ")).toBe(true);
+    expect(lines[18]).toBe(`[ok] chromium: ${join(browsers, "chromium-1000")}`);
+    expect(lines[19]).toBe(`[ok] port: ${port} is free`);
+    expect(lines.length).toBe(20);
   });
 
   it("fails when no chromium is installed under PLAYWRIGHT_BROWSERS_PATH", async () => {
     const configPath = await writeConfig(dir, {
       dataDir: repo.dataDir,
       overlayDir: repo.overlayDir,
-      promptPath: repo.promptPath,
       fetchUrl: repo.repo,
       port: await freeTcpPort(),
       serverPort: await freeTcpPort(),
@@ -120,7 +122,7 @@ describe("steward doctor", () => {
 
     await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toEqual(new ExitSignal(1));
 
-    expect(stdout().trimEnd().split("\n")[15]).toBe(`[fail] chromium: no chromium under ${browsers}; run npx playwright install chromium`);
+    expect(stdout().trimEnd().split("\n")).toContain(`[fail] chromium: no chromium under ${browsers}; run npx playwright install chromium`);
   });
 
   describe("linear api key check", () => {
@@ -129,7 +131,6 @@ describe("steward doctor", () => {
       const configPath = await writeConfig(dir, {
         dataDir: repo.dataDir,
         overlayDir: repo.overlayDir,
-        promptPath: repo.promptPath,
         fetchUrl: repo.repo,
         port: await freeTcpPort(),
         serverPort: await freeTcpPort(),
@@ -170,7 +171,7 @@ describe("steward doctor", () => {
   it("fails when a workflow label is missing in Linear", async () => {
     const port = await freeTcpPort();
     const serverPort = await freeTcpPort();
-    const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, promptPath: repo.promptPath, fetchUrl: repo.repo, port, serverPort, implement: { prompt: repo.promptPath } });
+    const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, fetchUrl: repo.repo, port, serverPort, implement: { prompt: repo.promptPath } });
     const fetchImpl: typeof fetch = async (input, init) => {
       const body = typeof init?.body === "string" ? init.body : "";
       if (String(input) === LINEAR_GRAPHQL_URL && body.includes("issueLabels")) {
@@ -193,7 +194,7 @@ describe("greptile checks", () => {
     const port = await freeTcpPort();
     const serverPort = await freeTcpPort();
     const configPath = await writeConfig(dir, {
-      dataDir: repo.dataDir, overlayDir: repo.overlayDir, promptPath: repo.promptPath, fetchUrl: repo.repo, port, serverPort,
+      dataDir: repo.dataDir, overlayDir: repo.overlayDir, fetchUrl: repo.repo, port, serverPort,
       implement: { prompt: repo.promptPath }, greptile: { prompt, ...(pollSeconds === undefined ? {} : { pollSeconds }) },
     });
     if (env !== "") await appendFile(join(dir, ".env"), env);
@@ -286,7 +287,6 @@ describe("slot checks", () => {
     const configPath = await writeConfig(dir, {
       dataDir: repo.dataDir,
       overlayDir: repo.overlayDir,
-      promptPath: repo.promptPath,
       fetchUrl: repo.repo,
       port: options.port ?? null,
       serverPort: await freeTcpPort(),

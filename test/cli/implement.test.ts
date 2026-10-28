@@ -8,7 +8,7 @@ import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
-import { ExitSignal, makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
+import { makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
 
 const IMPLEMENT_PROMPT = fileURLToPath(new URL("../../prompts/implement.md", import.meta.url));
 
@@ -60,7 +60,6 @@ beforeEach(async () => {
   configPath = await writeConfig(dir, {
     dataDir: repo.dataDir,
     overlayDir: repo.overlayDir,
-    promptPath: repo.promptPath,
     fetchUrl: repo.repo,
     port,
     serverPort,
@@ -86,10 +85,4 @@ describe("steward implement", () => {
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });
 
-  it("refuses when implement is not configured", async () => {
-    const plain = await writeConfig(await tmpConfigDir(), { dataDir: repo.dataDir, overlayDir: repo.overlayDir, promptPath: repo.promptPath, fetchUrl: repo.repo, port, serverPort });
-    const { ctx, stderr } = makeContext({ factories: { tracker, codehost: new FakeCodeHost(), brain: new FakeBrain() } });
-    await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", plain, "implement", "API-1"])).rejects.toBeInstanceOf(ExitSignal);
-    expect(stderr()).toContain("implement is not configured");
-  });
 });

@@ -6,7 +6,6 @@ import { jobLine } from "../../src/cli/jobs.js";
 import { localHealthUrl } from "../../src/cli/probe.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { CliFactories } from "../../src/cli/context.js";
-import type { BrainResult } from "../../src/core/result.js";
 import type { TriggerEvent } from "../../src/tracker/types.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
@@ -21,19 +20,12 @@ const createdEvent: TriggerEvent = {
   deliveryId: "delivery-1",
   description: "A bug report",
   stateType: null,
+  action: "implement",
 };
 
-const cliEvent: TriggerEvent = { kind: "cli", issueId: "issue-2", identifier: "API-2", teamKey: "API" };
+const cliEvent: TriggerEvent = { kind: "cli", issueId: "issue-2", identifier: "API-2", teamKey: "API", action: "implement" };
 
-const brainResult: BrainResult = {
-  template: { matched: "Bugs", conforms: false, missing: ["Repro Steps"] },
-  summary: "The bug is in the adapter.",
-  enrichment: "See `src/adapter.ts:12`.",
-  attachments: [],
-  confidence: "high",
-  repro: null,
-  triage: { state: "ready-for-human", questions: [], agentBrief: "Goal: keep the last chunk." },
-};
+const handedBack = { result: null, handback: { label: "readyForHuman" as const, reason: "the agent could not finish", detail: "" } };
 
 let dir: string;
 let dataDir: string;
@@ -47,7 +39,6 @@ beforeEach(async () => {
   configPath = await writeConfig(dir, {
     dataDir,
     overlayDir: join(dir, "overlay"),
-    promptPath: join(dir, "prompt.md"),
     fetchUrl: "https://gitlab.example/acme/repo.git",
     port: 4100,
     serverPort: 3020,
@@ -84,7 +75,7 @@ describe("steward jobs", () => {
     await done;
 
     expect(stdout()).toBe(
-      [`${second}\trunning\tAPI-2\tenrich\tattempts=1\t${secondRow?.createdAt}`, `${first}\tqueued\tAPI-1\tenrich\tattempts=0\t${firstRow?.createdAt}`, ""].join("\n"),
+      [`${second}\trunning\tAPI-2\timplement\tattempts=1\t${secondRow?.createdAt}`, `${first}\tqueued\tAPI-1\timplement\tattempts=0\t${firstRow?.createdAt}`, ""].join("\n"),
     );
   });
 
@@ -123,32 +114,31 @@ describe("steward jobs", () => {
     await done;
 
     expect(second).toBeLessThan(third);
-    expect(stdout()).toBe(`${third}\tqueued\tAPI-2\tenrich\tattempts=0\t${thirdRow?.createdAt}\n`);
+    expect(stdout()).toBe(`${third}\tqueued\tAPI-2\timplement\tattempts=0\t${thirdRow?.createdAt}\n`);
   });
 
-  it("shows the row, attempts, transcript, artifacts and stored result", async () => {
+  it("shows the row with its stored result, attempts, transcript and artifacts", async () => {
     const id = stores.jobs.enqueue(createdEvent);
     stores.jobs.claimById(id);
     const attempt = stores.attempts.start(id);
     stores.attempts.finish(attempt.id, { transcriptPath: join(dataDir, "jobs", String(id), "attempt-1.jsonl") });
-    stores.jobs.saveResult(id, brainResult, "abc1234");
+    stores.jobs.saveImplementResult(id, handedBack);
     stores.jobs.finish(id, { status: "succeeded" });
     const artifacts = join(dataDir, "jobs", String(id), "artifacts");
     await mkdir(artifacts, { recursive: true });
     await writeFile(join(artifacts, "shot.png"), "png");
     const job = stores.jobs.get(id);
-    const { result, ...row } = job ?? { result: null };
+    expect(job?.implementResult).toEqual(handedBack);
 
     const { stdout, done } = run(["jobs", "show", String(id)]);
     await done;
 
     expect(stdout()).toBe(
       [
-        `# job\n${JSON.stringify(row, null, 2)}`,
+        `# job\n${JSON.stringify(job, null, 2)}`,
         `# attempts\n${JSON.stringify(stores.attempts.forJob(id), null, 2)}`,
         `# transcripts\n${join(dataDir, "jobs", String(id), "attempt-1.jsonl")}`,
         `# artifacts (${artifacts})\nshot.png`,
-        `# result\n${JSON.stringify(result, null, 2)}`,
         "",
       ].join("\n"),
     );
@@ -164,7 +154,7 @@ describe("steward jobs", () => {
   it("retry requeues the job for the running worker and tails it", async () => {
     const id = stores.jobs.enqueue(createdEvent);
     stores.jobs.claimById(id);
-    stores.jobs.saveResult(id, brainResult, "abc1234");
+    stores.jobs.saveImplementResult(id, handedBack);
     stores.jobs.finish(id, { status: "publish_failed", error: "linear 502" });
 
     const { stdout, done } = run(["jobs", "retry", String(id)], serveIsUp);
@@ -175,7 +165,7 @@ describe("steward jobs", () => {
     stores.jobs.finish(id, { status: "succeeded" });
     await done;
 
-    expect(stdout()).toBe(`job ${id}: publish-only (result stored at abc1234)\nsteward serve is running; requeued job ${id}\njob ${id} queued\njob ${id} succeeded\n`);
+    expect(stdout()).toBe(`job ${id}: publish-only (hand-back stored; comment and labels, nothing to push)\nsteward serve is running; requeued job ${id}\njob ${id} queued\njob ${id} succeeded\n`);
     expect(stores.jobs.get(id)?.attempts).toBe(2);
   });
 

@@ -1,4 +1,4 @@
-import { renderTemplatesMarkdown, renderTicketMarkdown } from "../../src/core/context.js";
+import { renderTicketMarkdown } from "../../src/core/context.js";
 import type { TicketBundle } from "../../src/tracker/types.js";
 
 const bundle: TicketBundle = {
@@ -76,45 +76,5 @@ describe("renderTicketMarkdown", () => {
     expect(rendered).toContain("- Applied template: none");
     expect(rendered).toContain("## Comments\n\n_No comments._");
     expect(rendered).toContain("## Attachments\n\n_No attachments._");
-  });
-});
-
-describe("renderTemplatesMarkdown", () => {
-  it("renders each template with its required fields and body", () => {
-    expect(renderTemplatesMarkdown(bundle)).toBe(
-      [
-        "## Bugs",
-        "",
-        "Report a defect",
-        "",
-        "Required fields: Repro Steps, Evidence",
-        "",
-        "```markdown",
-        "**Repro Steps**",
-        "",
-        "**Evidence**",
-        "```",
-      ].join("\n"),
-    );
-  });
-
-  it("renders a template once when both the workspace and the team return it", () => {
-    const [template] = bundle.templates;
-    if (template === undefined) throw new Error("fixture has no template");
-    const twice = renderTemplatesMarkdown({ ...bundle, templates: [template, { ...template }] });
-
-    expect(twice).toBe(renderTemplatesMarkdown(bundle));
-  });
-
-  it("keeps same-named templates whose bodies differ", () => {
-    const [template] = bundle.templates;
-    if (template === undefined) throw new Error("fixture has no template");
-    const rendered = renderTemplatesMarkdown({ ...bundle, templates: [template, { ...template, body: "**Other**" }] });
-
-    expect(rendered.match(/^## Bugs$/gm)).toHaveLength(2);
-  });
-
-  it("renders a placeholder when there are no templates", () => {
-    expect(renderTemplatesMarkdown({ ...bundle, templates: [] })).toBe("_No templates configured._");
   });
 });

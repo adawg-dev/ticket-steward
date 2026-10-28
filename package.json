@@ -1,7 +1,7 @@
 {
   "name": "ticket-steward",
   "version": "0.1.0",
-  "description": "Linear ticket-enrichment bot: runs a coding agent against a fresh checkout and writes findings back to the ticket",
+  "description": "Implements Linear tickets labelled for an agent: runs a coding agent against a fresh checkout, pushes a branch and follows its merge request",
   "license": "MIT",
   "type": "module",
   "bin": {

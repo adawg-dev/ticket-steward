@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { StewardConfig } from "../../src/config/schema.js";
-import type { PipelineDeps } from "../../src/core/pipeline.js";
+import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import { runAwaitReview } from "../../src/greptile/await.js";
@@ -18,7 +18,7 @@ import { freshDataDir } from "../store/helpers.js";
 const NOW = new Date("2026-10-27T12:00:00.000Z");
 const SHA = "c".repeat(40);
 const GREPTILE = "greptile-bot";
-const LABELS = { triage: "needs-triage", implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
+const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const issue: TicketBundle = {
   id: "issue-1",
@@ -49,11 +49,10 @@ let gitlab: FakeGitLabMr;
 const makeConfig = (): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], gatewayIssues: "enrich", bugLabels: ["Bug"], labels: LABELS },
+  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: { fetchUrl: "https://gitlab.example/acme/repo.git", baseBranch: "dev", overlayDir: join(dataDir, "overlay"), setup: [], setupTimeoutMinutes: 1, port: 4100, keepOnFailure: false },
   retention: { keptWorktrees: 3, days: 30 },
-  prompt: join(dataDir, "prompt.md"),
   server: { port: 3020, publicUrl: "https://steward.example" },
   implement: {
     prompt: join(dataDir, "implement.md"),
