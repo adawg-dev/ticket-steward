@@ -73,12 +73,22 @@ const serveMcp = async (route: ToolRoutes[string], req: IncomingMessage, res: Se
 };
 
 /**
+ * Only the pod's own processes may call the sidecar, by its loopback address. A page the agent's browser opens shares that
+ * loopback through the egress sidecar, so binding to 127.0.0.1 is not enough: a DNS-rebound name or a page's request
+ * reaches the port too. Such requests carry a foreign Host or an Origin; the runner and the agent's MCP client send neither.
+ */
+const fromThePod = (req: IncomingMessage, port: number): boolean =>
+  req.headers.origin === undefined && (req.headers.host === `${TOOLS_HOST}:${port}` || req.headers.host === `localhost:${port}`);
+
+/**
  * Serves the run's MCP routes at `/mcp/<name>` over Streamable HTTP, and `POST /finish`, which returns the run's work
- * report once `finish` has computed and delivered it. Anything else is 404. Errors never carry a credential: the tools
+ * report once `finish` has computed and delivered it. A request with a foreign Host or any Origin is 403, anything else 404. Errors never carry a credential: the tools
  * mask theirs, and `finish` reports git's scrubbed messages.
  */
 export const startToolsServer = async (p: { listen: { host: string; port: number }; routes: ToolRoutes; finish: () => Promise<WorkReport> }): Promise<ToolsServer> => {
+  let port = 0;
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    if (!fromThePod(req, port)) return answer(res, 403, { error: "the tools sidecar answers the pod's loopback only" });
     const path = new URL(req.url ?? "/", "http://tools").pathname;
     if (path === "/finish") {
       if (req.method !== "POST") return answer(res, 405, { error: "POST only" });
@@ -106,7 +116,7 @@ export const startToolsServer = async (p: { listen: { host: string; port: number
     server.once("error", reject);
     server.listen(p.listen.port, p.listen.host, () => resolve());
   });
-  const { port } = server.address() as AddressInfo;
+  ({ port } = server.address() as AddressInfo);
   return {
     url: `http://${p.listen.host}:${port}`,
     close: () =>

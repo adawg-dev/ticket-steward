@@ -1,3 +1,4 @@
+import { request } from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -54,6 +55,17 @@ const connect = async (url: string): Promise<Client> => {
   return client;
 };
 
+/** A POST with exactly these headers: fetch replaces a Host header with the URL's own. */
+const post = (url: string, headers: Record<string, string>, body = ""): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const req = request(url, { method: "POST", headers }, (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+
 afterEach(async () => {
   await server?.close();
   server = null;
@@ -100,6 +112,19 @@ describe("the tools sidecar", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(work);
+  });
+
+  it("refuses a request with a foreign Host or any Origin, on /finish and the MCP routes alike", async () => {
+    const { url } = await start(spec);
+    const port = new URL(url).port;
+    const mcp = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+
+    for (const headers of [{ host: `rebound.example:${port}` }, { host: "127.0.0.1:1" }, { origin: "http://rebound.example" }, { origin: "null" }]) {
+      expect(await post(`${url}/finish`, headers)).toBe(403);
+      expect(await post(`${url}/mcp/orbit`, { ...mcp, ...headers }, body)).toBe(403);
+    }
+    expect(await post(`${url}/finish`, { host: `localhost:${port}` })).toBe(200);
   });
 
   it("listens on 127.0.0.1 only", () => {
