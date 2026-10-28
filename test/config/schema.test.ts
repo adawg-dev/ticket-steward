@@ -234,9 +234,10 @@ describe("slots config", () => {
     expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, upTimeoutSeconds: 291 })).success).toBe(false);
   });
 
-  it("rejects a slot count outside 1-9", () => {
+  it("accepts slot counts 1-20 and rejects any outside", () => {
+    expect(StewardConfigSchema.parse(withSlots({ ...slotsInput, count: 20 })).slots?.count).toBe(20);
     expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, count: 0 })).success).toBe(false);
-    expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, count: 10 })).success).toBe(false);
+    expect(StewardConfigSchema.safeParse(withSlots({ ...slotsInput, count: 21 })).success).toBe(false);
   });
 
   it("keeps portRewrite next to slots", () => {

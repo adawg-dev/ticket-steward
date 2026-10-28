@@ -38,7 +38,8 @@ describe("steward-slot", () => {
     { args: ["start", "1"] },
     { args: ["up"] },
     { args: ["up", "0"] },
-    { args: ["up", "10"] },
+    { args: ["up", "21"] },
+    { args: ["up", "010"] },
     { args: ["up", "01"] },
     { args: ["up", "1;rm"] },
     { args: ["up", "1", "2"] },
@@ -55,6 +56,7 @@ describe("steward-slot", () => {
   it("prints the slot's ports as one JSON line, without running docker", async () => {
     expect((await slot(["ports", "1"])).stdout).toBe('{"postgres":15132,"redis":16179,"rabbitmq":15172}');
     expect((await slot(["ports", "9"])).stdout).toBe('{"postgres":15932,"redis":16979,"rabbitmq":15972}');
+    expect((await slot(["ports", "20"])).stdout).toBe('{"postgres":17032,"redis":18079,"rabbitmq":17072}');
     expect(await dockerCalls()).toEqual([]);
   });
 

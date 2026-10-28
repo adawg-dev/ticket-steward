@@ -167,8 +167,8 @@ const loopStep = (loopId: number, step: "await" | "fix"): TriggerEvent => ({ kin
 
 const issue2 = { ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" };
 
-/** The helper serves slots 1-9; down covers all of them so slots the agent brought up itself are cleaned too. */
-const ALL_SLOTS_DOWN = Array.from({ length: 9 }, (_, i) => ["down", String(i + 1)]);
+/** The helper serves slots 1-20; down covers all of them so slots the agent brought up itself are cleaned too. */
+const ALL_SLOTS_DOWN = Array.from({ length: 20 }, (_, i) => ["down", String(i + 1)]);
 
 describe("startWorker", () => {
   beforeEach(async () => {

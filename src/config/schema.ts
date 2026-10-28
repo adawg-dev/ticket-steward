@@ -27,9 +27,12 @@ export type SlotTemplate = (typeof SLOT_TEMPLATES)[number];
 export const SLOT_TEMPLATE_PATTERN = /\{\{\s*([^{}]*?)\s*\}\}/g;
 export const isSlotTemplate = (name: string): name is SlotTemplate => SLOT_TEMPLATES.some((template) => template === name);
 
+/** The slot helper (ops/steward-slot) serves slots 1 to MAX_SLOTS. */
+export const MAX_SLOTS = 20;
+
 const SlotsSchema = z
   .object({
-    count: z.number().int().min(1).max(9),
+    count: z.number().int().min(1).max(MAX_SLOTS),
     /** The slot helper's socket (ops/steward-slot.socket); systemd runs the root helper per connection. */
     socket: z.string().min(1).default("/run/steward-slot.sock"),
     /** Slot n's app port is appPortBase + n. */

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
-import { RESOURCE_GUARD_DEFAULTS, type ResourceGuardConfig } from "../config/schema.js";
+import { MAX_SLOTS, RESOURCE_GUARD_DEFAULTS, type ResourceGuardConfig } from "../config/schema.js";
 import { acquireRunLock } from "../core/lock.js";
 import { sessionsDir } from "../core/workspace.js";
 import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
@@ -63,8 +63,6 @@ const DEFAULT_BACKOFF_MS = [60_000, 300_000];
 const DEFAULT_SWEEP_MS = 60 * 60 * 1000;
 const DEFAULT_STRANDED_MS = 5 * 60 * 1000;
 const DELIVERY_RETENTION_DAYS = 7;
-/** The helper serves slots 1-9 whatever slots.count is. */
-const HELPER_SLOTS = 9;
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -190,7 +188,7 @@ class Worker {
   private async downAll(): Promise<void> {
     const ref = this.deps.slot;
     if (ref === undefined) return;
-    await Promise.all(Array.from({ length: HELPER_SLOTS }, (_, i) => ref.client.down(i + 1)));
+    await Promise.all(Array.from({ length: MAX_SLOTS }, (_, i) => ref.client.down(i + 1)));
   }
 
   private async loop(lane: Lane): Promise<void> {

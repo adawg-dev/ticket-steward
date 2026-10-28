@@ -4,7 +4,7 @@
 # Installed root-owned, mode 0755, at /usr/local/sbin/steward-slot. The steward never runs it itself: systemd's
 # steward-slot.socket (/run/steward-slot.sock, group steward, mode 0660) starts one steward-slot@.service instance
 # per connection, running `steward-slot --socket` as root. Operators run the same commands directly as root.
-# It accepts only the commands below and a slot number 1-9, so the steward never passes arguments to Docker.
+# It accepts only the commands below and a slot number 1-20, so the steward never passes arguments to Docker.
 set -euo pipefail
 # Byte-accurate request cap: with a UTF-8 locale `read -n` would count characters.
 export LC_ALL=C
@@ -15,11 +15,12 @@ readonly MAX_REQUEST_BYTES=64
 export DOCKER_CONFIG=/etc/ticket-steward/slots/docker
 
 usage() {
-  echo "usage: steward-slot up|down|status|ports <1-9> | steward-slot check | steward-slot --socket" >&2
+  echo "usage: steward-slot up|down|status|ports <1-20> | steward-slot check | steward-slot --socket" >&2
   exit 2
 }
 
-# The only copy of the port formula; compose interpolates the exported variables.
+# The only copy of the port formula; compose interpolates the exported variables. Postgres ends in 32, RabbitMQ in 72
+# and Redis in 79, so no two slots up to 20 share a port.
 export_ports() {
   export STEWARD_SLOT_POSTGRES_PORT=$((15032 + 100 * $1))
   export STEWARD_SLOT_REDIS_PORT=$((16079 + 100 * $1))
@@ -46,7 +47,7 @@ main() {
     echo ok
     return 0
   fi
-  [[ $# -eq 2 && "$2" =~ ^[1-9]$ ]] || usage
+  [[ $# -eq 2 && "$2" =~ ^([1-9]|1[0-9]|20)$ ]] || usage
   local n="$2"
   export_ports "$n"
   case "$command" in

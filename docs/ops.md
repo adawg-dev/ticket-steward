@@ -471,7 +471,7 @@ steward enrich KEY-123              # enqueues if serve is running, otherwise ru
 ### 1.10 Worker slots (optional)
 
 Without `slots`, the worker runs one job at a time on `workspace.port`, against whatever the overlay's
-env files point at. With `slots`, it runs `slots.count` jobs at once (1–9). Each job gets a **slot**: an
+env files point at. With `slots`, it runs `slots.count` jobs at once (1–20). Each job gets a **slot**: an
 app port (`slots.appPortBase + n`) and three containers created fresh for that job and removed when it
 ends: Postgres 17 with TimescaleDB (databases `concentrate` and `concentrate_tg`), Redis and RabbitMQ.
 `slots.env` rewrites the job's copy of the overlay so every service the job starts talks to its slot,
