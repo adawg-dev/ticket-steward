@@ -219,6 +219,8 @@ const implementChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
 /** Either verifies GitLab's webhook deliveries; the signing token is preferred. */
 const GITLAB_WEBHOOK_KEYS = ["GITLAB_WEBHOOK_SIGNING_TOKEN", "GITLAB_WEBHOOK_SECRET"];
 
+const pollingEvery = (seconds: number): string => (seconds % 60 === 0 ? `${seconds / 60}-minute polling` : `polling every ${seconds} seconds`);
+
 /** Only with `greptile`: the GitLab token can write notes and resolve threads, the bot user exists, the fix prompt is there, and webhooks can be verified. */
 const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Check[] => {
   const settings = config.greptile;
@@ -253,7 +255,7 @@ const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Che
         const present = GITLAB_WEBHOOK_KEYS.filter((key) => missing(secrets, [key]).length === 0);
         return present.length > 0
           ? ok(`${present.join(", ")} present`)
-          : warn(`neither ${GITLAB_WEBHOOK_KEYS.join(" nor ")} is set; the loop falls back to ${settings.pollSeconds / 60}-minute polling`);
+          : warn(`neither ${GITLAB_WEBHOOK_KEYS.join(" nor ")} is set; the loop falls back to ${pollingEvery(settings.pollSeconds)}`);
       },
     },
   ];

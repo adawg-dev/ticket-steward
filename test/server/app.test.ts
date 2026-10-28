@@ -430,6 +430,29 @@ describe("buildServer", () => {
       expect(isDue(jobId)).toBe(false);
     });
 
+    it("rejects a signed event with a stale timestamp", async () => {
+      const { jobId } = waitingLoop("awaiting_mr");
+      const body = mrEvent();
+      const ts = Math.floor(Date.now() / 1000) - 301;
+      const signature = `v1,${createHmac("sha256", SIGNING_KEY).update(`msg_1.${ts}.${body}`).digest("base64")}`;
+
+      const response = await postGitlab("Merge Request Hook", body, { "webhook-id": "msg_1", "webhook-timestamp": String(ts), "webhook-signature": signature });
+
+      expect(response.statusCode).toBe(401);
+      expect(isDue(jobId)).toBe(false);
+    });
+
+    it("accepts a signed event larger than Fastify's default 1 MiB body limit", async () => {
+      const { jobId } = waitingLoop("awaiting_mr");
+      const body = JSON.stringify({ ...JSON.parse(mrEvent()), builds: "x".repeat(2 * 1024 * 1024) });
+
+      const response = await postGitlab("Merge Request Hook", body);
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ok: true, action: "woken" });
+      expect(isDue(jobId)).toBe(true);
+    });
+
     it("accepts the legacy secret token", async () => {
       await app.close();
       app = buildServer({
@@ -492,6 +515,21 @@ describe("buildServer", () => {
       expect(response.json()).toEqual({ ok: true, action: "woken" });
       expect(stores.jobs.get(jobId)?.wakeRequested).toBe(true);
       stores.jobs.defer(jobId, new Date(Date.now() + 300_000));
+      expect(isDue(jobId)).toBe(true);
+    });
+
+    it("wakes a loop still waiting for its MR on that MR's pipeline", async () => {
+      const { jobId } = waitingLoop("awaiting_mr");
+      const body = JSON.stringify({
+        object_kind: "pipeline",
+        project: project(),
+        object_attributes: { ref: "refs/merge-requests/7/head", status: "running" },
+        merge_request: { iid: 7, source_branch: BRANCH },
+      });
+
+      const response = await postGitlab("Pipeline Hook", body);
+
+      expect(response.json()).toEqual({ ok: true, action: "woken" });
       expect(isDue(jobId)).toBe(true);
     });
 

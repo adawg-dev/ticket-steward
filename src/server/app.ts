@@ -108,6 +108,9 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
   });
 };
 
+/** Pipeline and MR hooks can pass Fastify's 1 MiB default; a 413 would count as a failing delivery and GitLab disables those. */
+const GITLAB_BODY_LIMIT = 5 * 1024 * 1024;
+
 type GitlabAction = "ignored" | "woken" | "no_loop";
 
 /** A loop waits on GitLab only for its MR or its review; a fixing loop has nothing to wake. */
@@ -142,7 +145,7 @@ const gitlabIntake = (deps: ServerDeps, event: GitlabWakeEvent | null): { action
 
 /** GitLab events wake a waiting fix loop's deferred await; polling is only the fallback. Never enqueues a job. */
 const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
-  app.post<{ Body: string }>("/webhooks/gitlab", async (request, reply) => {
+  app.post<{ Body: string }>("/webhooks/gitlab", { bodyLimit: GITLAB_BODY_LIMIT }, async (request, reply) => {
     const kind = header(request.headers["x-gitlab-event"]);
     const headers = {
       token: header(request.headers["x-gitlab-token"]),

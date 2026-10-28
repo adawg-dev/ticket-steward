@@ -189,12 +189,12 @@ describe("steward doctor", () => {
 });
 
 describe("greptile checks", () => {
-  const run = async (gitlab: FakeGitLabMr, prompt: string, env = ""): Promise<string> => {
+  const run = async (gitlab: FakeGitLabMr, prompt: string, env = "", pollSeconds?: number): Promise<string> => {
     const port = await freeTcpPort();
     const serverPort = await freeTcpPort();
     const configPath = await writeConfig(dir, {
       dataDir: repo.dataDir, overlayDir: repo.overlayDir, promptPath: repo.promptPath, fetchUrl: repo.repo, port, serverPort,
-      implement: { prompt: repo.promptPath }, greptile: { prompt },
+      implement: { prompt: repo.promptPath }, greptile: { prompt, ...(pollSeconds === undefined ? {} : { pollSeconds }) },
     });
     if (env !== "") await appendFile(join(dir, ".env"), env);
     const fetchImpl: typeof fetch = async (input, init) => {
@@ -218,6 +218,11 @@ describe("greptile checks", () => {
     expect(out).toContain(`[fail] greptile prompt: ${join(dir, "missing-fix.md")} does not exist`);
     expect(out).toContain("[fail] linear labels: missing in Linear:");
     expect(out).toContain("[warn] gitlab webhook secret: neither GITLAB_WEBHOOK_SIGNING_TOKEN nor GITLAB_WEBHOOK_SECRET is set; the loop falls back to 5-minute polling");
+  });
+
+  it("names a poll interval that is not whole minutes in seconds", async () => {
+    const out = await run(new FakeGitLabMr(), repo.promptPath, "", 90);
+    expect(out).toContain("is set; the loop falls back to polling every 90 seconds");
   });
 
   it("finds the GitLab webhook signing token", async () => {
