@@ -23,13 +23,30 @@ export type TriggerEvent =
       step: LoopStep;
       /** Restart only: the restart came from a person re-adding the implement label. */
       labelDriven?: boolean;
+    }
+  | {
+      /** A `chat.prefix` note on the ticket's merge request: resume its agent session with the message. */
+      kind: "chat";
+      issueId: string;
+      identifier: string;
+      teamKey: string;
+      /** The ticket's loop when it has one (the chat then serializes with its steps), else null. */
+      loopId: number | null;
+      projectId: number;
+      mrIid: number;
+      /** Where the reply goes; null posts it on the merge request itself. */
+      discussionId: string | null;
+      noteId: number;
+      author: string;
+      /** The note without the prefix. */
+      message: string;
     };
 
 /** One step of a Greptile fix loop: wait for the MR's review, fix its findings, or restart a handed-back loop. */
 export type LoopStep = "await" | "fix" | "restart";
 
-/** A trigger about a ticket itself (webhook or CLI), as opposed to a step of its fix loop. */
-export type IssueTrigger = Exclude<TriggerEvent, { kind: "loop" }>;
+/** A trigger about a ticket itself (webhook or CLI), as opposed to a step of its fix loop or a chat. */
+export type IssueTrigger = Exclude<TriggerEvent, { kind: "loop" | "chat" }>;
 
 export interface TicketBundle {
   id: string;

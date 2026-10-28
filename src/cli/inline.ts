@@ -1,3 +1,4 @@
+import { runChat } from "../chat/run.js";
 import { acquireRunLock } from "../core/lock.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { redactOutcome } from "../core/workspace.js";
@@ -34,6 +35,8 @@ const dispatch = (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutco
       return runFix(ctx, runtime.deps);
     case "restart":
       return runRestart(ctx, runtime.deps);
+    case "chat":
+      return runChat(ctx, runtime.deps);
   }
 };
 

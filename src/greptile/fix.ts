@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { buildBrainEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
 import type { BrainRun } from "../brain/types.js";
-import type { GitLabMrApi, MergeRequestInfo, MrDiscussion } from "../codehost/gitlabMr.js";
+import { BOT_USER, type GitLabMrApi, type MergeRequestInfo, type MrDiscussion } from "../codehost/gitlabMr.js";
 import type { GreptileConfig } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
@@ -74,9 +74,6 @@ const gate = (fix: Fix, observed: Observed): Promise<JobOutcome> | null => {
   if (!heads.includes(observed.mr.sha.toLowerCase())) return publishHandback(deps, loop, "a person pushed to the branch; the loop stopped");
   return null;
 };
-
-/** GitLab project and group access tokens post as bot users named `project_<id>_bot_<hex>` or `group_<id>_bot_<hex>`. */
-const BOT_USER = /^(project|group)_\d+_bot(_[0-9a-f]+)?$/i;
 
 /**
  * MR notes people posted since the loop was last handed back, oldest first: no system notes, nothing from Greptile, a

@@ -25,12 +25,17 @@ export interface GitLabMrApi {
   listDiscussions(project: ProjectRef, iid: number): Promise<MrDiscussion[]>;
   createNote(project: ProjectRef, iid: number, body: string): Promise<void>;
   replyToDiscussion(project: ProjectRef, iid: number, discussionId: string, body: string): Promise<void>;
+  /** The user's access level on the project, inherited membership included; null when they are not a member. */
+  memberAccessLevel(project: ProjectRef, userId: number): Promise<number | null>;
   resolveDiscussion(project: ProjectRef, iid: number, discussionId: string): Promise<void>;
   /** Failed jobs of the pipeline and of every downstream pipeline reached through its bridges (depth <= 3). */
   failedJobs(project: ProjectRef, pipelineId: number): Promise<FailedJob[]>;
   /** The last `lines` lines of the job's trace. */
   jobTraceTail(project: ProjectRef, jobId: number, lines: number): Promise<string>;
 }
+
+/** GitLab project and group access tokens post as bot users named `project_<id>_bot_<hex>` or `group_<id>_bot_<hex>`. */
+export const BOT_USER = /^(project|group)_\d+_bot(_[0-9a-f]+)?$/i;
 
 export class GitLabApiError extends Error {
   constructor(
@@ -74,6 +79,7 @@ const JobSchema = z.object({ id: z.number(), name: z.string(), stage: z.string()
 const BridgeSchema = z.object({ downstream_pipeline: z.object({ id: z.number() }).nullish() });
 const UserSchema = z.object({ username: z.string() });
 const TokenSchema = z.object({ scopes: z.array(z.string()) });
+const MemberSchema = z.object({ access_level: z.number() });
 
 export interface GitLabMrClientOptions {
   baseUrl: string;
@@ -174,6 +180,15 @@ export class GitLabMrClient implements GitLabMrApi {
     await this.request("POST", `${this.mrPath(project, iid)}/discussions/${discussionId}/notes`, { body });
   }
 
+  async memberAccessLevel(project: ProjectRef, userId: number): Promise<number | null> {
+    try {
+      return MemberSchema.parse(await (await this.request("GET", `${this.projectPath(project)}/members/all/${userId}`)).json()).access_level;
+    } catch (err) {
+      if (err instanceof GitLabApiError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
   async resolveDiscussion(project: ProjectRef, iid: number, discussionId: string): Promise<void> {
     await this.request("PUT", `${this.mrPath(project, iid)}/discussions/${discussionId}?resolved=true`);
   }
@@ -240,9 +255,10 @@ export class GitLabMrClient implements GitLabMrApi {
   }
 }
 
-/** The loop's GitLab client; only built when `greptile` is configured, on a GitLab code host with `GITLAB_TOKEN`. */
+/** The loop's and chat's GitLab client; only built when `greptile` or `chat` is configured, on a GitLab code host with `GITLAB_TOKEN`. */
 export const createGitLabMr = (config: StewardConfig, secrets: Secrets): GitLabMrApi | undefined => {
   const token = secrets.GITLAB_TOKEN;
-  if (config.greptile === undefined || config.codehost.kind !== "gitlab" || token === undefined || token === "") return undefined;
+  if (config.greptile === undefined && config.chat === undefined) return undefined;
+  if (config.codehost.kind !== "gitlab" || token === undefined || token === "") return undefined;
   return new GitLabMrClient({ baseUrl: config.codehost.baseUrl, token });
 };

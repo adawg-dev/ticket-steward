@@ -127,6 +127,14 @@ describe("GitLabMrClient", () => {
     expect(calls[0]?.url).toBe("https://g/api/v4/users?username=greptile-bot");
   });
 
+  it("reads a member's access level, inherited membership included, and null for a non-member", async () => {
+    const { calls, fetchImpl } = recorder([reply(200, { id: 5, username: "ada", access_level: 30 }), reply(404, { message: "404 Not found" })]);
+    const c = client(fetchImpl);
+    expect(await c.memberAccessLevel(42, 5)).toBe(30);
+    expect(await c.memberAccessLevel(42, 6)).toBeNull();
+    expect(calls[0]?.url).toBe("https://g/api/v4/projects/42/members/all/5");
+  });
+
   it("retries after a 429 and throws GitLabApiError with the status otherwise", async () => {
     const waits: number[] = [];
     const { fetchImpl } = recorder([reply(429, {}, { "retry-after": "2" }), reply(201, {}), reply(400, { message: "bad" })]);

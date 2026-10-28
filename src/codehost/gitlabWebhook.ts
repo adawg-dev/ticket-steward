@@ -41,6 +41,19 @@ export const verifyGitlabWebhook = (raw: string, headers: GitlabWebhookHeaders, 
   return false;
 };
 
+/** What chat reads of a merge request note: who wrote it, what it says, and the discussion to answer in. */
+export interface GitlabNote {
+  id: number;
+  authorId: number;
+  authorUsername: string;
+  /** GitLab's `bot` flag on the author, when the payload carries it. */
+  authorIsBot: boolean;
+  body: string;
+  /** Null on GitLab versions that do not send it; the reply then goes on the MR itself. */
+  discussionId: string | null;
+  system: boolean;
+}
+
 /** A GitLab event that may move a waiting fix loop: its MR opened or changed, a note on it, or a pipeline on its branch. */
 export interface GitlabWakeEvent {
   kind: "merge_request" | "note" | "pipeline";
@@ -48,6 +61,8 @@ export interface GitlabWakeEvent {
   projectPath: string;
   branch: string;
   mrIid: number | null;
+  /** A note event's note, when the payload has the fields chat needs. */
+  note?: GitlabNote;
 }
 
 const Project = z.object({ id: z.number(), path_with_namespace: z.string() });
@@ -64,6 +79,33 @@ const NoteHook = z.object({
   object_attributes: z.object({ noteable_type: z.literal("MergeRequest") }),
   merge_request: MergeRequestRef,
 });
+
+const NoteDetail = z.object({
+  user: z.object({ username: z.string(), bot: z.boolean().nullish() }),
+  object_attributes: z.object({
+    id: z.number(),
+    note: z.string(),
+    author_id: z.number(),
+    discussion_id: z.string().nullish(),
+    system: z.boolean().nullish(),
+  }),
+});
+
+/** The note itself, or undefined when the payload lacks a field chat needs (the wake does not need them). */
+const noteOf = (body: unknown): GitlabNote | undefined => {
+  const parsed = NoteDetail.safeParse(body);
+  if (!parsed.success) return undefined;
+  const { user, object_attributes: note } = parsed.data;
+  return {
+    id: note.id,
+    authorId: note.author_id,
+    authorUsername: user.username,
+    authorIsBot: user.bot === true,
+    body: note.note,
+    discussionId: note.discussion_id ?? null,
+    system: note.system === true,
+  };
+};
 
 const PipelineHook = z.object({
   project: Project,
@@ -84,7 +126,9 @@ export const parseGitlabEvent = (event: string | undefined, body: unknown): Gitl
       const parsed = NoteHook.safeParse(body);
       if (!parsed.success) return null;
       const { project, merge_request: mr } = parsed.data;
-      return { kind: "note", projectId: project.id, projectPath: project.path_with_namespace, branch: mr.source_branch, mrIid: mr.iid };
+      const note = noteOf(body);
+      const event: GitlabWakeEvent = { kind: "note", projectId: project.id, projectPath: project.path_with_namespace, branch: mr.source_branch, mrIid: mr.iid };
+      return note === undefined ? event : { ...event, note };
     }
     case "Pipeline Hook": {
       const parsed = PipelineHook.safeParse(body);

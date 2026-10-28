@@ -441,6 +441,35 @@ session can be resumed after its worktree is gone. Resuming recreates the worktr
 by path) at the branch head, or at the implement job's base when nothing was pushed, then copies the overlay and runs
 `workspace.setup` again. The brain never receives GitLab, Linear or Greptile credentials.
 
+### 1.7c Chat on the merge request (optional)
+
+With a `chat` block (claude-code brain, GitLab code host, `GITLAB_TOKEN`), a merge request note whose first line starts
+with `/agent` resumes the ticket's agent session with the rest of the note as the message, and the agent's answer is
+posted in the same discussion:
+
+```ts
+chat: {
+  prefix: "/agent",              // default; matched case-insensitively at the start of the note's first line
+  sessionRetentionDays: 180,     // default; session transcripts are kept this long after the ticket's last activity
+},
+```
+
+- It uses the same `/webhooks/gitlab` hook as the fix loop, with **Comments** enabled.
+- Only a member with Developer (30) or higher access on the project (inherited membership counts) starts a chat; anyone
+  else is ignored without a reply. System notes, bot users, Greptile and every note carrying a steward marker are ignored,
+  so the steward never answers itself. Each note id is acted on once, even when GitLab redelivers it or it is edited.
+- The ticket is found by the MR's source branch (its loop, else its implement job). An MR with no agent session gets
+  one reply saying so and no agent run.
+- The chat is a `chat` job: it waits for any running job on the ticket (and any step of its loop), recreates the session's
+  worktree at the same path when retention removed it, takes a slot, and resumes the latest session (the loop's, else
+  the newest implement job's). With a pushed steward branch the agent has the `push` tool and may commit and push
+  (fast-forward only, every push rule applies); without one it answers only. Work it leaves unpushed is listed in the reply;
+  the steward never pushes it.
+- On a handed-back loop, `/agent restart` restarts the loop (the same restart step as re-adding the label); any other
+  `/agent` note chats without restarting it.
+- The webhook answers `chat`, `chat_restart`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
+  `chat_failed` (the access check could not reach GitLab) for an `/agent` note.
+
 ### 1.8 Doctor, then start the service
 
 ```bash

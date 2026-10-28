@@ -166,6 +166,23 @@ describe("LoopStore", () => {
     expect(stores.loops.stranded().map((loop) => loop.id)).toEqual([failed, noJob]);
   });
 
+  it("a chat queued on a loop's subject does not keep it from counting as stranded", () => {
+    const loopId = stores.loops.create(newLoop());
+    stores.loops.update(loopId, { state: "fixing" });
+    stores.jobs.enqueue({ kind: "chat", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, projectId: 42, mrIid: 7, discussionId: null, noteId: 1, author: "ada", message: "hi" });
+
+    expect(stores.loops.stranded().map((loop) => loop.id)).toEqual([loopId]);
+  });
+
+  it("latestForBranch returns the newest loop on the branch", () => {
+    stores.loops.create(newLoop({ branch: "fix/API-1-a" }));
+    const newer = stores.loops.create(newLoop({ branch: "fix/API-1-a" }));
+    stores.loops.create(newLoop({ branch: "fix/API-1-b" }));
+
+    expect(stores.loops.latestForBranch("fix/API-1-a")?.id).toBe(newer);
+    expect(stores.loops.latestForBranch("fix/API-1-c")).toBeNull();
+  });
+
   it("keptWithin returns active loops and loops ended inside the window", () => {
     const active = stores.loops.create(newLoop({ worktreeName: "a" }));
     const recent = stores.loops.create(newLoop({ worktreeName: "b" }));

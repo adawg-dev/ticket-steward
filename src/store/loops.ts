@@ -175,6 +175,7 @@ export class LoopStore {
   private readonly selectById;
   private readonly selectByImplementJob;
   private readonly selectLatestForIssue;
+  private readonly selectLatestForBranch;
   private readonly selectActive;
   private readonly selectStranded;
   private readonly selectKept;
@@ -190,13 +191,14 @@ export class LoopStore {
     this.selectById = db.prepare<[number], LoopRow>("SELECT * FROM loops WHERE id = ?");
     this.selectByImplementJob = db.prepare<[number], LoopRow>("SELECT * FROM loops WHERE implement_job_id = ? ORDER BY id DESC LIMIT 1");
     this.selectLatestForIssue = db.prepare<[string], LoopRow>("SELECT * FROM loops WHERE issue_id = ? ORDER BY id DESC LIMIT 1");
+    this.selectLatestForBranch = db.prepare<[string], LoopRow>("SELECT * FROM loops WHERE branch = ? ORDER BY id DESC LIMIT 1");
     this.selectActive = db.prepare<string[], LoopRow>(
       `SELECT * FROM loops WHERE state IN (${ACTIVE_LOOP_STATES.map(() => "?").join(", ")}) ORDER BY id`,
     );
     // A loop job's subject is `loop:<id>` (`loopSubject` in jobs.ts).
     this.selectStranded = db.prepare<string[], LoopRow>(
       `SELECT * FROM loops l WHERE l.state IN (${ACTIVE_LOOP_STATES.map(() => "?").join(", ")})
-         AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.subject = 'loop:' || l.id AND j.status IN ('queued', 'running'))
+         AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.subject = 'loop:' || l.id AND j.kind <> 'chat' AND j.status IN ('queued', 'running'))
        ORDER BY l.id`,
     );
     this.selectKept = db.prepare<[string], LoopRow>("SELECT * FROM loops WHERE ended_at IS NULL OR ended_at >= ? ORDER BY id");
@@ -244,6 +246,12 @@ export class LoopStore {
 
   latestForIssue(issueId: string): Loop | null {
     const row = this.selectLatestForIssue.get(issueId);
+    return row === undefined ? null : toLoop(row).loop;
+  }
+
+  /** The newest loop on `branch`; chat finds a ticket by its MR's source branch. */
+  latestForBranch(branch: string): Loop | null {
+    const row = this.selectLatestForBranch.get(branch);
     return row === undefined ? null : toLoop(row).loop;
   }
 

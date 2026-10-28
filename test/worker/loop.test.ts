@@ -300,6 +300,19 @@ describe("startWorker", () => {
     expect(runImplementMock).not.toHaveBeenCalled();
   });
 
+  it("dispatches a chat job to runChat", async () => {
+    const runChat = vi.fn(async () => ({ status: "succeeded" }) as const);
+    const jobId = stores.jobs.enqueue({
+      kind: "chat", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: null, projectId: 42, mrIid: 7, discussionId: "d1", noteId: 9, author: "ada", message: "hi",
+    });
+    start({ runChat });
+
+    await waitForStatus(jobId, "succeeded");
+
+    expect(runChat).toHaveBeenCalledTimes(1);
+    expect(runImplementMock).not.toHaveBeenCalled();
+  });
+
   it("hands back a loop whose fix job failed for good, with the job's error", async () => {
     tracker.addIssue(ticket);
     const loopId = runningLoop("fixing");

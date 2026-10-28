@@ -22,6 +22,21 @@ describe("parseGitlabEvent", () => {
     expect(parseGitlabEvent("Note Hook", note("update"))).toEqual(expected);
   });
 
+  it("exposes a note's id, author, body and discussion when the payload carries them", () => {
+    const body = {
+      object_kind: "note", project,
+      user: { id: 5, username: "ada" },
+      object_attributes: { id: 901, noteable_type: "MergeRequest", action: "create", note: "/agent why?", author_id: 5, discussion_id: "abc123", system: false },
+      merge_request: { iid: 7, source_branch: "fix/API-1-keep" },
+    };
+    expect(parseGitlabEvent("Note Hook", body)).toEqual({
+      kind: "note", projectId: 42, projectPath: "acme/repo", branch: "fix/API-1-keep", mrIid: 7,
+      note: { id: 901, authorId: 5, authorUsername: "ada", authorIsBot: false, body: "/agent why?", discussionId: "abc123", system: false },
+    });
+    const bot = { ...body, user: { id: 6, username: "someone", bot: true }, object_attributes: { ...body.object_attributes, discussion_id: undefined, system: true } };
+    expect(parseGitlabEvent("Note Hook", bot)).toMatchObject({ note: { authorIsBot: true, discussionId: null, system: true } });
+  });
+
   it("ignores notes on anything but a merge request", () => {
     const body = { object_kind: "note", project, object_attributes: { noteable_type: "Issue", action: "create" }, issue: { iid: 3 } };
     expect(parseGitlabEvent("Note Hook", body)).toBeNull();

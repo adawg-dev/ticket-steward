@@ -23,7 +23,8 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       } catch (err) {
         return fail(ctx, errorMessage(err));
       }
-      const app = buildServer({ config, secrets, stores: runtime.stores, tracker: runtime.tracker, workerState: worker.state });
+      const gitlab = runtime.deps.gitlab;
+      const app = buildServer({ config, secrets, stores: runtime.stores, tracker: runtime.tracker, workerState: worker.state, ...(gitlab === undefined ? {} : { gitlab }) });
       await app.listen({ port: config.server.port, host: listenHost(process.env) });
       println(ctx, `listening on http://localhost:${config.server.port} (public ${config.server.publicUrl})`);
 

@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { MAX_SLOTS, RESOURCE_GUARD_DEFAULTS, type ResourceGuardConfig } from "../config/schema.js";
+import { runChat } from "../chat/run.js";
 import { retentionProtection } from "../chat/session.js";
 import { acquireRunLock } from "../core/lock.js";
 import { redactOutcome, sessionsDir } from "../core/workspace.js";
@@ -28,6 +29,7 @@ export interface WorkerOptions {
   runAwaitReview?: typeof runAwaitReview;
   runFix?: typeof runFix;
   runRestart?: typeof runRestart;
+  runChat?: typeof runChat;
   /** Samples host memory and load for the resource guard. */
   resources?: () => ResourceSample;
 }
@@ -102,6 +104,7 @@ class Worker {
   private readonly awaitReview: typeof runAwaitReview;
   private readonly fix: typeof runFix;
   private readonly restart: typeof runRestart;
+  private readonly chat: typeof runChat;
   private readonly guard: ResourceGuardConfig;
   private readonly resources: () => ResourceSample;
   /** When the last heavy job was claimed (epoch ms), for the guard's start spacing. */
@@ -133,6 +136,7 @@ class Worker {
     this.awaitReview = deps.runAwaitReview ?? runAwaitReview;
     this.fix = deps.runFix ?? runFix;
     this.restart = deps.runRestart ?? runRestart;
+    this.chat = deps.runChat ?? runChat;
     this.guard = deps.config.resourceGuard ?? RESOURCE_GUARD_DEFAULTS;
     this.resources = deps.resources ?? sampleResources;
     this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
@@ -285,6 +289,8 @@ class Worker {
           return await this.fix(ctx, deps);
         case "restart":
           return await this.restart(ctx, deps);
+        case "chat":
+          return await this.chat(ctx, deps);
       }
     } catch (err) {
       return { status: "failed", error: errorMessage(err), retryable: false };

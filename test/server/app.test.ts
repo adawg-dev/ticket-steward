@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { buildServer } from "../../src/server/app.js";
 import { openStores, type Stores } from "../../src/store/index.js";
+import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 
 const WEBHOOK_SECRET = "webhook-secret-value";
@@ -489,6 +490,155 @@ describe("buildServer", () => {
       expect((await postGitlab("Push Hook", JSON.stringify({ object_kind: "push" }))).json()).toEqual({ ok: true, action: "ignored" });
       expect((await postGitlab("Merge Request Hook", "not json")).json()).toEqual({ ok: true, action: "ignored" });
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+    });
+
+    describe("chat notes", () => {
+      const DEVELOPER = 5;
+      const REPORTER = 6;
+      let gitlab: FakeGitLabMr;
+      let noteIds = 900;
+
+      const chatNote = (body: string, over: { branch?: string; username?: string; userId?: number; bot?: boolean; system?: boolean; noteId?: number; discussionId?: string } = {}) =>
+        JSON.stringify({
+          object_kind: "note",
+          project: project(),
+          user: { id: over.userId ?? DEVELOPER, username: over.username ?? "ada", ...(over.bot === undefined ? {} : { bot: over.bot }) },
+          object_attributes: {
+            id: over.noteId ?? noteIds++, noteable_type: "MergeRequest", action: "create", note: body, author_id: over.userId ?? DEVELOPER,
+            discussion_id: over.discussionId ?? "disc-1", system: over.system ?? false,
+          },
+          merge_request: { iid: 7, source_branch: over.branch ?? BRANCH },
+        });
+
+      /** A loop on BRANCH with a session, in `state`. */
+      const sessionLoop = (state: "awaiting_review" | "handed_back" = "awaiting_review"): number => {
+        const implementJobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
+        stores.jobs.claimById(implementJobId);
+        stores.jobs.finish(implementJobId, { status: "succeeded" });
+        const loopId = stores.loops.create({
+          issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId, branch: BRANCH, baseSha: "b".repeat(40),
+          headSha: "h".repeat(40), worktreeName: "ticket-API-1", labelDriven: true, sessionId: "session-1",
+        });
+        stores.loops.update(loopId, { state, projectId: 42, mrIid: 7 });
+        return loopId;
+      };
+
+      const jobsOfKind = (kind: string) => stores.jobs.list({ limit: 50 }).filter((job) => job.kind === kind);
+
+      beforeEach(async () => {
+        await app.close();
+        gitlab = new FakeGitLabMr();
+        gitlab.members.set(DEVELOPER, 30);
+        gitlab.members.set(REPORTER, 20);
+        app = buildServer({
+          config: { ...makeConfig(), greptile: GREPTILE, chat: { prefix: "/agent", sessionRetentionDays: 180 } },
+          secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, GITLAB_WEBHOOK_SIGNING_TOKEN: SIGNING_TOKEN },
+          stores,
+          tracker,
+          workerState: () => WORKER_IDLE,
+          gitlab,
+        });
+      });
+
+      it("enqueues a chat on the loop's subject for a Developer's prefixed note, with the message after the prefix", async () => {
+        const loopId = sessionLoop();
+
+        const response = await postGitlab("Note Hook", chatNote("  /AGENT why did you drop the retry?\nSee line 3.", { noteId: 501 }));
+
+        expect(response.json()).toEqual({ ok: true, action: "chat" });
+        const [chat] = jobsOfKind("chat");
+        expect(chat?.subject).toBe(`loop:${loopId}`);
+        expect(chat?.trigger).toEqual({
+          kind: "chat", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, projectId: 42, mrIid: 7,
+          discussionId: "disc-1", noteId: 501, author: "ada", message: "why did you drop the retry?\nSee line 3.",
+        });
+        expect(gitlab.replies).toEqual([]);
+      });
+
+      it("ignores notes without the prefix as chat, and leaves them to the loop's wake", async () => {
+        sessionLoop();
+
+        expect((await postGitlab("Note Hook", chatNote("why did you drop the retry?"))).json()).toEqual({ ok: true, action: "no_loop" });
+        expect((await postGitlab("Note Hook", chatNote("/agentic workflows are neat"))).json()).toEqual({ ok: true, action: "no_loop" });
+        expect(jobsOfKind("chat")).toEqual([]);
+      });
+
+      it("ignores a Reporter and a non-member silently", async () => {
+        sessionLoop();
+
+        expect((await postGitlab("Note Hook", chatNote("/agent hi", { userId: REPORTER }))).json()).toEqual({ ok: true, action: "chat_denied" });
+        expect((await postGitlab("Note Hook", chatNote("/agent hi", { userId: 77 }))).json()).toEqual({ ok: true, action: "chat_denied" });
+        expect(jobsOfKind("chat")).toEqual([]);
+        expect(gitlab.replies).toEqual([]);
+      });
+
+      it("never answers bots, Greptile, system notes or the steward's own marked notes", async () => {
+        sessionLoop();
+        const ignored = [
+          chatNote("/agent hi", { bot: true }),
+          chatNote("/agent hi", { username: "project_42_bot_0a1b2c" }),
+          chatNote("/agent hi", { username: "group_9_bot" }),
+          chatNote("/agent hi", { username: "Greptile-Bot" }),
+          chatNote("/agent hi", { system: true }),
+          chatNote("/agent the agent says hi\n\n<!-- ticket-steward:chat -->"),
+          chatNote("/agent loop note\n\n<!-- ticket-steward:loop id=1 passed -->"),
+        ];
+        for (const body of ignored) expect((await postGitlab("Note Hook", body)).json()).toEqual({ ok: true, action: "chat_ignored" });
+        expect(jobsOfKind("chat")).toEqual([]);
+        expect(gitlab.replies).toEqual([]);
+      });
+
+      it("acts on a note id once, however often it is delivered or edited", async () => {
+        sessionLoop();
+
+        expect((await postGitlab("Note Hook", chatNote("/agent hi", { noteId: 600 }))).json()).toEqual({ ok: true, action: "chat" });
+        expect((await postGitlab("Note Hook", chatNote("/agent hi again", { noteId: 600 }))).json()).toEqual({ ok: true, action: "chat_duplicate" });
+        expect(jobsOfKind("chat")).toHaveLength(1);
+      });
+
+      it("replies once, with the marker, on a merge request with no agent session", async () => {
+        const body = chatNote("/agent hi", { branch: "feature/someone-elses", noteId: 700 });
+
+        expect((await postGitlab("Note Hook", body)).json()).toEqual({ ok: true, action: "chat_no_session" });
+        expect((await postGitlab("Note Hook", body)).json()).toEqual({ ok: true, action: "chat_duplicate" });
+
+        expect(gitlab.replies).toEqual([{ discussionId: "disc-1", body: "No agent session is attached to this merge request.\n\n<!-- ticket-steward:chat -->" }]);
+        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+      });
+
+      it("chats with an implement job's session on its branch when the ticket has no loop, serialized by the ticket", async () => {
+        const jobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-2", identifier: "API-2", teamKey: "API", action: "implement" });
+        stores.jobs.recordWorkspace(jobId, "3-1", "b".repeat(40));
+        stores.jobs.recordCommit(jobId, "feature/API-2-thing", "c".repeat(40));
+        stores.jobs.markPushed(jobId);
+        stores.jobs.recordSession(jobId, "session-impl");
+
+        expect((await postGitlab("Note Hook", chatNote("/agent hi", { branch: "feature/API-2-thing" }))).json()).toEqual({ ok: true, action: "chat" });
+        const [chat] = jobsOfKind("chat");
+        expect(chat).toMatchObject({ issueId: "issue-2", identifier: "API-2", subject: null, trigger: { loopId: null } });
+      });
+
+      it("restarts a handed-back loop on `/agent restart`, and chats without restarting on a plain note", async () => {
+        const loopId = sessionLoop("handed_back");
+
+        expect((await postGitlab("Note Hook", chatNote("/agent restart"))).json()).toEqual({ ok: true, action: "chat_restart" });
+        expect((await postGitlab("Note Hook", chatNote("/agent Restart please"))).json()).toEqual({ ok: true, action: "chat_restart" });
+        expect(jobsOfKind("restart").map((job) => job.trigger)).toEqual([
+          { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "restart", labelDriven: false },
+        ]);
+
+        expect((await postGitlab("Note Hook", chatNote("/agent what went wrong?"))).json()).toEqual({ ok: true, action: "chat" });
+        expect((await postGitlab("Note Hook", chatNote("/agent restarting would not help, right?"))).json()).toEqual({ ok: true, action: "chat" });
+        expect(jobsOfKind("restart")).toHaveLength(1);
+        expect(jobsOfKind("chat")).toHaveLength(2);
+      });
+
+      it("treats `/agent restart` on a loop that is not handed back as a chat", async () => {
+        sessionLoop("awaiting_review");
+
+        expect((await postGitlab("Note Hook", chatNote("/agent restart"))).json()).toEqual({ ok: true, action: "chat" });
+        expect(jobsOfKind("restart")).toEqual([]);
+      });
     });
   });
 

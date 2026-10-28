@@ -1,4 +1,5 @@
 import { query, type HookCallback, type McpServerConfig, type Options, type SDKMessage, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import { chatResultJsonSchema } from "../chat/result.js";
 import { fixResultJsonSchema } from "../greptile/result.js";
 import { implementResultJsonSchema } from "../implement/result.js";
 import { evaluateTool } from "./policy.js";
@@ -9,6 +10,7 @@ const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
 const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = {
   implement: implementResultJsonSchema,
   fix: fixResultJsonSchema,
+  chat: chatResultJsonSchema,
 };
 /** Claude Code deletes transcripts older than this; the steward's retention owns session deletion instead. */
 const CLEANUP_PERIOD_DAYS = 3650;

@@ -30,11 +30,14 @@ export class FakeGitLabMr implements GitLabMrApi {
   /** Usernames userExists answers true for. */
   users = new Set<string>();
   scopes = ["api"];
+  /** Access levels memberAccessLevel answers by user id; anyone else is not a member. */
+  members = new Map<number, number>();
   readonly notes: string[] = [];
   readonly replies: Array<{ discussionId: string; body: string }> = [];
   readonly resolved: string[] = [];
   private nextId = 1;
   private failingNotes = 0;
+  private failingReplies = 0;
 
   constructor(mr: MergeRequestInfo = fakeMergeRequest()) {
     this.mr = mr;
@@ -91,12 +94,25 @@ export class FakeGitLabMr implements GitLabMrApi {
     this.addDiscussion(BOT, body, { resolvable: false });
   }
 
+  /** The next replyToDiscussion throws, as GitLab being down would. */
+  failNextReply(): void {
+    this.failingReplies += 1;
+  }
+
   async replyToDiscussion(_project: number | string, _iid: number, discussionId: string, body: string): Promise<void> {
+    if (this.failingReplies > 0) {
+      this.failingReplies -= 1;
+      throw new Error("GitLab down");
+    }
     this.replies.push({ discussionId, body });
     this.discussions.find((item) => item.id === discussionId)?.notes.push({
       id: this.nextId++, body, author: BOT, system: false, resolvable: true, resolved: false,
       type: null, createdAt: "2026-10-27T10:00:00Z", updatedAt: "2026-10-27T10:00:00Z", position: null,
     });
+  }
+
+  async memberAccessLevel(_project: number | string, userId: number): Promise<number | null> {
+    return this.members.get(userId) ?? null;
   }
 
   async resolveDiscussion(_project: number | string, _iid: number, discussionId: string): Promise<void> {

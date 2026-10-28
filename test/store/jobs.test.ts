@@ -473,6 +473,47 @@ describe("loop jobs", () => {
     expect(stores.jobs.claimNext()).toBeNull();
   });
 
+  describe("chat jobs", () => {
+    const chatEvent = (loopId: number | null, issueId = "issue-1"): TriggerEvent => ({
+      kind: "chat", issueId, identifier: "API-1", teamKey: "API", loopId, projectId: 42, mrIid: 7, discussionId: "d1", noteId: 9, author: "ada", message: "hi",
+    });
+
+    it("stores a chat on a loop's ticket with the loop as subject, and one without a loop with no subject", () => {
+      const onLoop = stores.jobs.get(stores.jobs.enqueue(chatEvent(3)));
+      expect(onLoop).toMatchObject({ kind: "chat", subject: "loop:3", trigger: chatEvent(3), chatResult: null, unreadable: [] });
+      expect(stores.jobs.get(stores.jobs.enqueue(chatEvent(null)))).toMatchObject({ kind: "chat", subject: null });
+    });
+
+    it("waits while a step of its loop or any job of its ticket runs", () => {
+      const fix = stores.jobs.enqueue(loopEvent("fix"));
+      expect(stores.jobs.claimNext()?.id).toBe(fix);
+      const chat = stores.jobs.enqueue(chatEvent(3, "issue-9"));
+      const loose = stores.jobs.enqueue(chatEvent(null));
+
+      expect(stores.jobs.claimNext()).toBeNull();
+
+      stores.jobs.finish(fix, { status: "succeeded" });
+      expect(stores.jobs.claimNext()?.id).toBe(chat);
+      expect(stores.jobs.claimNext()?.id).toBe(loose);
+    });
+
+    it("stores its reply and names the column when it cannot be read", () => {
+      const id = stores.jobs.enqueue(chatEvent(3));
+      stores.jobs.saveChatResult(id, { reply: "hello", warning: null });
+      expect(stores.jobs.get(id)?.chatResult).toEqual({ reply: "hello", warning: null });
+      stores.db.prepare("UPDATE jobs SET chat_result = ? WHERE id = ?").run('{"reply":1}', id);
+      expect(stores.jobs.get(id)?.unreadable).toEqual(["chat_result"]);
+    });
+
+    it("is never woken: a wake is for the loop's await, and reports nothing to wake without one", () => {
+      const chat = stores.jobs.enqueue(chatEvent(3));
+      stores.jobs.claimById(chat);
+
+      expect(stores.jobs.wake("loop:3", new Date())).toBe(false);
+      expect(stores.jobs.get(chat)?.wakeRequested).toBe(false);
+    });
+  });
+
   describe("wake", () => {
     const deferred = (): number => {
       const id = stores.jobs.enqueue(loopEvent("await"));

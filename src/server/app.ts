@@ -1,6 +1,8 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
+import { chatIntake, type ChatAction } from "../chat/intake.js";
+import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import { parseGitlabEvent, verifyGitlabWebhook, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
 import { shouldEnqueue, type IntakeDecision } from "../core/intake.js";
 import { logger } from "../log.js";
@@ -15,6 +17,8 @@ export interface ServerDeps {
   stores: Stores;
   tracker: Tracker;
   workerState: () => WorkerState;
+  /** Set with `greptile` or `chat` on GitLab: chat intake checks a note author's access and answers notes it cannot serve. */
+  gitlab?: GitLabMrApi;
 }
 
 export interface HealthReport {
@@ -106,7 +110,7 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
 /** Pipeline and MR hooks can pass Fastify's 1 MiB default; a 413 would count as a failing delivery and GitLab disables those. */
 const GITLAB_BODY_LIMIT = 5 * 1024 * 1024;
 
-type GitlabAction = "ignored" | "woken" | "no_loop";
+type GitlabAction = "ignored" | "woken" | "no_loop" | ChatAction;
 
 /** A loop waits on GitLab only for its MR or its review; a fixing loop has nothing to wake. */
 const WAITING_STATES: readonly Loop["state"][] = ["awaiting_mr", "awaiting_review"];
@@ -132,13 +136,20 @@ const wakeLoop = (deps: ServerDeps, event: GitlabWakeEvent, project: string): { 
   return { action: deps.stores.jobs.wake(loopSubject(loop.id), new Date()) ? "woken" : "no_loop", loopId: loop.id };
 };
 
-const gitlabIntake = (deps: ServerDeps, event: GitlabWakeEvent | null): { action: GitlabAction; loopId: number | null } => {
+/** A chat request (a `chat.prefix` note) is chat's alone; any other event may wake a waiting loop. */
+const gitlabIntake = async (deps: ServerDeps, event: GitlabWakeEvent | null): Promise<{ action: GitlabAction; loopId: number | null }> => {
   const { codehost, greptile } = deps.config;
-  if (event === null || greptile === undefined || codehost.kind !== "gitlab") return { action: "ignored", loopId: null };
+  if (event === null) return { action: "ignored", loopId: null };
+  const chat = await chatIntake(deps, event);
+  if (chat !== null) return chat;
+  if (greptile === undefined || codehost.kind !== "gitlab") return { action: "ignored", loopId: null };
   return wakeLoop(deps, event, codehost.project);
 };
 
-/** GitLab events wake a waiting fix loop's deferred await; polling is only the fallback. Never enqueues a job. */
+/**
+ * GitLab events wake a waiting fix loop's deferred await; polling is only the fallback. A `chat.prefix` note from a
+ * Developer enqueues a chat (or a handed-back loop's restart); nothing else enqueues a job.
+ */
 const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
   app.post<{ Body: string }>("/webhooks/gitlab", { bodyLimit: GITLAB_BODY_LIMIT }, async (request, reply) => {
     const kind = header(request.headers["x-gitlab-event"]);
@@ -162,7 +173,14 @@ const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => 
     }
     // A validly signed event is always answered 200: GitLab disables a hook that keeps failing.
     const event = parseGitlabEvent(kind, parseJson(request.body));
-    const { action, loopId } = gitlabIntake(deps, event);
+    let result: { action: GitlabAction; loopId: number | null };
+    try {
+      result = await gitlabIntake(deps, event);
+    } catch (err) {
+      logger.error({ kind, err: err instanceof Error ? err.message : String(err) }, "gitlab webhook intake failed");
+      return { ok: true, action: "ignored" };
+    }
+    const { action, loopId } = result;
     logger.info({ kind, branch: event?.branch, mrIid: event?.mrIid, loopId, action }, "gitlab webhook received");
     return { ok: true, action };
   });

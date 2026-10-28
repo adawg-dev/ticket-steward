@@ -88,7 +88,7 @@ export const redactOutcome = (outcome: JobOutcome, redactor: Redactor): JobOutco
 export const jobPort = (deps: Pick<PipelineDeps, "config" | "slot">): number => appPortOf(deps.config, deps.slot?.n ?? 1);
 
 /** With `slots`: frees the slot's app port and brings its containers up fresh. Null without `slots`. */
-const startSlot = async (ctx: RunContext, deps: PipelineDeps, appPort: number): Promise<Slot | null> => {
+export const startSlot = async (ctx: RunContext, deps: PipelineDeps, appPort: number): Promise<Slot | null> => {
   if (deps.config.slots === undefined) return null;
   if (deps.slot === undefined) throw new Error("slots is configured but this run has no slot");
   const { n, client } = deps.slot;

@@ -1,11 +1,12 @@
 import type { JobOutcome } from "../core/types.js";
+import { StoredChatSchema, type StoredChat } from "../chat/result.js";
 import { StoredFixSchema, type StoredFix } from "../greptile/result.js";
 import { StoredImplementSchema, type StoredImplement } from "../implement/result.js";
 import type { TriggerEvent } from "../tracker/types.js";
 import { nowIso, readStored, type Database } from "./db.js";
 
-/** Issue jobs (implement) and the fix loop's steps (await_review, fix, restart). */
-export type JobKind = "implement" | "await_review" | "fix" | "restart";
+/** Issue jobs (implement), the fix loop's steps (await_review, fix, restart) and chat turns from MR notes. */
+export type JobKind = "implement" | "await_review" | "fix" | "restart" | "chat";
 
 /** Kinds a job row may carry: today's, plus `enrich` (removed 2026-10-28), kept so its history still lists. Such a job never runs. */
 export type StoredJobKind = JobKind | "enrich";
@@ -13,7 +14,7 @@ export type StoredJobKind = JobKind | "enrich";
 /** The error `failRetiredKinds` gives a queued or running job of a removed kind. */
 export const RETIRED_KIND_ERROR = "enrich was removed; this job will not run";
 
-const JOB_KINDS: readonly JobKind[] = ["implement", "await_review", "fix", "restart"];
+const JOB_KINDS: readonly JobKind[] = ["implement", "await_review", "fix", "restart", "chat"];
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "publish_failed" | "skipped";
 
@@ -30,6 +31,8 @@ export interface Job {
   implementResult: StoredImplement | null;
   /** A fix job's validated result or hand-back, so a retry publishes it instead of running the brain again. */
   fixResult: StoredFix | null;
+  /** A chat job's reply, stored before it is posted, so a retry posts it instead of running the brain again. */
+  chatResult: StoredChat | null;
   branch: string | null;
   commitSha: string | null;
   pushedAt: string | null;
@@ -53,7 +56,7 @@ export interface Job {
   unreadable: StoredColumn[];
 }
 
-export type StoredColumn = "trigger" | "implement_result" | "fix_result";
+export type StoredColumn = "trigger" | "implement_result" | "fix_result" | "chat_result";
 
 interface JobRow {
   id: number;
@@ -67,6 +70,7 @@ interface JobRow {
   attempts: number;
   implement_result: string | null;
   fix_result: string | null;
+  chat_result: string | null;
   branch: string | null;
   commit_sha: string | null;
   pushed_at: string | null;
@@ -81,7 +85,7 @@ interface JobRow {
   wake_requested: number;
 }
 
-const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "loop"]);
+const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "loop", "chat"]);
 
 /** The stored trigger, or (noted in `unreadable`) a stand-in from the row's own columns when it is not a trigger object. */
 const readTrigger = (row: JobRow, unreadable: StoredColumn[]): TriggerEvent => {
@@ -111,6 +115,7 @@ const toJob = (row: JobRow): Job => {
     attempts: row.attempts,
     implementResult: readStored(row.implement_result, "implement_result", StoredImplementSchema, unreadable),
     fixResult: readStored(row.fix_result, "fix_result", StoredFixSchema, unreadable),
+    chatResult: readStored(row.chat_result, "chat_result", StoredChatSchema, unreadable),
     branch: row.branch,
     commitSha: row.commit_sha,
     pushedAt: row.pushed_at,
@@ -144,10 +149,14 @@ interface JobColumns {
 /** The subject of every job a loop runs; `LoopStore.stranded` matches it in SQL. */
 export const loopSubject = (loopId: number): string => `loop:${loopId}`;
 
-/** A loop step runs as its own job kind (`await` as `await_review`), with the loop as subject so its steps never overlap. */
+/**
+ * A loop step runs as its own job kind (`await` as `await_review`), with the loop as subject so its steps never overlap.
+ * A chat on a loop's ticket takes the loop as subject too; without a loop the ticket (issue_id) serializes it.
+ */
 const jobColumns = (event: TriggerEvent): JobColumns => {
   const ticket = { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey };
   if (event.kind === "loop") return { ...ticket, kind: event.step === "await" ? "await_review" : event.step, subject: loopSubject(event.loopId) };
+  if (event.kind === "chat") return { ...ticket, kind: "chat", subject: event.loopId === null ? null : loopSubject(event.loopId) };
   return { ...ticket, kind: "implement", subject: null };
 };
 
@@ -162,11 +171,13 @@ export class JobStore {
   private readonly failRetired;
   private readonly storeImplement;
   private readonly storeFix;
+  private readonly storeChat;
   private readonly storeCommit;
   private readonly storePushed;
   private readonly storeSession;
   private readonly storeWorkspace;
   private readonly selectLatestSession;
+  private readonly selectImplementForBranch;
   private readonly selectSessionWorktrees;
   private readonly complete;
   private readonly deferRetry;
@@ -218,6 +229,7 @@ export class JobStore {
     );
     this.storeImplement = db.prepare<[string, number]>("UPDATE jobs SET implement_result = ? WHERE id = ?");
     this.storeFix = db.prepare<[string, number]>("UPDATE jobs SET fix_result = ? WHERE id = ?");
+    this.storeChat = db.prepare<[string, number]>("UPDATE jobs SET chat_result = ? WHERE id = ?");
     this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ?, pushed_at = NULL WHERE id = ?");
     this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
     this.storeSession = db.prepare<[string, number]>("UPDATE jobs SET session_id = ? WHERE id = ?");
@@ -226,6 +238,7 @@ export class JobStore {
       `SELECT * FROM jobs WHERE issue_id = ? AND kind = 'implement' AND session_id IS NOT NULL AND worktree_name IS NOT NULL
        ORDER BY id DESC LIMIT 1`,
     );
+    this.selectImplementForBranch = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE kind = 'implement' AND branch = ? ORDER BY id DESC LIMIT 1");
     // A session's last activity is its ticket's: any later job on the ticket (a fix round, a chat) may have resumed it.
     this.selectSessionWorktrees = db.prepare<[string], { worktree_name: string }>(
       `SELECT DISTINCT j.worktree_name FROM jobs j
@@ -256,7 +269,7 @@ export class JobStore {
       `UPDATE jobs SET
          not_before = CASE WHEN status = 'queued' AND not_before IS NOT NULL AND not_before > ? THEN ? ELSE not_before END,
          wake_requested = CASE WHEN status = 'running' THEN 1 ELSE wake_requested END
-       WHERE subject = ? AND status IN ('queued', 'running')`,
+       WHERE subject = ? AND status IN ('queued', 'running') AND kind <> 'chat'`,
     );
     this.selectById = db.prepare<[number], JobRow>("SELECT * FROM jobs WHERE id = ?");
     this.selectLatestForSubject = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE subject = ? ORDER BY id DESC LIMIT 1");
@@ -316,6 +329,10 @@ export class JobStore {
     this.storeFix.run(JSON.stringify(stored), id);
   }
 
+  saveChatResult(id: number, stored: StoredChat): void {
+    this.storeChat.run(JSON.stringify(stored), id);
+  }
+
   /** The commit about to be pushed; clears `pushedAt` until `markPushed`, so a push that never lands is not read as pushed. */
   recordCommit(id: number, branch: string, sha: string): void {
     this.storeCommit.run(branch, sha, id);
@@ -337,6 +354,12 @@ export class JobStore {
   /** The ticket's newest implement job that left a brain session in a recorded worktree. */
   latestImplementSession(issueId: string): Job | null {
     const row = this.selectLatestSession.get(issueId);
+    return row === undefined ? null : toJob(row);
+  }
+
+  /** The newest implement job that recorded `branch` as its push; chat finds a loop-less ticket by its MR's branch. */
+  latestImplementForBranch(branch: string): Job | null {
+    const row = this.selectImplementForBranch.get(branch);
     return row === undefined ? null : toJob(row);
   }
 
