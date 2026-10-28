@@ -291,6 +291,23 @@ describe("runChat", () => {
     expect(await git(repo.repo, ["rev-parse", BRANCH])).toBe(headSha);
   });
 
+  it("still lists a commit an earlier chat left unpushed when the next chat changes nothing", async () => {
+    const loopId = createLoop();
+    const commitOnly: AgentStep = async (workspace) => {
+      await writeFile(join(workspace, "src", "adapter.ts"), "export const adapter = 4;\n");
+      await git(workspace, ["add", "--", "src/adapter.ts"]);
+      await git(workspace, ["commit", "-q", "-m", "API-1: Try the retry again"]);
+    };
+    await runChat(claim(loopId), makeDeps(new AgentBrain({ result: { reply: "Committed it." } }, commitOnly)));
+
+    const outcome = await runChat(claim(loopId), makeDeps(new FakeBrain({ result: { reply: "Nothing new." } })));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "the agent left unpushed work" });
+    expect(gitlab.replies[1]?.body).toContain("Nothing new.\n\nLeft in the agent's worktree, not pushed:");
+    expect(gitlab.replies[1]?.body).toContain("API-1: Try the retry again");
+    expect(await git(repo.repo, ["rev-parse", BRANCH])).toBe(headSha);
+  });
+
   it("posts a short failure reply when the brain fails, and finishes with a warning", async () => {
     const loopId = createLoop();
     const brain = new FakeBrain({ fail: true, error: "max turns" });

@@ -57,14 +57,16 @@ const pushedShaOf = async (deps: PipelineDeps, spec: RunSpec): Promise<string | 
   return deps.stores.pushes.latestPushed(spec.push.jobId)?.sha ?? null;
 };
 
-/** What the agent left in the worktree after the last push (or the checkout); never the files the steward copied in. */
+/** What the agent left in the worktree after the last push (or the branch head it started from); never the files the steward copied in. */
 const workOf = async (deps: PipelineDeps, spec: RunSpec, worktree: Worktree): Promise<WorkReport> => {
   const pushedSha = await pushedShaOf(deps, spec);
   try {
     const { files: overlayFiles } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
     const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
-    // A reused session worktree may not have caught up to the checkout: what it started at is what the run left after.
-    const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: pushedSha ?? worktree.sha, stewardFiles });
+    // Without a push this run, the branch head it started from: a reused session worktree may be ahead of it with an
+    // earlier chat's unpushed commits (behind it, the range is empty). Answer-only, the commit the run started at.
+    const since = pushedSha ?? (spec.push !== null ? spec.checkout.sha : worktree.sha);
+    const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: since, stewardFiles });
     return { runId: spec.runId, unpushed: work.summary, pushedSha };
   } catch (err) {
     // Read as unpushed work, so the run hands back to a person instead of passing over what could not be checked.
