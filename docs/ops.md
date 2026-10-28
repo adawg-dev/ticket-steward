@@ -365,8 +365,9 @@ greptile: {
 tracker: { labels: { approved: "agent-approved" } },   // applied when the loop passes
 ```
 
-Waits are counted from the first poll of the wait, not from the push. Each wait gets its own 30 minutes, and every
-fix round starts its waits over. On kickoff MR pipelines take 7.3 minutes at the median (14.4 at most) and Greptile's
+Waits are counted from the first poll of the wait, not from the push. Per round there are up to 30 minutes for the MR
+to open, then 30 minutes for Greptile's review and the pipeline together (they run in parallel and share one clock);
+every fix round starts its waits over. On kickoff MR pipelines take 7.3 minutes at the median (14.4 at most) and Greptile's
 first review 3.2 (12.3 at most).
 
 **Webhooks.** GitLab webhooks are the loop's primary wake signal; polling every `pollSeconds` (5 minutes) is only the
@@ -378,7 +379,8 @@ fallback. In kickoff, Settings → Webhooks, add `<server.publicUrl>/webhooks/gi
 
 Put the hook's signing token (`whsec_...`, GitLab 19.1+) in `GITLAB_WEBHOOK_SIGNING_TOKEN` in `.env`; a plain secret token
 (`X-Gitlab-Token`) in `GITLAB_WEBHOOK_SECRET` also works. An event for the branch or MR of a loop in `awaiting_mr` or
-`awaiting_review` moves that loop's queued poll to now; nothing else is queued, and every validly signed event is answered
+`awaiting_review` moves that loop's queued poll to now, or, when the poll is running at that moment, makes its next
+poll run at once; nothing else is queued, and every validly signed event is answered
 200 (`ignored`, `woken` or `no_loop`) so GitLab never disables the hook. A bad signature is a 401 and a
 `gitlab webhook rejected` warning in the log. Without either secret `steward doctor` warns that the loop falls back to
 5-minute polling.

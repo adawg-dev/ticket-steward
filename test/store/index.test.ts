@@ -65,7 +65,7 @@ describe("openStores", () => {
     old.prepare("INSERT INTO jobs (issue_id, identifier, team_key, trigger, status, created_at) VALUES ('i', 'API-1', 'API', '{\"kind\":\"cli\",\"issueId\":\"i\",\"identifier\":\"API-1\",\"teamKey\":\"API\"}', 'succeeded', '2026-01-01')").run();
     old.close();
     const stores = openStores(dir);
-    expect(stores.jobs.list({ limit: 5 })[0]).toMatchObject({ kind: "enrich", subject: null });
+    expect(stores.jobs.list({ limit: 5 })[0]).toMatchObject({ kind: "enrich", subject: null, wakeRequested: false });
     stores.db.close();
   });
 

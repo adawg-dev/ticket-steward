@@ -483,6 +483,18 @@ describe("buildServer", () => {
       expect(isDue(jobId)).toBe(true);
     });
 
+    it("wakes a loop whose poll is running, so the poll's deferral comes due at once", async () => {
+      const { jobId } = waitingLoop("awaiting_review", { projectId: 42, mrIid: 7 });
+      stores.jobs.claimById(jobId);
+
+      const response = await postGitlab("Note Hook", noteEvent("update"));
+
+      expect(response.json()).toEqual({ ok: true, action: "woken" });
+      expect(stores.jobs.get(jobId)?.wakeRequested).toBe(true);
+      stores.jobs.defer(jobId, new Date(Date.now() + 300_000));
+      expect(isDue(jobId)).toBe(true);
+    });
+
     it("reports no_loop when no waiting loop matches", async () => {
       const { jobId } = waitingLoop("fixing");
 

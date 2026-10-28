@@ -36,6 +36,8 @@ export interface Job {
   startedAt: string | null;
   finishedAt: string | null;
   notBefore: string | null;
+  /** A GitLab webhook woke the loop while this job ran: its deferral comes due at once instead of after the poll interval. */
+  wakeRequested: boolean;
   /**
    * Stored columns holding JSON that cannot be read: a bad result is null, a bad trigger is a bare `cli` trigger built from
    * the row's columns. Such a job must fail, not run.
@@ -68,6 +70,7 @@ interface JobRow {
   started_at: string | null;
   finished_at: string | null;
   not_before: string | null;
+  wake_requested: number;
 }
 
 const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "loop"]);
@@ -111,6 +114,7 @@ const toJob = (row: JobRow): Job => {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     notBefore: row.not_before,
+    wakeRequested: row.wake_requested === 1,
     unreadable,
   };
 };
@@ -139,7 +143,7 @@ const jobColumns = (event: TriggerEvent): JobColumns => {
   return { ...ticket, kind: jobKindFor(event), subject: null };
 };
 
-const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?";
+const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, wake_requested = 0, started_at = ?";
 
 export class JobStore {
   private readonly insert;
@@ -203,24 +207,29 @@ export class JobStore {
     this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
     this.storeSession = db.prepare<[string, number]>("UPDATE jobs SET session_id = ? WHERE id = ?");
     this.complete = db.prepare<[JobStatus, string | null, string, number]>(
-      "UPDATE jobs SET status = ?, error = ?, finished_at = ?, not_before = NULL WHERE id = ?",
+      "UPDATE jobs SET status = ?, error = ?, finished_at = ?, not_before = NULL, wake_requested = 0 WHERE id = ?",
     );
     this.deferRetry = db.prepare<[string, string, number]>(
-      "UPDATE jobs SET status = 'queued', not_before = ?, error = ?, finished_at = NULL WHERE id = ?",
+      "UPDATE jobs SET status = 'queued', not_before = ?, error = ?, finished_at = NULL, wake_requested = 0 WHERE id = ?",
     );
-    this.deferUntil = db.prepare<[string, number]>(
-      "UPDATE jobs SET status = 'queued', attempts = 0, not_before = ?, error = NULL, finished_at = NULL WHERE id = ?",
+    // A wake recorded while the job ran turns the deferral into "due now", once.
+    this.deferUntil = db.prepare<[string, string, number]>(
+      `UPDATE jobs SET status = 'queued', attempts = 0, not_before = CASE WHEN wake_requested = 1 THEN ? ELSE ? END, error = NULL,
+         finished_at = NULL, wake_requested = 0 WHERE id = ?`,
     );
     this.unclaim = db.prepare<[string, number]>(
-      "UPDATE jobs SET status = 'queued', attempts = MAX(attempts - 1, 0), not_before = NULL, error = ?, finished_at = NULL WHERE id = ?",
+      "UPDATE jobs SET status = 'queued', attempts = MAX(attempts - 1, 0), not_before = NULL, error = ?, finished_at = NULL, wake_requested = 0 WHERE id = ?",
     );
     this.reopen = db.prepare<[number]>(
       "UPDATE jobs SET status = 'queued', not_before = NULL, finished_at = NULL WHERE id = ? AND status != 'running'",
     );
-    // Only queued jobs; one already due keeps its earlier time. SQLite counts every row the WHERE matched, so a repeat wake is still true.
+    // A queued job comes due now (one already due keeps its earlier time); a running one records the wake for its deferral.
+    // SQLite counts every row the WHERE matched, so a repeat wake is still true.
     this.wakeSubject = db.prepare<[string, string, string]>(
-      `UPDATE jobs SET not_before = CASE WHEN not_before IS NOT NULL AND not_before > ? THEN ? ELSE not_before END
-       WHERE subject = ? AND status = 'queued'`,
+      `UPDATE jobs SET
+         not_before = CASE WHEN status = 'queued' AND not_before IS NOT NULL AND not_before > ? THEN ? ELSE not_before END,
+         wake_requested = CASE WHEN status = 'running' THEN 1 ELSE wake_requested END
+       WHERE subject = ? AND status IN ('queued', 'running')`,
     );
     this.selectById = db.prepare<[number], JobRow>("SELECT * FROM jobs WHERE id = ?");
     this.selectLatestForSubject = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE subject = ? ORDER BY id DESC LIMIT 1");
@@ -229,20 +238,20 @@ export class JobStore {
     );
     this.selectAll = db.prepare<[number], JobRow>("SELECT * FROM jobs ORDER BY id DESC LIMIT ?");
     this.requeueRunning = db.prepare<[number]>(
-      "UPDATE jobs SET status = 'queued' WHERE status = 'running' AND attempts < ?",
+      "UPDATE jobs SET status = 'queued', wake_requested = 0 WHERE status = 'running' AND attempts < ?",
     );
     this.failRunning = db.prepare<[string]>(
-      "UPDATE jobs SET status = 'failed', error = 'interrupted', finished_at = ? WHERE status = 'running'",
+      "UPDATE jobs SET status = 'failed', error = 'interrupted', finished_at = ?, wake_requested = 0 WHERE status = 'running'",
     );
     this.closeRunningAttempts = db.prepare<[string]>(
       `UPDATE attempts SET finished_at = ?, error = 'interrupted'
        WHERE finished_at IS NULL AND job_id IN (SELECT id FROM jobs WHERE status = 'running')`,
     );
     this.requeueOneRunning = db.prepare<[number, number]>(
-      "UPDATE jobs SET status = 'queued' WHERE id = ? AND status = 'running' AND attempts < ?",
+      "UPDATE jobs SET status = 'queued', wake_requested = 0 WHERE id = ? AND status = 'running' AND attempts < ?",
     );
     this.failOneRunning = db.prepare<[string, number]>(
-      "UPDATE jobs SET status = 'failed', error = 'interrupted', finished_at = ? WHERE id = ? AND status = 'running'",
+      "UPDATE jobs SET status = 'failed', error = 'interrupted', finished_at = ?, wake_requested = 0 WHERE id = ? AND status = 'running'",
     );
     this.closeJobAttempts = db.prepare<[string, number]>(
       "UPDATE attempts SET finished_at = ?, error = 'interrupted' WHERE finished_at IS NULL AND job_id = ?",
@@ -327,7 +336,7 @@ export class JobStore {
    * over: a long wait's polls never add up their occasional retryable errors into a terminal failure.
    */
   defer(id: number, until: Date): void {
-    this.deferUntil.run(until.toISOString(), id);
+    this.deferUntil.run(nowIso(), until.toISOString(), id);
   }
 
   /** Puts a claimed job back in the queue and gives back the attempt the claim counted. */
@@ -340,7 +349,10 @@ export class JobStore {
     return this.reopen.run(id).changes === 1;
   }
 
-  /** Makes the queued job of this subject (a loop's deferred await) due at `now`; false when none is queued. Never creates a job. */
+  /**
+   * Makes the queued job of this subject (a loop's deferred await) due at `now`, or, while it runs, makes its coming
+   * deferral due at once. False when no job of the subject is queued or running. Never creates a job.
+   */
   wake(subject: string, now: Date): boolean {
     const at = now.toISOString();
     return this.wakeSubject.run(at, at, subject).changes > 0;

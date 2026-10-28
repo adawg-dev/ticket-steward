@@ -481,15 +481,45 @@ describe("loop jobs", () => {
       expect(stores.jobs.list({ limit: 10 })).toHaveLength(1);
     });
 
-    it("leaves running and finished jobs alone and creates none", () => {
+    it("records a wake on a running job, so its deferred finish makes it due now and clears the flag", () => {
       const id = stores.jobs.enqueue(loopEvent("await"));
       stores.jobs.claimNext();
-      expect(stores.jobs.wake("loop:3", new Date())).toBe(false);
-      expect(stores.jobs.get(id)?.status).toBe("running");
 
+      expect(stores.jobs.wake("loop:3", new Date())).toBe(true);
+      expect(stores.jobs.get(id)).toMatchObject({ status: "running", wakeRequested: true });
+
+      stores.jobs.finish(id, { status: "deferred", until: new Date(Date.now() + 300_000) });
+
+      const job = stores.jobs.get(id);
+      expect(job).toMatchObject({ status: "queued", wakeRequested: false });
+      expect(Date.parse(job?.notBefore ?? "")).toBeLessThanOrEqual(Date.now());
+      expect(stores.jobs.claimNext()?.id).toBe(id);
+      // The flag was used up: the next deferral waits its full time.
+      stores.jobs.defer(id, new Date(Date.now() + 300_000));
+      expect(stores.jobs.claimNext()).toBeNull();
+    });
+
+    it("clears a recorded wake when the running job finishes any other way", () => {
+      const id = stores.jobs.enqueue(loopEvent("await"));
+      stores.jobs.claimNext();
+      stores.jobs.wake("loop:3", new Date());
+      stores.jobs.scheduleRetry(id, new Date(Date.now() + 60_000), "boom");
+      expect(stores.jobs.get(id)?.wakeRequested).toBe(false);
+
+      const other = stores.jobs.enqueue({ kind: "loop", issueId: "issue-2", identifier: "API-2", teamKey: "API", loopId: 4, step: "await" });
+      stores.jobs.claimById(other);
+      stores.jobs.wake("loop:4", new Date());
+      stores.jobs.finish(other, { status: "succeeded" });
+      expect(stores.jobs.get(other)?.wakeRequested).toBe(false);
+    });
+
+    it("leaves finished jobs alone and creates none", () => {
+      const id = stores.jobs.enqueue(loopEvent("await"));
+      stores.jobs.claimNext();
       stores.jobs.finish(id, { status: "succeeded" });
+
       expect(stores.jobs.wake("loop:3", new Date())).toBe(false);
-      expect(stores.jobs.get(id)?.status).toBe("succeeded");
+      expect(stores.jobs.get(id)).toMatchObject({ status: "succeeded", wakeRequested: false });
       expect(stores.jobs.wake("loop:4", new Date())).toBe(false);
       expect(stores.jobs.list({ limit: 10 })).toHaveLength(1);
     });

@@ -129,7 +129,7 @@ const wakeLoop = (deps: ServerDeps, event: GitlabWakeEvent, project: string): { 
   if (!isOurProject(event, project, waiting)) return { action: "ignored", loopId: null };
   const loop = waiting.find((candidate) => sameProject(candidate, event, project) && sameChange(candidate, event));
   if (loop === undefined) return { action: "no_loop", loopId: null };
-  // A running poll sees the change itself or defers again; only a queued await is moved up.
+  // A queued await comes due now; a running one comes due as soon as it defers, so a wake mid-poll is not lost.
   return { action: deps.stores.jobs.wake(loopSubject(loop.id), new Date()) ? "woken" : "ignored", loopId: loop.id };
 };
 

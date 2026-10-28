@@ -342,13 +342,16 @@ back for the loop's wake-ups; see Webhooks.)
 
 ### Webhooks
 
-GitLab webhooks are the loop's primary wake signal and polling is the fallback, every `pollSeconds` (default 300), with
-each wait bounded at 30 minutes (on kickoff MR pipelines take 7.3 min at the median, 14.4 at most; Greptile's first
+GitLab webhooks are the loop's primary wake signal and polling is the fallback, every `pollSeconds` (default 300). Per
+round the loop waits up to 30 minutes for the MR to open, then 30 minutes for Greptile's review and the pipeline
+together; they run in parallel and share the clock started when the MR was found (on kickoff MR pipelines take 7.3 min at the median, 14.4 at most; Greptile's first
 review 3.2, 12.3 at most). `POST /webhooks/gitlab` verifies the delivery (signing token in `GITLAB_WEBHOOK_SIGNING_TOKEN`,
 or the legacy secret in `GITLAB_WEBHOOK_SECRET`; 401 otherwise) and reads Merge Request, Note (on an MR, created or
 edited: Greptile edits its summary in place) and Pipeline events. One that names the branch or MR of a loop in
 `awaiting_mr` or `awaiting_review` on the configured project makes that loop's queued await job due now
-(`JobStore.wake`); it never creates a job or touches a running one. Every validly signed event gets a 200 with
+(`JobStore.wake`). When that job is running, the wake is recorded on it (`wake_requested`) and its deferral comes due
+at once instead of after `pollSeconds`, so a change seen mid-poll is not lost; any other end of the run clears the flag.
+It never creates a job. Every validly signed event gets a 200 with
 `ignored`, `woken` or `no_loop`, so GitLab never disables the hook.
 
 Also remove the repro *replay* plumbing whose only consumer was the reviewer: the `repros` table, `dataDir/repros/`,
