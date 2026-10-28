@@ -249,9 +249,9 @@ image must use the native binary.
 - **Remote** queries never put a GitLab token in the agent's environment, keeping the ops.md promise that the brain
   receives no GitLab, Linear or Greptile credentials. They go through a steward-launched stdio MCP server (the brain
   already receives steward MCP servers through `BrainInput.mcpServers`) exposing read-only tools (graph query, schema,
-  MR/issue/job context), which holds a **dedicated read-only token** (`ORBIT_TOKEN`, `read_api` scope, created by the
-  owner) in its own environment. *(My call.)* First build step: verify the Orbit API accepts that token type and sees
-  `concentrateai`. Remote failures (paused trial, credits exhausted, network) return a tool error and never fail the
+  MR/issue/job context), which holds the existing **`GITLAB_TOKEN`** (project access token, `api` scope, which includes
+  `read_api`; the owner's call) in its own environment only. First build step: verify the Orbit API accepts a project
+  access token and record what it can see (expected: `concentrateai/kickoff`, possibly not the rest of the group). Remote failures (paused trial, credits exhausted, network) return a tool error and never fail the
   job.
 - **Local**: each worktree is indexed before the brain starts (`orbit workspace index .`, bounded by a timeout; a
   failed index logs a warning and does not fail the job). The index location goes under `dataDir` so it persists and
