@@ -40,6 +40,8 @@ const issue: TicketBundle = {
 const McpConfig = z.object({ mcpServers: z.record(z.string(), z.object({ type: z.literal("stdio"), command: z.string(), args: z.array(z.string()) })) });
 const Settings = z.object({
   cleanupPeriodDays: z.number(),
+  disableAllHooks: z.literal(false),
+  permissions: z.object({ defaultMode: z.literal("default"), disableBypassPermissionsMode: z.literal("disable") }),
   hooks: z.object({ PreToolUse: z.array(z.object({ matcher: z.string(), hooks: z.array(z.object({ type: z.literal("command"), command: z.string() })) })) }),
 });
 
