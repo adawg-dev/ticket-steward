@@ -146,15 +146,31 @@ commit: the loop's/job's pushed branch head if it has one, else the job's record
 to reply. It is a heavy job (resource guard applies), takes a slot like any other, and is serialized with everything
 else on the same ticket by the existing claim rule (no running job with the same `issue_id`/subject). A chat turn:
 recreate/reuse the worktree → bring the slot up → resume the session with the message as the prompt → post the
-agent's reply where the message came from → if the worktree has changes, the steward commits them and pushes to the
-ticket's existing steward branch (fast-forward only, same push rules and secret guard as fix jobs).
+agent's reply where the message came from. The agent commits and pushes itself, through the push tool below; the
+steward posts the reply and records any new head.
 
-- The brain still cannot commit or push (`src/brain/policy.ts` is unchanged). Like implement and fix, the chat run
-  returns structured output: `{ reply: string, commitMessage: string | null }`; the steward commits with that message
-  when there are changes. Changes with a null message are discarded and the reply says so. *(My call.)*
-- A ticket with **no steward branch** (an implement that never pushed) gets answer-only chat: changes
-  are discarded and the reply says code changes need the implement label. *(My call: creating branches and MRs from
-  chat is a separate decision.)*
+- A ticket with **no steward branch** (an implement that never pushed) gets answer-only chat: the push tool refuses,
+  and the reply says code changes need the implement label. *(My call: creating branches and MRs from chat is a
+  separate decision.)*
+
+**Agents commit and push; the steward enforces the rules** (the owner's call: the steward is the orchestrator).
+
+- The tool rules in `src/brain/policy.ts` stop blocking `git commit` (and `git add`, `git commit --amend` of the
+  agent's own unpushed commits). `git push`, `git remote`, `git config` and credential access stay blocked.
+- The agent pushes by calling a **`push` tool** served by a steward-launched stdio MCP server (alongside the existing
+  steward MCP servers in `BrainInput.mcpServers`). The tool takes no arguments beyond an optional note: it pushes the
+  worktree's `HEAD` to the ticket's steward branch, and only there. The steward side applies today's push rules
+  unchanged: fast-forward only, the secret guard over the outgoing commits, protected-branch refusal, and the push token
+  stays in the steward's process. A refused push returns the reason to the agent as the tool's error, so the agent can
+  fix it (for example, remove a secret) and try again.
+- The tool records each successful push (new head SHA, job/loop) in the store, so the Greptile loop treats it as the
+  loop's own push, never as "a person pushed".
+- **Applies to every brain run, not only chat** *(my call, from "the steward is just the orchestrator")*: implement
+  and fix move to the same model. Implement's first push creates the ticket's branch with the steward's existing branch
+  naming; opening the MR stays a steward step after the run, as today. Fix pushes to the loop's branch. The structured
+  results of implement and fix keep their summary/hand-back fields but lose whatever only existed to let the steward
+  commit (builder: identify these from `src/implement/result.ts` and `src/greptile/result.ts`). A run that ends with
+  uncommitted changes or unpushed commits is reported in the job outcome; the steward does not commit or push for it.
 
 **Addressing.** A comment wakes chat only when it starts with `/agent` (case-insensitive, first line). Anything else
 is ignored by chat (the Greptile loop's existing wake-on-note behaviour is unchanged). *(My call: a prefix rather than
@@ -186,15 +202,15 @@ brain uses, so the owner gets the full Claude Code terminal UI on the agent's ow
 
 - It must not run in a worktree while a job for that ticket is running; it refuses and says which job.
 - The same tool rules the brain runs under (no writes outside the worktree, no access to the mirror, DB, config or
-  sessions, no `docker`/`sudo`, no git commit/push) apply: they are written into a settings hook the CLI loads for
-  this session. *(My call: the session is still the agent's, with the overlay's credentials.)*
+  sessions, no `docker`/`sudo`, no `git push`; commits allowed) apply: they are written into a settings hook the CLI
+  loads for this session, and the same `push` tool is configured for it. *(My call: the session is still the agent's, with the overlay's credentials.)*
 - While it is open it holds a slot so that the agent can run the app and tests: it leases one from the running
   worker (mechanism is the builder's choice, e.g. a lease row in SQLite that lanes respect, or a local-only server
   endpoint), and releases it on exit or after a stale-lease timeout. If no slot is free it can start without slot
   services after asking (`--no-slot`).
 - Jobs for the ticket wait while the chat holds the ticket (treat the lease like a running job in the claim rule).
-- On exit, if the worktree changed, `steward chat` shows the diff stat and asks for a commit message; the steward
-  (not the CLI) commits and pushes with the normal push rules, only to an existing steward branch.
+- On exit, if there are uncommitted changes or unpushed commits, `steward chat` says so; pushing happens through the
+  `push` tool inside the session, like any agent run.
 
 **Brain constraint.** Chat requires `brain.kind: "claude-code"` (openai-agents cannot resume). Config load rejects
 chat settings otherwise, like `greptile`.
@@ -264,7 +280,8 @@ image must use the native binary.
 1. Linear becomes labels-only and enrich is removed (Part 2b). Independent of the container; first, since it shrinks
    the code the later parts touch.
 2. Container stack (Part 1) including migration of the live host. Shippable alone.
-3. Session retention and worktree re-creation, then the `chat` job kind on MR notes, then `steward chat` (Part 2).
+3. The `push` tool and agent commits, moving implement and fix onto them; then session retention and worktree
+   re-creation, the `chat` job kind on MR notes, and `steward chat` (Part 2).
 4. Orbit in the image and agent config (Part 3). Can run in parallel with 3 after 2.
 
 ## Left to the builder
