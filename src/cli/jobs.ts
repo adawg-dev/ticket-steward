@@ -2,9 +2,10 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import type { Command } from "commander";
 import { z } from "zod";
+import { retentionProtection } from "../chat/session.js";
 import { openStores, type Job, type JobStatus, type Loop } from "../store/index.js";
 import { sessionsDir } from "../core/workspace.js";
-import { loopProtection, sweep } from "../workspace/retention.js";
+import { sweep } from "../workspace/retention.js";
 import { fail, loadFromProgram, println, type CliContext } from "./context.js";
 import { reportOutcome, runInline, tailJob, withRunLock } from "./inline.js";
 import { artifactsDir, jobsDir, workRoot } from "./paths.js";
@@ -145,7 +146,7 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
           jobsDir: jobsDir(config.dataDir),
           keptWorktrees: config.retention.keptWorktrees,
           days: config.retention.days,
-          ...loopProtection(root, stores.loops.keptWithin(config.retention.days)),
+          ...retentionProtection(stores, config),
           sessionsDir: sessionsDir(config),
         });
         const deliveries = stores.deliveries.prune(DELIVERY_RETENTION_DAYS);

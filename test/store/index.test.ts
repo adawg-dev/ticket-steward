@@ -1,7 +1,8 @@
-import { statSync } from "node:fs";
+import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import BetterSqlite3 from "better-sqlite3";
 import { openStores, transaction } from "../../src/store/index.js";
+import { sessionProjectDir } from "../../src/workspace/retention.js";
 import { createdEvent, freshDataDir } from "./helpers.js";
 
 beforeEach(() => {
@@ -66,6 +67,32 @@ describe("openStores", () => {
     old.close();
     const stores = openStores(dir);
     expect(stores.jobs.list({ limit: 5 })[0]).toMatchObject({ kind: "enrich", subject: null, wakeRequested: false });
+    stores.db.close();
+  });
+
+  it("backfills an older implement job's worktree from where its session transcript is, and its base from the stored result", () => {
+    const dir = freshDataDir();
+    const first = openStores(dir);
+    const event = { kind: "cli", issueId: "i", identifier: "API-1", teamKey: "API", action: "implement" } as const;
+    const stable = first.jobs.enqueue(event);
+    const perAttempt = first.jobs.enqueue(event);
+    const lost = first.jobs.enqueue(event);
+    for (const id of [stable, perAttempt, lost]) first.jobs.recordSession(id, `session-${id}`);
+    first.db.prepare("UPDATE jobs SET attempts = 2, implement_result = ? WHERE id = ?").run(JSON.stringify({ result: null, handback: null, baseSha: "b".repeat(40) }), perAttempt);
+    first.db.close();
+    const transcript = (name: string, sessionId: string): void => {
+      const projectDir = join(dir, "sessions", "projects", sessionProjectDir(join(dir, "work", name)));
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, `${sessionId}.jsonl`), "{}\n");
+    };
+    transcript("ticket-API-1", `session-${stable}`);
+    transcript(`${perAttempt}-2`, `session-${perAttempt}`);
+
+    const stores = openStores(dir);
+
+    expect(stores.jobs.get(stable)).toMatchObject({ worktreeName: "ticket-API-1", baseSha: null });
+    expect(stores.jobs.get(perAttempt)).toMatchObject({ worktreeName: `${perAttempt}-2`, baseSha: "b".repeat(40) });
+    expect(stores.jobs.get(lost)).toMatchObject({ worktreeName: null, baseSha: null });
     stores.db.close();
   });
 

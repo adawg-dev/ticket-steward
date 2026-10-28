@@ -153,6 +153,8 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   let prompt: string;
   try {
     worktree = await prepareWorkspace(ctx, deps, paths, env, baseSha, onWorktree);
+    // Where the session will be keyed: a later chat recreates this worktree at this path when it is gone.
+    if (!ctx.dryRun) deps.stores.jobs.recordWorkspace(ctx.jobId, paths.worktreeName, baseSha);
     const brief = extractAgentBrief(bundle.description);
     prompt = renderImplementPrompt(await readFile(settings.prompt, "utf8"), {
       identifier: ctx.identifier,

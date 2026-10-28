@@ -1,7 +1,8 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import BetterSqlite3 from "better-sqlite3";
 import { z } from "zod";
+import { sessionProjectDir } from "../workspace/retention.js";
 
 export type Database = BetterSqlite3.Database;
 
@@ -31,7 +32,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   commit_sha TEXT,
   pushed_at TEXT,
   fix_result TEXT,
-  wake_requested INTEGER NOT NULL DEFAULT 0
+  wake_requested INTEGER NOT NULL DEFAULT 0,
+  worktree_name TEXT,
+  base_sha TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_issue_status ON jobs (issue_id, status);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status);
@@ -110,6 +113,8 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }
   { table: "jobs", column: "pushed_at", definition: "TEXT" },
   { table: "jobs", column: "fix_result", definition: "TEXT" },
   { table: "jobs", column: "wake_requested", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "jobs", column: "worktree_name", definition: "TEXT" },
+  { table: "jobs", column: "base_sha", definition: "TEXT" },
 ];
 
 /** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */
@@ -138,6 +143,42 @@ const dropRemovedTables = (db: Database): void => {
   for (const table of DROPPED_TABLES) db.exec(`DROP TABLE IF EXISTS ${table}`);
 };
 
+const LegacySessionJobs = z.array(
+  z.object({ id: z.number(), identifier: z.string(), attempts: z.number(), session_id: z.string(), implement_result: z.string().nullable() }),
+);
+
+/** The `baseSha` a stored implement result carries, or null. */
+const storedBaseSha = (raw: string | null): string | null => {
+  if (raw === null) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return typeof value === "object" && value !== null && "baseSha" in value && typeof value.baseSha === "string" ? value.baseSha : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Implement jobs from before `worktree_name`/`base_sha` were recorded: the worktree is whichever name it could have had (the
+ * ticket's stable one, `stableWorktreeName`, or `<id>-<attempt>`) that holds the job's session transcript; the base comes from the stored result.
+ * A job with no transcript on disk stays as it is.
+ */
+const backfillJobWorkspaces = (db: Database, dataDir: string): void => {
+  const rows = LegacySessionJobs.parse(
+    db
+      .prepare("SELECT id, identifier, attempts, session_id, implement_result FROM jobs WHERE kind = 'implement' AND session_id IS NOT NULL AND worktree_name IS NULL")
+      .all(),
+  );
+  const update = db.prepare<[string, string | null, number]>("UPDATE jobs SET worktree_name = ?, base_sha = COALESCE(base_sha, ?) WHERE id = ?");
+  for (const row of rows) {
+    const candidates = [`ticket-${row.identifier}`, ...Array.from({ length: row.attempts }, (_, i) => `${row.id}-${row.attempts - i}`)];
+    const name = candidates.find((candidate) =>
+      existsSync(join(dataDir, "sessions", "projects", sessionProjectDir(join(dataDir, "work", candidate)), `${row.session_id}.jsonl`)),
+    );
+    if (name !== undefined) update.run(name, storedBaseSha(row.implement_result), row.id);
+  }
+};
+
 export const DB_FILENAME = "steward.db";
 
 export const openDatabase = (dataDir: string): Database => {
@@ -152,6 +193,7 @@ export const openDatabase = (dataDir: string): Database => {
   db.prepare(FAIL_REMOVED_REVIEWS).run(nowIso());
   db.exec(POST_MIGRATIONS);
   dropRemovedTables(db);
+  backfillJobWorkspaces(db, dataDir);
   return db;
 };
 

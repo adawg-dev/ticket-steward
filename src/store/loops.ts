@@ -178,6 +178,7 @@ export class LoopStore {
   private readonly selectActive;
   private readonly selectStranded;
   private readonly selectKept;
+  private readonly selectSessionWorktrees;
   private readonly storeHistory;
 
   constructor(private readonly db: Database) {
@@ -199,6 +200,15 @@ export class LoopStore {
        ORDER BY l.id`,
     );
     this.selectKept = db.prepare<[string], LoopRow>("SELECT * FROM loops WHERE ended_at IS NULL OR ended_at >= ? ORDER BY id");
+    // Like jobs' sessions: active while the loop runs, then until the ticket's last job, hand-back or end is `since` old.
+    this.selectSessionWorktrees = db.prepare<[string, string], { worktree_name: string }>(
+      `SELECT DISTINCT l.worktree_name FROM loops l
+       WHERE l.session_id IS NOT NULL
+         AND (l.ended_at IS NULL
+           OR MAX(l.created_at, COALESCE(l.handed_back_at, ''), l.ended_at) >= ?
+           OR EXISTS (SELECT 1 FROM jobs a WHERE a.issue_id = l.issue_id AND COALESCE(a.finished_at, a.started_at, a.created_at) >= ?))
+       ORDER BY l.worktree_name`,
+    );
     this.storeHistory = db.prepare<[string, number]>("UPDATE loops SET history = ? WHERE id = ?");
   }
 
@@ -268,13 +278,19 @@ export class LoopStore {
       .run(...sets.map(({ value }) => value), id);
   }
 
-  /** Adds a round to the history; throws rather than overwrite a stored history it cannot read. */
   /** Loops not ended, or ended within the last `days`: the ones whose worktree and sessions retention keeps. */
   keptWithin(days: number): Loop[] {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     return this.selectKept.all(cutoff.toISOString()).map((row) => toLoop(row).loop);
   }
 
+  /** Worktree names of loop sessions not ended or active at or after `since`; retention keeps their session dirs. */
+  sessionWorktreesActiveSince(since: Date): string[] {
+    const at = since.toISOString();
+    return this.selectSessionWorktrees.all(at, at).map((row) => row.worktree_name);
+  }
+
+  /** Adds a round to the history; throws rather than overwrite a stored history it cannot read. */
   appendRound(id: number, round: LoopRound): void {
     this.db.transaction(() => {
       const row = this.selectById.get(id);

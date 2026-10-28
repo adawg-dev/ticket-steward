@@ -181,6 +181,26 @@ describe("greptile config", () => {
   });
 });
 
+describe("chat config", () => {
+  it("is absent by default", () => {
+    expect(StewardConfigSchema.parse(minimalInput).chat).toBeUndefined();
+  });
+
+  it("defaults the prefix and session retention", () => {
+    expect(StewardConfigSchema.parse({ ...minimalInput, chat: {} }).chat).toEqual({ prefix: "/agent", sessionRetentionDays: 180 });
+  });
+
+  it("rejects a non-positive retention", () => {
+    expect(messages({ ...minimalInput, chat: { sessionRetentionDays: 0 } })).toHaveLength(1);
+  });
+
+  it("requires the claude-code brain", () => {
+    expect(messages({ ...minimalInput, brain: { kind: "openai-agents", model: "m", maxTurns: 1, timeoutMinutes: 1 }, chat: {} })).toContain(
+      'chat requires brain.kind "claude-code"',
+    );
+  });
+});
+
 describe("slots config", () => {
   const slotsInput = { count: 2, appPortBase: 4100 };
   const withSlots = (slots: Record<string, unknown>, workspace: Record<string, unknown> = {}): unknown => ({

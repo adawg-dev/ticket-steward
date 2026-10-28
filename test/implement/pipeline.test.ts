@@ -455,6 +455,7 @@ describe("the fix loop start", () => {
     expect(brain.calls[0]?.workspacePath).toBe(join(repo.dataDir, "work", "ticket-API-1"));
     const job = stores.jobs.get(ctx.jobId);
     expect(job?.sessionId).toBe("session-impl");
+    expect(job).toMatchObject({ worktreeName: "ticket-API-1", baseSha: await git(repo.repo, ["rev-parse", "main"]) });
     const loop = stores.loops.forImplementJob(ctx.jobId);
     expect(loop).toMatchObject({ headSha: job?.commitSha, sessionId: "session-impl", worktreeName: "ticket-API-1", branch: BRANCH, labelDriven: true, round: 0 });
     expect(loop?.baseSha).toBe(await git(repo.repo, ["rev-parse", "main"]));

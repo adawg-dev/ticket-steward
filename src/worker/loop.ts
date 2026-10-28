@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { MAX_SLOTS, RESOURCE_GUARD_DEFAULTS, type ResourceGuardConfig } from "../config/schema.js";
+import { retentionProtection } from "../chat/session.js";
 import { acquireRunLock } from "../core/lock.js";
 import { redactOutcome, sessionsDir } from "../core/workspace.js";
 import type { PipelineDeps } from "../core/deps.js";
@@ -12,7 +13,7 @@ import { handBackStranded } from "../greptile/stranded.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
 import { RETIRED_KIND_ERROR, unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
-import { loopProtection, sweep } from "../workspace/retention.js";
+import { sweep } from "../workspace/retention.js";
 import { holdReason, sampleResources, type Hold, type ResourceSample } from "./resources.js";
 
 export interface WorkerOptions {
@@ -366,7 +367,7 @@ class Worker {
         jobsDir: join(config.dataDir, "jobs"),
         keptWorktrees: config.retention.keptWorktrees,
         days: config.retention.days,
-        ...loopProtection(workRoot, stores.loops.keptWithin(config.retention.days)),
+        ...retentionProtection(stores, config),
         sessionsDir: sessionsDir(config),
       });
       const deliveries = stores.deliveries.prune(DELIVERY_RETENTION_DAYS);

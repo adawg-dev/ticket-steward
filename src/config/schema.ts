@@ -97,6 +97,15 @@ const ResourceGuardSchema = z.object({
   startSpacingSeconds: z.number().nonnegative().default(30),
 });
 
+/** Retention keeps a session this long after its ticket's last activity, with or without a `chat` block. */
+export const DEFAULT_SESSION_RETENTION_DAYS = 180;
+
+/** Resuming an agent's session from an MR note that starts with `prefix`. */
+const ChatSchema = z.object({
+  prefix: z.string().min(1).default("/agent"),
+  sessionRetentionDays: z.number().int().positive().default(DEFAULT_SESSION_RETENTION_DAYS),
+});
+
 export const StewardConfigSchema = z.object({
   dataDir: z.string(),
   brain: z.discriminatedUnion("kind", [
@@ -152,11 +161,16 @@ export const StewardConfigSchema = z.object({
   greptile: GreptileSchema.optional(),
   /** Unset applies RESOURCE_GUARD_DEFAULTS. */
   resourceGuard: ResourceGuardSchema.optional(),
+  /** Talking to a ticket's agent session again; unset means no comment-driven chat (sessions are still kept for 180 days). */
+  chat: ChatSchema.optional(),
 }).superRefine((config, ctx) => {
   if (config.greptile !== undefined) {
     if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["greptile"], message: "greptile requires implement" });
     if (config.codehost.kind !== "gitlab") ctx.addIssue({ code: "custom", path: ["greptile"], message: 'greptile requires codehost.kind "gitlab"' });
     if (config.brain.kind !== "claude-code") ctx.addIssue({ code: "custom", path: ["greptile"], message: 'greptile requires brain.kind "claude-code"' });
+  }
+  if (config.chat !== undefined && config.brain.kind !== "claude-code") {
+    ctx.addIssue({ code: "custom", path: ["chat"], message: 'chat requires brain.kind "claude-code"' });
   }
   if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["implement"], message: "implement is required" });
   if (config.implement !== undefined && config.tracker.labels === undefined) {
@@ -178,6 +192,7 @@ export type CodeHostConfig = StewardConfig["codehost"];
 export type LabelsConfig = NonNullable<StewardConfig["tracker"]["labels"]>;
 export type ImplementConfig = NonNullable<StewardConfig["implement"]>;
 export type GreptileConfig = NonNullable<StewardConfig["greptile"]>;
+export type ChatConfig = NonNullable<StewardConfig["chat"]>;
 export type ResourceGuardConfig = z.infer<typeof ResourceGuardSchema>;
 export const RESOURCE_GUARD_DEFAULTS: ResourceGuardConfig = ResourceGuardSchema.parse({});
 export type SlotsConfig = NonNullable<StewardConfig["slots"]>;

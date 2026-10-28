@@ -35,6 +35,10 @@ export interface Job {
   pushedAt: string | null;
   /** The brain session this job's run left, for the fix loop to resume. */
   sessionId: string | null;
+  /** The worktree (`work/<name>`) an implement job ran in; its session is keyed by that path. */
+  worktreeName: string | null;
+  /** The base commit an implement job's worktree started from. */
+  baseSha: string | null;
   error: string | null;
   createdAt: string;
   startedAt: string | null;
@@ -67,6 +71,8 @@ interface JobRow {
   commit_sha: string | null;
   pushed_at: string | null;
   session_id: string | null;
+  worktree_name: string | null;
+  base_sha: string | null;
   error: string | null;
   created_at: string;
   started_at: string | null;
@@ -109,6 +115,8 @@ const toJob = (row: JobRow): Job => {
     commitSha: row.commit_sha,
     pushedAt: row.pushed_at,
     sessionId: row.session_id,
+    worktreeName: row.worktree_name,
+    baseSha: row.base_sha,
     error: row.error,
     createdAt: row.created_at,
     startedAt: row.started_at,
@@ -157,6 +165,9 @@ export class JobStore {
   private readonly storeCommit;
   private readonly storePushed;
   private readonly storeSession;
+  private readonly storeWorkspace;
+  private readonly selectLatestSession;
+  private readonly selectSessionWorktrees;
   private readonly complete;
   private readonly deferRetry;
   private readonly deferUntil;
@@ -210,6 +221,18 @@ export class JobStore {
     this.storeCommit = db.prepare<[string, string, number]>("UPDATE jobs SET branch = ?, commit_sha = ?, pushed_at = NULL WHERE id = ?");
     this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
     this.storeSession = db.prepare<[string, number]>("UPDATE jobs SET session_id = ? WHERE id = ?");
+    this.storeWorkspace = db.prepare<[string, string, number]>("UPDATE jobs SET worktree_name = ?, base_sha = ? WHERE id = ?");
+    this.selectLatestSession = db.prepare<[string], JobRow>(
+      `SELECT * FROM jobs WHERE issue_id = ? AND kind = 'implement' AND session_id IS NOT NULL AND worktree_name IS NOT NULL
+       ORDER BY id DESC LIMIT 1`,
+    );
+    // A session's last activity is its ticket's: any later job on the ticket (a fix round, a chat) may have resumed it.
+    this.selectSessionWorktrees = db.prepare<[string], { worktree_name: string }>(
+      `SELECT DISTINCT j.worktree_name FROM jobs j
+       WHERE j.session_id IS NOT NULL AND j.worktree_name IS NOT NULL
+         AND EXISTS (SELECT 1 FROM jobs a WHERE a.issue_id = j.issue_id AND COALESCE(a.finished_at, a.started_at, a.created_at) >= ?)
+       ORDER BY j.worktree_name`,
+    );
     this.complete = db.prepare<[JobStatus, string | null, string, number]>(
       "UPDATE jobs SET status = ?, error = ?, finished_at = ?, not_before = NULL, wake_requested = 0 WHERE id = ?",
     );
@@ -304,6 +327,22 @@ export class JobStore {
 
   recordSession(id: number, sessionId: string): void {
     this.storeSession.run(sessionId, id);
+  }
+
+  /** Where an implement job's worktree is and which commit it started from, recorded before its brain runs. */
+  recordWorkspace(id: number, worktreeName: string, baseSha: string): void {
+    this.storeWorkspace.run(worktreeName, baseSha, id);
+  }
+
+  /** The ticket's newest implement job that left a brain session in a recorded worktree. */
+  latestImplementSession(issueId: string): Job | null {
+    const row = this.selectLatestSession.get(issueId);
+    return row === undefined ? null : toJob(row);
+  }
+
+  /** Worktree names of job sessions whose ticket saw activity at or after `since`; retention keeps their session dirs. */
+  sessionWorktreesActiveSince(since: Date): string[] {
+    return this.selectSessionWorktrees.all(since.toISOString()).map((row) => row.worktree_name);
   }
 
   /** Claims the oldest due job; `waitsOnly` limits it to await_review jobs, which poll APIs and need no host resources. */

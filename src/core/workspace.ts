@@ -103,6 +103,32 @@ const startSlot = async (ctx: RunContext, deps: PipelineDeps, appPort: number): 
   }
 };
 
+/**
+ * Lays the steward's files into a worktree for a run on `port` (and `slot`, with `slots`): the overlay (port-rewritten and
+ * slot-overridden) and skills, then, with `setup`, `workspace.setup`. Returns the redacted setup tail when setup fails.
+ */
+export const furnishWorktree = async (
+  deps: Pick<PipelineDeps, "config" | "redactor" | "signal">,
+  worktreePath: string,
+  env: Record<string, string>,
+  placement: { port: number; slot: Slot | null; setup: boolean },
+): Promise<{ setupTail: string } | null> => {
+  const { config } = deps;
+  const { port, slot } = placement;
+  await mkdir(sessionsDir(config), { recursive: true, mode: 0o700 });
+  const portRewrite = config.workspace.portRewrite === undefined ? {} : { portRewrite: { from: config.workspace.portRewrite.from, to: port } };
+  const overrides = slot === null || config.slots === undefined ? {} : { overrides: renderSlotEnv(config.slots.env, slot) };
+  await copyOverlay(config.workspace.overlayDir, worktreePath, { ...portRewrite, ...overrides });
+  await copySkills(config.workspace.skillsDir, worktreePath);
+  if (!placement.setup) return null;
+  const setup = await runSetup(config.workspace.setup, worktreePath, env, {
+    timeoutMs: config.workspace.setupTimeoutMinutes * MINUTE_MS,
+    tailBytes: SETUP_TAIL_BYTES,
+    ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+  });
+  return setup.ok ? null : { setupTail: deps.redactor.redact(setup.tail) };
+};
+
 /** Brings the job's slot up (with `slots`), creates the worktree at `sha`, then lays down the artifacts dir, overlay and skills, and runs setup. */
 export const prepareWorkspace = async (
   ctx: RunContext,
@@ -112,26 +138,16 @@ export const prepareWorkspace = async (
   sha: string,
   onWorktree: (worktree: Worktree) => void,
 ): Promise<Worktree> => {
-  const { config, mirror } = deps;
+  const { mirror } = deps;
   const port = jobPort(deps);
   const slot = await startSlot(ctx, deps, port);
   const worktree = await createWorktree(mirror, paths.workRoot, paths.worktreeName, sha);
   onWorktree(worktree);
   await mkdir(paths.artifactsDir, { recursive: true, mode: 0o700 });
-  await mkdir(sessionsDir(config), { recursive: true, mode: 0o700 });
-  const portRewrite = config.workspace.portRewrite === undefined ? {} : { portRewrite: { from: config.workspace.portRewrite.from, to: port } };
-  const overrides = slot === null || config.slots === undefined ? {} : { overrides: renderSlotEnv(config.slots.env, slot) };
-  await copyOverlay(config.workspace.overlayDir, worktree.path, { ...portRewrite, ...overrides });
-  await copySkills(config.workspace.skillsDir, worktree.path);
-  const setup = await runSetup(config.workspace.setup, worktree.path, env, {
-    timeoutMs: config.workspace.setupTimeoutMinutes * MINUTE_MS,
-    tailBytes: SETUP_TAIL_BYTES,
-    ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-  });
-  if (!setup.ok) {
-    const tail = deps.redactor.redact(setup.tail);
-    patchAttempt(ctx, deps, { setupTail: tail });
-    throw new Error(`setup failed:\n${tail}`);
+  const failed = await furnishWorktree(deps, worktree.path, env, { port, slot, setup: true });
+  if (failed !== null) {
+    patchAttempt(ctx, deps, { setupTail: failed.setupTail });
+    throw new Error(`setup failed:\n${failed.setupTail}`);
   }
   return worktree;
 };

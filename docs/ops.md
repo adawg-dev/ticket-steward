@@ -434,8 +434,12 @@ With no open MR to resume on, the restart says so in a note on the loop's last M
 (`round 1: 3/5 ...`) for the loop's jobs and for the implement job.
 
 **Sessions.** The brain's sessions live in `dataDir/sessions` (`CLAUDE_CONFIG_DIR`), one per ticket, and the loop's worktree
-is the stable `ticket-<KEY>`. Both are kept for active loops and for `retention.days` after a loop ends; `steward jobs gc`
-and the hourly sweep then remove them. The brain never receives GitLab, Linear or Greptile credentials.
+is the stable `ticket-<KEY>`. Loop worktrees are kept for active loops and for `retention.days` after a loop ends;
+`steward jobs gc` and the hourly sweep then remove them. Session directories are small and are kept much longer: for
+`chat.sessionRetentionDays` (default 180, with or without a `chat` block) after the ticket's last job, so an agent's
+session can be resumed after its worktree is gone. Resuming recreates the worktree at the same path (sessions are keyed
+by path) at the branch head, or at the implement job's base when nothing was pushed, then copies the overlay and runs
+`workspace.setup` again. The brain never receives GitLab, Linear or Greptile credentials.
 
 ### 1.8 Doctor, then start the service
 
