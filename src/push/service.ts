@@ -5,7 +5,7 @@ import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
 import { errorMessage, jobDirOf } from "../core/workspace.js";
 import { branchName } from "../implement/branch.js";
-import { BranchExistsError, guardRange, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, type PushMode } from "../implement/git.js";
+import { BranchExistsError, guardRange, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, uncommittedPaths, type PushMode } from "../implement/git.js";
 import { CHECK_TAIL_BYTES, guardSecrets, lsRemoteSite, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
 import { transaction, type Push } from "../store/index.js";
 import { gitOrThrow } from "../workspace/git.js";
@@ -93,17 +93,6 @@ const startOf = (deps: PushDeps, target: PushTarget): Start | PushResult => {
   return { kind: "fastForward", branch: target.branch, base: target.baseSha };
 };
 
-/** Uncommitted paths in the worktree, leaving out the files the steward copied in (overlay, skills). */
-const uncommitted = async (worktreePath: string, stewardFiles: string[]): Promise<string[]> => {
-  const steward = new Set(stewardFiles);
-  const out = await gitOrThrow(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], worktreePath);
-  return out
-    .split("\0")
-    .filter((entry) => entry !== "")
-    .map((entry) => entry.slice(3))
-    .filter((path) => !steward.has(path));
-};
-
 /** Commits in `base..head` whose subject does not start with `<identifier>: `. */
 const unprefixed = async (worktreePath: string, base: string, head: string, identifier: string): Promise<string[]> => {
   const log = await gitOrThrow(["log", "--format=%h %s", `${base}..${head}`], worktreePath, NO_REPLACE);
@@ -154,7 +143,7 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   // 1. Only committed work is pushed.
   const { files: overlayFiles, secrets } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
   const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
-  const dirty = await uncommitted(worktreePath, stewardFiles);
+  const dirty = await uncommittedPaths(worktreePath, stewardFiles);
   if (dirty.length > 0) return refuse("commit or discard your changes first", dirty.join("\n"));
 
   // 2. New, merge-free commits on the head the push starts from.

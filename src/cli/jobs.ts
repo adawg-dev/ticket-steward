@@ -40,7 +40,7 @@ const retryMode = (job: Job): string => {
     const stored = job.implementResult;
     if (stored === null) return `job ${job.id}: full run`;
     if (stored.handback !== null) return `job ${job.id}: publish-only (hand-back stored; labels only, nothing to push)`;
-    if (job.pushedAt === null) return `job ${job.id}: publish-only (push ${job.branch ?? "?"} from the bundle, then labels)`;
+    if (job.pushedAt === null) return `job ${job.id}: publish-only (check whether ${job.branch ?? "?"} landed, then labels; never pushes)`;
     return `job ${job.id}: publish-only (${job.branch ?? "?"} already pushed; labels only)`;
   }
   return `job ${job.id}: fails (${job.kind} was removed)`;

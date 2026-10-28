@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { buildBrainEnv, buildWorkspaceEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
+import { buildBrainEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
 import type { BrainRun } from "../brain/types.js";
 import type { ImplementConfig } from "../config/schema.js";
 import { renderTicketMarkdown } from "../core/context.js";
@@ -11,24 +11,22 @@ import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, stableWorktreeName, type JobPaths } from "../core/workspace.js";
 import { isLabelImplement, startLoop } from "../greptile/start.js";
+import type { PushTarget } from "../push/target.js";
+import { transaction, type Job } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
-import { git } from "../workspace/git.js";
 import { injectToken, splitCredentials, type RemoteCredentials } from "../workspace/mirror.js";
-import { runSetup } from "../workspace/setup.js";
 import type { Worktree } from "../workspace/worktree.js";
-import { branchName } from "./branch.js";
 import { extractAgentBrief } from "./brief.js";
-import { BranchExistsError, bundleBase, commitWithHooks, guardCommit, installHookWrappers, pushCommit, type PushMode, remoteTicketBranches, saveBundle, stageAndGuard } from "./git.js";
+import { bundleBase, remoteTicketBranches, unpushedWork } from "./git.js";
 import { renderImplementPrompt } from "./prompt.js";
 import { publishImplement } from "./publish.js";
 import { validateImplementResult, type Handback, type StoredImplement } from "./result.js";
 
-const MINUTE_MS = 60_000;
 /** How much of a failed check's output a hand-back keeps. */
 export const CHECK_TAIL_BYTES = 8 * 1024;
-const BUNDLE_FILE = "implement.bundle";
-const PUSH_REPO = "push.git";
+/** Where the steward bundled its own commit before the push tool; read only to start the loop for such a job on retry. */
+const LEGACY_BUNDLE_FILE = "implement.bundle";
 const LS_REMOTE_DIR = "ls-remote";
 const SKILLS_PREFIX = ".claude/skills/";
 
@@ -65,27 +63,6 @@ export const lsRemoteSite = async (paths: Pick<JobPaths, "jobDir">, remote: Remo
   return { cwd, remote: { url: remote.url, env: { ...remote.env, GIT_CEILING_DIRECTORIES: paths.jobDir } } };
 };
 
-/** Pushes the bundled commit from a scratch repo in the job dir; never from the worktree or mirror (agent-writable config). */
-const pushFromBundle = async (input: { paths: JobPaths; deps: PipelineDeps; remote: RemoteCredentials; sha: string; baseSha: string; branch: string; identifier: string; branchTypes: string[]; mode: PushMode }): Promise<void> => {
-  const scratchDir = join(input.paths.jobDir, PUSH_REPO);
-  try {
-    await pushCommit({
-      scratchDir,
-      objectsDir: join(input.deps.mirror.path, "objects"),
-      bundlePath: join(input.paths.jobDir, BUNDLE_FILE),
-      remote: input.remote,
-      sha: input.sha,
-      baseSha: input.baseSha,
-      branch: input.branch,
-      identifier: input.identifier,
-      branchTypes: input.branchTypes,
-      mode: input.mode,
-    });
-  } finally {
-    await rm(scratchDir, { recursive: true, force: true });
-  }
-};
-
 /** With `greptile`, a label-triggered implement starts a fix loop once it pushes. */
 const startsLoop = (ctx: RunContext, deps: PipelineDeps): boolean => deps.config.greptile !== undefined && isLabelImplement(ctx.trigger);
 
@@ -112,8 +89,8 @@ export const commitMessage = (identifier: string, message: string): string => {
 const dryRunHandback = ({ reason, detail }: Handback): string => (detail === "" ? `dry run: would hand back: ${reason}` : `dry run: would hand back: ${reason}\n${detail}`);
 
 /** Stored, then published; dry runs stop before storing. */
-const finish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredImplement, branch: string | null): Promise<JobOutcome> => {
-  if (ctx.dryRun) return { status: "succeeded", warning: stored.handback === null ? `dry run: would push ${branch ?? "?"}` : dryRunHandback(stored.handback) };
+const finish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredImplement): Promise<JobOutcome> => {
+  if (ctx.dryRun) return { status: "succeeded", warning: stored.handback === null ? "dry run: would publish" : dryRunHandback(stored.handback) };
   deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
   return publishImplement({ ctx, tracker: deps.tracker, labels: deps.config.tracker.labels, stored });
 };
@@ -122,6 +99,32 @@ const finish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredImpleme
 export const guardSecrets = async (overlayDir: string, stewardSecrets: Record<string, string | undefined>): Promise<{ files: string[]; secrets: string[] }> => {
   const files = existsSync(overlayDir) ? await listFiles(overlayDir) : [];
   return { files, secrets: collectSecretValues(stewardSecrets, files.map((file) => join(overlayDir, file))) };
+};
+
+/** The job's pushed branch when it is on the remote: an earlier attempt's agent pushed before the attempt stopped. */
+const ownBranch = (job: Job | null, existing: Array<{ ref: string }>): string | null => {
+  const branch = job?.branch ?? null;
+  return branch !== null && existing.some(({ ref }) => ref === `refs/heads/${branch}`) ? branch : null;
+};
+
+/**
+ * Whether the job's push landed. The push tool marks it; a push recorded but never marked (the tool stopped between the
+ * push and its record) landed when the remote branch is at the recorded commit, and is marked here. Never pushes.
+ */
+const pushLanded = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, remote: RemoteCredentials): Promise<boolean> => {
+  const { stores } = deps;
+  const job = stores.jobs.get(ctx.jobId);
+  if (job === null || job.branch === null || job.commitSha === null) return false;
+  if (job.pushedAt !== null) return true;
+  const site = await lsRemoteSite(paths, remote);
+  const existing = await remoteTicketBranches(site.remote, site.cwd, ctx.identifier);
+  if (!existing.some(({ ref, sha }) => ref === `refs/heads/${job.branch}` && sha === job.commitSha)) return false;
+  const push = stores.pushes.latest(ctx.jobId);
+  transaction(stores.db, () => {
+    if (push !== null && push.pushedAt === null && push.sha === job.commitSha) stores.pushes.markPushed(push.id);
+    stores.jobs.markPushed(ctx.jobId);
+  });
+  return true;
 };
 
 const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree: (worktree: Worktree) => void): Promise<JobOutcome> => {
@@ -144,8 +147,11 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
   }
+  // A rerun after the agent pushed (the attempt was interrupted later) never runs the brain again over its own branch.
+  const own = ctx.dryRun ? null : ownBranch(deps.stores.jobs.get(ctx.jobId), existing);
+  if (own !== null) return finish(ctx, deps, { result: null, handback: handback("readyForHuman", "an earlier attempt stopped after the agent pushed", own) });
   if (existing[0] !== undefined) {
-    return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) }, null);
+    return finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) });
   }
 
   const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config), deps.config.implement?.commitAuthor);
@@ -174,11 +180,15 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
     return prepareFailed(deps, err);
   }
 
+  // The first push creates the ticket's branch on the base; a dry run (no job row) gets no push tool.
+  const push: PushTarget | undefined = ctx.dryRun
+    ? undefined
+    : { jobId: ctx.jobId, worktreePath: worktree.path, identifier: ctx.identifier, issueId: ctx.issueId, mode: "create", branch: null, baseSha, loopId: null, port: jobPort(deps) };
   let run: BrainRun;
   try {
     run = await (deps.runBrain ?? runBrainDetached)(
       deps.config.brain,
-      brainInput(deps, paths, worktree, prompt, env, "implement", { limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns } }),
+      brainInput(deps, paths, worktree, prompt, env, "implement", { limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns }, ...(push === undefined ? {} : { push }) }),
       deps.redactor,
       { ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
     );
@@ -189,73 +199,39 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps, onWorktree:
   if (run.sessionId !== undefined && !ctx.dryRun) deps.stores.jobs.recordSession(ctx.jobId, run.sessionId);
   if (!run.ok) return { status: "failed", error: run.error ?? "brain run failed", retryable: run.error === INTERRUPTED_ERROR };
 
-  const validated = validateImplementResult(run.output, settings.branchTypes);
-  if (!validated.ok) return finish(ctx, deps, { result: null, handback: handback("readyForHuman", "the agent's result was invalid", validated.error) }, null);
+  const validated = validateImplementResult(run.output);
+  if (!validated.ok) return finish(ctx, deps, { result: null, handback: handback("readyForHuman", "the agent's result was invalid", validated.error) });
   const result = validated.result;
-  if (result.outcome === "needs_info") return finish(ctx, deps, { result, handback: handback("needsInfo", "the ticket needs more information") }, null);
-  if (result.outcome === "failed") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent could not finish") }, null);
+  if (result.outcome === "needs_info") return finish(ctx, deps, { result, handback: handback("needsInfo", "the ticket needs more information") });
+  if (result.outcome === "failed") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent could not finish") });
 
-  const { files: overlayFiles, secrets } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
+  const { files: overlayFiles } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
   const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
-  const guard = await stageAndGuard({ worktreePath: worktree.path, stewardFiles, secretValues: secrets });
-  if (!guard.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", guard.reason, guard.detail) }, null);
-
-  const workspaceEnv = buildWorkspaceEnv(jobPort(deps));
-  const checks = stewardChecks(settings.checks, baseSha);
-  const checked = await runSetup(checks, worktree.path, workspaceEnv, {
-    timeoutMs: settings.checksTimeoutMinutes * MINUTE_MS,
-    tailBytes: CHECK_TAIL_BYTES,
-    ...(deps.signal === undefined ? {} : { signal: deps.signal }),
-  });
-  // A shutdown kills the checks; that is an interruption to resume, not a failed check to hand back.
-  if (deps.signal?.aborted === true) return { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
-  if (!checked.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", "the steward's checks failed", deps.redactor.redact(checked.tail)) }, null);
-
-  const branch = branchName(result.branchType ?? "", ctx.identifier, bundle.title);
   if (ctx.dryRun) {
-    const stat = await git(["diff", "--cached", "--stat"], worktree.path);
-    return { status: "succeeded", warning: `dry run: would commit on ${branch}\n${commitMessage(ctx.identifier, result.commitMessage)}\n\n${stat.stdout}` };
+    const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: baseSha, stewardFiles });
+    return { status: "succeeded", warning: `dry run: no push tool; the agent's work on ${baseSha.slice(0, 7)}:\n${work.summary === "" ? "nothing" : work.summary}` };
   }
 
-  // The brain runs for up to an hour; never commit or push for a ticket that was closed meanwhile.
-  let latest: TicketBundle;
+  // The agent pushed through the push tool; the steward only reads the outcome, and never commits or pushes for it.
+  let landed: boolean;
   try {
-    latest = await deps.tracker.fetchTicket(ctx.issueId);
+    landed = await pushLanded(ctx, deps, paths, remote);
   } catch (err) {
-    return { status: "failed", error: errorMessage(err), retryable: true };
-  }
-  const closedNow = closedReason(ctx.identifier, latest.state);
-  if (closedNow !== null) return { status: "failed", error: closedNow, retryable: false };
-
-  const hooksDir = join(paths.jobDir, "hooks");
-  await installHookWrappers(worktree.path, hooksDir);
-  const committed = await commitWithHooks({
-    worktreePath: worktree.path,
-    hooksDir,
-    messagePath: join(paths.jobDir, "COMMIT_MSG"),
-    message: commitMessage(ctx.identifier, result.commitMessage),
-    author: settings.commitAuthor,
-    env: workspaceEnv,
-  });
-  if (!committed.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", "kickoff's commit hooks rejected the change", deps.redactor.redact(committed.output)) }, null);
-  // The hooks ran agent-editable code after the staged guard; push only what passes the same guard as committed.
-  const verified = await guardCommit({ worktreePath: worktree.path, baseSha, sha: committed.sha, stewardFiles, secretValues: secrets });
-  if (!verified.ok) return finish(ctx, deps, { result, handback: handback("readyForHuman", verified.reason, verified.detail) }, null);
-
-  await saveBundle(worktree.path, baseSha, join(paths.jobDir, BUNDLE_FILE));
-  deps.stores.jobs.recordCommit(ctx.jobId, branch, committed.sha);
-  const stored: StoredImplement = { result, handback: null };
-  // Stored before the push, so any failure from here on (even a crash after the push lands) retries via publishImplementOnly.
-  deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
-  try {
-    await pushFromBundle({ paths, deps, remote, sha: committed.sha, baseSha, branch, identifier: ctx.identifier, branchTypes: settings.branchTypes, mode: { kind: "create" } });
-  } catch (err) {
-    if (err instanceof BranchExistsError) return finish(ctx, deps, { result, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(err.ref)) }, null);
+    // Stored first, so the retry settles the push (publishImplementOnly) instead of running the brain again.
+    deps.stores.jobs.saveImplementResult(ctx.jobId, { result, handback: null, baseSha });
     return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
   }
-  deps.stores.jobs.markPushed(ctx.jobId);
+  const pushedSha = landed ? (deps.stores.jobs.get(ctx.jobId)?.commitSha ?? baseSha) : baseSha;
+  const work = await unpushedWork({ worktreePath: worktree.path, pushedSha, stewardFiles });
+  const detail = deps.redactor.redact(work.summary);
+  if (!landed) return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent did not push its change", detail), baseSha });
+  if (work.summary !== "") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent left unpushed work", detail), baseSha });
+
+  const stored: StoredImplement = { result, handback: null, baseSha };
+  // Stored before the loop starts, so a crash from here on retries via publishImplementOnly, which starts it once.
+  deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
   startLoopFor(ctx, deps, paths, baseSha);
-  return finish(ctx, deps, stored, branch);
+  return publishImplement({ ctx, tracker: deps.tracker, labels: deps.config.tracker.labels, stored });
 };
 
 export const runImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
@@ -270,7 +246,10 @@ export const runImplement = async (ctx: RunContext, deps: PipelineDeps): Promise
   return outcome;
 };
 
-/** Retry path: push from the bundle if the push never landed, then labels. Never re-runs the brain or pushes twice. */
+/**
+ * Retry path: settles a push recorded but not marked (landed on the remote → pushed; otherwise hand back), starts the
+ * loop if a crash stopped it, then labels. Never runs the brain and never pushes: only the agent's push tool pushes.
+ */
 export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   const configured = settingsOf(deps);
   if (configured === null) return notConfigured;
@@ -279,39 +258,21 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
   if (job === null || stored === null) return { status: "failed", error: "no stored implement result to publish", retryable: false };
   const paths = implementPaths(ctx, deps);
   if (stored.handback === null && job.pushedAt === null) {
-    if (job.branch === null || job.commitSha === null) return { status: "failed", error: "no recorded commit to push", retryable: false };
-    // Never push for a ticket closed since the failed attempt.
+    let landed: boolean;
     try {
-      const latest = await deps.tracker.fetchTicket(ctx.issueId);
-      const closed = closedReason(ctx.identifier, latest.state);
-      if (closed !== null) return { status: "failed", error: closed, retryable: false };
+      landed = await pushLanded(ctx, deps, paths, configured.remote);
     } catch (err) {
       return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
     }
-    try {
-      // A push that landed before its record was saved (crash window) is ours: the exact branch at the exact commit.
-      const site = await lsRemoteSite(paths, configured.remote);
-      const existing = await remoteTicketBranches(site.remote, site.cwd, ctx.identifier);
-      const landed = existing.some(({ ref, sha }) => ref === `refs/heads/${job.branch}` && sha === job.commitSha);
-      if (!landed) {
-        // The base comes from the bundle header (no git in the mirror); pushCommit still verifies the commit's parent is that base.
-        const baseSha = await bundleBase(join(paths.jobDir, BUNDLE_FILE));
-        await pushFromBundle({ paths, deps, remote: configured.remote, sha: job.commitSha, baseSha, branch: job.branch, identifier: ctx.identifier, branchTypes: configured.settings.branchTypes, mode: { kind: "create" } });
-      }
-    } catch (err) {
-      if (err instanceof BranchExistsError) {
-        // Someone else's branch now carries the ticket (ours at our commit counted as landed above): hand back, naming it.
-        const handedBack: StoredImplement = { result: stored.result, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(err.ref)) };
-        return finish(ctx, deps, handedBack, null);
-      }
-      return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
+    if (!landed) {
+      const detail = job.branch ?? "";
+      return finish(ctx, deps, { result: stored.result, handback: handback("readyForHuman", "the push did not complete", detail), ...(stored.baseSha === undefined ? {} : { baseSha: stored.baseSha }) });
     }
-    deps.stores.jobs.markPushed(ctx.jobId);
   }
   // Also after a crash between the push record and the loop's start; startLoop returns an existing loop untouched.
   if (stored.handback === null && startsLoop(ctx, deps) && deps.stores.loops.forImplementJob(ctx.jobId) === null) {
     try {
-      startLoopFor(ctx, deps, paths, await bundleBase(join(paths.jobDir, BUNDLE_FILE)));
+      startLoopFor(ctx, deps, paths, stored.baseSha ?? (await bundleBase(join(paths.jobDir, LEGACY_BUNDLE_FILE))));
     } catch (err) {
       return { status: "publish_failed", error: `loop: ${errorMessage(err)}` };
     }

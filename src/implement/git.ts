@@ -151,6 +151,34 @@ export const linearRangeProblem = async (cwd: string, baseSha: string, sha: stri
 };
 
 /**
+ * Uncommitted paths in the worktree (changed against `HEAD`, staged or not, and untracked), leaving out the files the
+ * steward copied in (overlay, skills). Name lists, not `git status` lines, whose leading status column git's trimmed
+ * output would cut into.
+ */
+export const uncommittedPaths = async (worktreePath: string, stewardFiles: string[]): Promise<string[]> => {
+  const steward = new Set(stewardFiles);
+  const changed = await gitOrThrow(["diff", "--name-only", "-z", "--no-renames", "HEAD"], worktreePath, NO_REPLACE);
+  const untracked = await gitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], worktreePath);
+  const paths = [...changed.split("\0"), ...untracked.split("\0")].filter((path) => path !== "" && !steward.has(path));
+  return [...new Set(paths)];
+};
+
+/**
+ * What a run left behind that never reached the remote: uncommitted paths and the commits on `HEAD` that `pushedSha`
+ * (the last push, or the base when nothing was pushed) does not contain. `summary` is empty when there is none.
+ */
+export const unpushedWork = async (input: { worktreePath: string; pushedSha: string; stewardFiles: string[] }): Promise<{ uncommitted: string[]; commits: string[]; summary: string }> => {
+  const uncommitted = await uncommittedPaths(input.worktreePath, input.stewardFiles);
+  const log = await gitOrThrow(["log", "--format=%h %s", `${input.pushedSha}..HEAD`], input.worktreePath, NO_REPLACE);
+  const commits = log.split("\n").filter((line) => line !== "");
+  const summary = [
+    ...(uncommitted.length > 0 ? ["uncommitted:", ...uncommitted.map((path) => `  ${path}`)] : []),
+    ...(commits.length > 0 ? ["commits not pushed:", ...commits.map((line) => `  ${line}`)] : []),
+  ].join("\n");
+  return { uncommitted, commits, summary };
+};
+
+/**
  * Writes wrappers for the repo's Husky hooks into `hooksDir` (outside the worktree), so one commit can run them
  * via `-c core.hooksPath` without `husky install` touching the shared mirror config.
  */

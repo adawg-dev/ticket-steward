@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BranchExistsError, type PushMode, bundleBase, commitWithHooks, guardCommit, guardRange, installHookWrappers, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard } from "../../src/implement/git.js";
+import { BranchExistsError, type PushMode, bundleBase, commitWithHooks, guardCommit, guardRange, installHookWrappers, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard, unpushedWork } from "../../src/implement/git.js";
 import { gitEnvRecord } from "../../src/workspace/git.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
@@ -266,6 +266,29 @@ describe("linearRangeProblem", () => {
     expect(await linearRangeProblem(worktree.path, base, one)).toBeNull();
     expect(await linearRangeProblem(worktree.path, base, base)).toBe(`there are no commits on top of ${base.slice(0, 7)}`);
     expect(await linearRangeProblem(worktree.path, one, base)).toBe(`${base.slice(0, 7)} does not descend from ${one.slice(0, 7)}`);
+  });
+});
+
+describe("unpushedWork", () => {
+  it("names modified, staged and untracked paths in full, leaving out the steward's files", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await writeFile(join(worktree.path, "src/b.ts"), "export const b = 1;\n");
+    await git(worktree.path, ["add", "src/b.ts"]);
+    await writeFile(join(worktree.path, "notes.md"), "draft\n");
+    await writeFile(join(worktree.path, "steward.json"), "{}\n");
+
+    const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: base, stewardFiles: ["steward.json"] });
+
+    expect(work).toEqual({ uncommitted: ["src/a.ts", "src/b.ts", "notes.md"], commits: [], summary: "uncommitted:\n  src/a.ts\n  src/b.ts\n  notes.md" });
+  });
+
+  it("lists the commits on HEAD past the pushed sha, and nothing for a clean worktree at it", async () => {
+    expect(await unpushedWork({ worktreePath: worktree.path, pushedSha: base, stewardFiles: [] })).toEqual({ uncommitted: [], commits: [], summary: "" });
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await git(worktree.path, ["commit", "--quiet", "-am", "API-1: one"]);
+    const one = await git(worktree.path, ["rev-parse", "--short=7", "HEAD"]);
+
+    expect(await unpushedWork({ worktreePath: worktree.path, pushedSha: base, stewardFiles: [] })).toEqual({ uncommitted: [], commits: [`${one} API-1: one`], summary: `commits not pushed:\n  ${one} API-1: one` });
   });
 });
 

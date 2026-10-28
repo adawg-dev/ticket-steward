@@ -26,8 +26,6 @@ const issue: TicketBundle = {
 
 const implemented: ImplementResult = {
   outcome: "implemented",
-  branchType: "fix",
-  commitMessage: "Keep the last chunk",
   summary: "Flush the buffer before closing the stream.",
   reviewNotes: ["Check the streaming test.", " "],
   checksRun: ["tsc: ok"],

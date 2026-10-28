@@ -1,13 +1,15 @@
-import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { INTERRUPTED_ERROR, type BrainInput, type BrainRun } from "../../src/brain/types.js";
+import type { BrainInput, BrainRun } from "../../src/brain/types.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import type { ImplementResult } from "../../src/implement/result.js";
 import { publishImplementOnly, runImplement } from "../../src/implement/pipeline.js";
+import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
+import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { TriggerEvent, TicketBundle } from "../../src/tracker/types.js";
 import { SlotClient } from "../../src/workspace/slots.js";
@@ -41,10 +43,10 @@ const issue: TicketBundle = {
 
 const trigger: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: issue.description, stateType: "unstarted", action: "implement" };
 
+const BRANCH = "fix/API-1-adapter-drops-the-last-chunk";
+
 const implemented: ImplementResult = {
   outcome: "implemented",
-  branchType: "fix",
-  commitMessage: "Keep the last chunk\n\nFlush the buffer before closing.",
   summary: "Flush the buffer before closing the stream.",
   reviewNotes: ["Check the streaming test."],
   checksRun: ["tsc: ok"],
@@ -78,15 +80,60 @@ const makeConfig = (implement: Partial<NonNullable<StewardConfig["implement"]>> 
   },
 });
 
-/** A brain that edits the worktree, then returns `result`. */
-const editingBrain = (result: unknown, edit: (workspace: string) => Promise<void> = async (w) => writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n")) => {
+/** The push target the steward gave the run's push server, read back from its command line. */
+const pushTargetOf = (input: BrainInput): PushTarget | null => {
+  const args = input.mcpServers.push?.args;
+  if (args === undefined) return null;
+  return PushTargetSchema.parse(JSON.parse(args[args.indexOf("--target") + 1] ?? "null"));
+};
+
+/** The agent's commit in its worktree. */
+const agentCommit = async (workspace: string, subject: string, file = "src/adapter.ts", content = "export const adapter = 2;\n"): Promise<string> => {
+  await mkdir(join(workspace, file, ".."), { recursive: true });
+  await writeFile(join(workspace, file), content);
+  await git(workspace, ["add", "--", file]);
+  await git(workspace, ["commit", "-q", "-m", subject]);
+  return git(workspace, ["rev-parse", "HEAD"]);
+};
+
+type AgentStep = (workspace: string, push: (branchType?: string | null) => Promise<PushResult>) => Promise<void>;
+
+/** Commits the adapter fix and pushes it as a `fix` branch, as the prompt asks. */
+const commitAndPush: AgentStep = async (workspace, push) => {
+  await agentCommit(workspace, "API-1: Keep the last chunk");
+  await push("fix");
+};
+
+/**
+ * A brain that acts like the agent: `act` edits and commits in the worktree and calls the push tool, here the real push
+ * service with the target the steward put on the push server's command line. Returns `result`.
+ */
+const agentBrain = (result: unknown, act: AgentStep = commitAndPush) => {
   const calls: BrainInput[] = [];
+  const pushes: PushResult[] = [];
+  let deps: PipelineDeps | null = null;
   const runBrain = async (_config: unknown, input: BrainInput): Promise<BrainRun> => {
     calls.push(input);
-    await edit(input.workspacePath);
+    const target = pushTargetOf(input);
+    await act(input.workspacePath, async (branchType = null) => {
+      if (target === null || deps === null) throw new Error("the run has no push tool");
+      // The MCP server turns a thrown error into a refusal; so does this stand-in.
+      const pushed = await pushFromWorktree({ deps, target, branchType }).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: String(err) }));
+      pushes.push(pushed);
+      return pushed;
+    });
     return { ok: true, output: result };
   };
-  return { calls, runBrain };
+  return {
+    calls,
+    pushes,
+    runBrain,
+    /** The push service runs with the job's own deps, as `steward mcp push` builds them from the same config. */
+    bind: (bound: PipelineDeps): PipelineDeps => {
+      deps = bound;
+      return bound;
+    },
+  };
 };
 
 const makeDeps = (runBrain: PipelineDeps["runBrain"], config: StewardConfig = makeConfig()): PipelineDeps => ({
@@ -129,64 +176,164 @@ afterEach(async () => {
   await repo.cleanup();
 });
 
+
+type AgentBrain = ReturnType<typeof agentBrain>;
+
+/** The job's deps with the agent's push tool bound to them. */
+const depsFor = (brain: AgentBrain, config: StewardConfig = makeConfig()): PipelineDeps => brain.bind(makeDeps(brain.runBrain, config));
+
+const remoteBranches = (): Promise<string> => git(repo.repo, ["branch", "--list", "*/API-1-*"]);
+
 describe("runImplement", () => {
-  it("commits, pushes the branch and swaps to agent-implemented, writing nothing else to Linear", async () => {
-    const brain = editingBrain(implemented);
+  it("succeeds once the agent pushed through the push tool, swapping to agent-implemented and nothing else", async () => {
+    const brain = agentBrain(implemented);
     const ctx = claim();
 
-    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
+    const outcome = await runImplement(ctx, depsFor(brain));
 
     expect(outcome).toEqual({ status: "succeeded" });
+    expect(brain.pushes).toMatchObject([{ ok: true, branch: BRANCH, commits: 1 }]);
     const job = stores.jobs.get(ctx.jobId);
-    expect(job?.branch).toBe("fix/API-1-adapter-drops-the-last-chunk");
-    expect(await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe(job?.commitSha);
-    expect(await git(repo.repo, ["log", "-1", "--format=%s", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe("API-1: Keep the last chunk");
+    expect(job?.branch).toBe(BRANCH);
+    expect(await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(job?.commitSha);
+    expect(await git(repo.repo, ["log", "-1", "--format=%s", `refs/heads/${BRANCH}`])).toBe("API-1: Keep the last chunk");
     expect(job?.pushedAt).not.toBeNull();
+    expect(job?.implementResult).toEqual({ result: implemented, handback: null, baseSha: await git(repo.repo, ["rev-parse", "main"]) });
     expect(tracker.labelSwaps()).toEqual([{ issueId: "issue-1", from: "ready-for-agent", to: "agent-implemented" }]);
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
     expect(brain.calls[0]?.output).toBe("implement");
     expect(brain.calls[0]?.timeoutMs).toBe(60_000);
   });
 
-  it("pushes the agent's change without the steward's skills when the repo does not gitignore them", async () => {
+  it("gives the run a push tool that creates the ticket branch on the job's base", async () => {
+    const brain = agentBrain(implemented);
+    const ctx = claim();
+
+    await runImplement(ctx, depsFor(brain));
+
+    const input = brain.calls[0];
+    expect(input === undefined ? null : pushTargetOf(input)).toEqual({
+      jobId: ctx.jobId, worktreePath: input?.workspacePath, identifier: "API-1", issueId: "issue-1", mode: "create", branch: null,
+      baseSha: await git(repo.repo, ["rev-parse", "main"]), loopId: null, port,
+    });
+  });
+
+  it("keeps every commit of a series the agent pushed in two pushes", async () => {
+    const brain = agentBrain(implemented, async (workspace, push) => {
+      await agentCommit(workspace, "API-1: Keep the last chunk");
+      await push("fix");
+      await agentCommit(workspace, "API-1: Test it", "test/adapter.test.ts", "test\n");
+      await push();
+    });
+    const ctx = claim();
+
+    expect(await runImplement(ctx, depsFor(brain))).toEqual({ status: "succeeded" });
+
+    expect(brain.pushes.map((pushed) => pushed.ok)).toEqual([true, true]);
+    expect(await git(repo.repo, ["log", "--format=%s", `main..refs/heads/${BRANCH}`])).toBe("API-1: Test it\nAPI-1: Keep the last chunk");
+    expect(await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(stores.jobs.get(ctx.jobId)?.commitSha);
+  });
+
+  it("hands back when the agent reports implemented without pushing, and the steward neither commits nor pushes", async () => {
+    const brain = agentBrain(implemented, async (workspace) => writeFile(join(workspace, "src/adapter.ts"), "export const adapter = 2;\n"));
+    const ctx = claim();
+
+    const outcome = await runImplement(ctx, depsFor(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent did not push its change" });
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toEqual({ label: "readyForHuman", reason: "the agent did not push its change", detail: "uncommitted:\n  src/adapter.ts" });
+    expect(await remoteBranches()).toBe("");
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
+  });
+
+  it("hands back with the commits when the agent committed but its push was refused", async () => {
+    const brain = agentBrain(implemented, async (workspace, push) => {
+      await agentCommit(workspace, "keep the last chunk");
+      await push("fix");
+    });
+    const ctx = claim();
+
+    const outcome = await runImplement(ctx, depsFor(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent did not push its change" });
+    expect(brain.pushes).toMatchObject([{ ok: false, reason: 'every commit subject must start with "API-1: "; amend or reword these commits' }]);
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback?.detail).toMatch(/^commits not pushed:\n {2}[0-9a-f]{7} keep the last chunk$/);
+    expect(await remoteBranches()).toBe("");
+  });
+
+  it("hands back when the agent left work after its push, never pushing it", async () => {
+    const brain = agentBrain(implemented, async (workspace, push) => {
+      await agentCommit(workspace, "API-1: Keep the last chunk");
+      await push("fix");
+      await agentCommit(workspace, "API-1: Test it", "test/adapter.test.ts", "test\n");
+      await writeFile(join(workspace, "notes.md"), "draft\n");
+    });
+    const ctx = claim();
+
+    const outcome = await runImplement(ctx, depsFor(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent left unpushed work" });
+    const detail = stores.jobs.get(ctx.jobId)?.implementResult?.handback?.detail ?? "";
+    expect(detail).toMatch(/^uncommitted:\n {2}notes\.md\ncommits not pushed:\n {2}[0-9a-f]{7} API-1: Test it$/);
+    expect(await git(repo.repo, ["log", "--format=%s", `main..refs/heads/${BRANCH}`])).toBe("API-1: Keep the last chunk");
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
+  });
+
+  it("does not count the files the steward copied in as unpushed work", async () => {
     const skillsDir = join(repo.root, "skills");
     await mkdir(join(skillsDir, "verify"), { recursive: true });
-    await writeFile(join(skillsDir, "README.md"), "steward skills\n");
     await writeFile(join(skillsDir, "verify/SKILL.md"), "verify\n");
+    await writeFile(join(repo.overlayDir, "steward.json"), "{}\n");
     const config = makeConfig();
     const ctx = claim();
 
-    const outcome = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain, { ...config, workspace: { ...config.workspace, skillsDir } }));
+    const outcome = await runImplement(ctx, depsFor(agentBrain(implemented), { ...config, workspace: { ...config.workspace, skillsDir } }));
 
     expect(outcome).toEqual({ status: "succeeded" });
     const sha = stores.jobs.get(ctx.jobId)?.commitSha ?? "";
     expect(await git(repo.repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", sha])).toBe("src/adapter.ts");
+  });
+
+  it("marks a push that landed before the tool recorded it, so the job succeeds without pushing again", async () => {
+    const brain = agentBrain(implemented);
+    const ctx = claim();
+    vi.spyOn(stores.jobs, "markPushed").mockImplementationOnce(() => {
+      throw new Error("stopped after the push");
+    });
+
+    const outcome = await runImplement(ctx, depsFor(brain));
+
+    expect(brain.pushes).toMatchObject([{ ok: false, reason: "push failed" }]);
+    expect(outcome).toEqual({ status: "succeeded" });
+    const job = stores.jobs.get(ctx.jobId);
+    expect(job?.pushedAt).not.toBeNull();
+    expect(stores.pushes.forJob(ctx.jobId)).toMatchObject([{ sha: job?.commitSha, pushedAt: expect.any(String) }]);
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
   });
 
   it("hands back to needs-info without touching git", async () => {
     const ctx = claim();
-    const outcome = await runImplement(ctx, makeDeps(editingBrain({ ...implemented, outcome: "needs_info", branchType: null, questions: ["Which stream?"] }, async () => undefined).runBrain));
+    const outcome = await runImplement(ctx, depsFor(agentBrain({ ...implemented, outcome: "needs_info", questions: ["Which stream?"] }, async () => undefined)));
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the ticket needs more information" });
     expect(tracker.labelsOf("issue-1")).toEqual(["needs-info"]);
     expect(stores.jobs.get(ctx.jobId)?.implementResult?.result?.questions).toEqual(["Which stream?"]);
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
+    expect(await remoteBranches()).toBe("");
   });
 
   it("hands back to ready-for-human when the agent failed", async () => {
     const ctx = claim();
-    await runImplement(ctx, makeDeps(editingBrain({ ...implemented, outcome: "failed", branchType: null, failureDetail: "the streaming test keeps failing" }).runBrain));
+    await runImplement(ctx, depsFor(agentBrain({ ...implemented, outcome: "failed", failureDetail: "the streaming test keeps failing" }, async () => undefined)));
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
     expect(recorded(ctx.jobId)).toContain("the streaming test keeps failing");
   });
 
   it("hands back without running the brain when a branch already carries the ticket", async () => {
     await git(repo.repo, ["branch", "feature/API-1-by-hand"]);
-    const brain = editingBrain(implemented);
+    const brain = agentBrain(implemented);
     const ctx = claim();
 
-    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
+    const outcome = await runImplement(ctx, depsFor(brain));
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: a branch for API-1 already exists" });
     expect(brain.calls).toHaveLength(0);
@@ -194,143 +341,56 @@ describe("runImplement", () => {
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 
-  it.each(["hotfix", "Fix"])("hands back when the agent picks a branch type outside the list (%s)", async (branchType) => {
+  it("does not run the brain again when an earlier attempt's agent pushed before the attempt stopped", async () => {
     const ctx = claim();
-    const outcome = await runImplement(ctx, makeDeps(editingBrain({ ...implemented, branchType }).runBrain));
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent's result was invalid" });
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-  });
-
-  it("hands back when the steward's checks fail", async () => {
-    const ctx = claim();
-    const outcome = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain, makeConfig({ checks: ["echo 'type error in adapter.ts'; exit 2"] })));
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the steward's checks failed" });
-    expect(recorded(ctx.jobId)).toContain("type error in adapter.ts");
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-  });
-
-  it("hands back when the change contains an overlay secret", async () => {
-    await writeFile(join(repo.overlayDir, ".env"), "API_SECRET=supersecretvalue123\n");
-    const ctx = claim();
-    const brain = editingBrain(implemented, async (w) => writeFile(join(w, "src/adapter.ts"), 'export const s = "supersecretvalue123";\n'));
-    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value" });
-    expect(recorded(ctx.jobId)).not.toContain("supersecretvalue123");
-  });
-
-  it("hands back when a pre-commit hook force-adds a gitignored overlay secret, pushing nothing", async () => {
-    await writeFile(join(repo.overlayDir, ".env"), "API_SECRET=supersecretvalue123\n");
-    const ctx = claim();
-    const brain = editingBrain(implemented, async (w) => {
-      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
-      await mkdir(join(w, ".husky"), { recursive: true });
-      await writeFile(join(w, ".husky/pre-commit"), "git add -f .env\n");
+    const interrupted = agentBrain(implemented, async (workspace, push) => {
+      await commitAndPush(workspace, push);
+      throw new Error("steward stopped");
     });
+    expect((await runImplement(ctx, depsFor(interrupted))).status).toBe("failed");
+    const pushed = await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`]);
 
-    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
+    const again = agentBrain(implemented);
+    const outcome = await runImplement({ ...ctx, attempt: 2 }, depsFor(again));
 
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change would commit files the steward copied in" });
-    expect(recorded(ctx.jobId)).toContain(".env");
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-    expect(stores.jobs.get(ctx.jobId)?.pushedAt ?? null).toBeNull();
-  });
-
-  it("hands back when a pre-commit hook stages a secret the steward guard passed", async () => {
-    await writeFile(join(repo.overlayDir, ".env"), "API_SECRET=supersecretvalue123\n");
-    const ctx = claim();
-    const brain = editingBrain(implemented, async (w) => {
-      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
-      await mkdir(join(w, ".husky"), { recursive: true });
-      await writeFile(join(w, ".husky/pre-commit"), "cp .env src/leak.txt\ngit add src/leak.txt\n");
-    });
-
-    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
-
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value" });
-    expect(recorded(ctx.jobId)).toContain("src/leak.txt");
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-  });
-
-  it("hands back when a commit-msg hook appends a secret to the message, pushing nothing", async () => {
-    await writeFile(join(repo.overlayDir, ".env"), "API_SECRET=supersecretvalue123\n");
-    const ctx = claim();
-    const brain = editingBrain(implemented, async (w) => {
-      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
-      await mkdir(join(w, ".husky"), { recursive: true });
-      // Read from the overlay at commit time, so the hook file itself carries no secret for the change guard to see.
-      await writeFile(join(w, ".husky/commit-msg"), 'cut -d= -f2 .env >> "$1"\n');
-    });
-
-    const outcome = await runImplement(ctx, makeDeps(brain.runBrain));
-
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the commit message contains a secret value" });
-    expect(recorded(ctx.jobId)).toContain("commit message");
-    expect(recorded(ctx.jobId)).not.toContain("supersecretvalue123");
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-    expect(stores.jobs.get(ctx.jobId)?.pushedAt ?? null).toBeNull();
-  });
-
-  it("hands back when the change contains one of the steward's own secrets", async () => {
-    const ctx = claim();
-    const brain = editingBrain(implemented, async (w) => writeFile(join(w, "src/adapter.ts"), 'export const k = "sk-ant-steward-brain-key";\n'));
-    const deps = { ...makeDeps(brain.runBrain), secrets: { GITLAB_PUSH_TOKEN: "glpat-push-token-value", ANTHROPIC_API_KEY: "sk-ant-steward-brain-key" } };
-
-    const outcome = await runImplement(ctx, deps);
-
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the change contains a secret value" });
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-  });
-
-  it("treats a shutdown during the checks as an interruption, not a hand-back", async () => {
-    const abort = new AbortController();
-    const ctx = claim();
-    const brain = editingBrain(implemented, async (w) => {
-      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
-      setTimeout(() => abort.abort(), 300);
-    });
-    const deps = { ...makeDeps(brain.runBrain, makeConfig({ checks: ["sleep 10"] })), signal: abort.signal };
-
-    const outcome = await runImplement(ctx, deps);
-
-    expect(outcome).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
-    expect(stores.jobs.get(ctx.jobId)?.implementResult ?? null).toBeNull();
-    expect(tracker.labelSwaps()).toEqual([]);
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: an earlier attempt stopped after the agent pushed" });
+    expect(again.calls).toHaveLength(0);
+    expect(await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(pushed);
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback?.detail).toBe(BRANCH);
   });
 
   it("includes the hand-back detail in a dry run", async () => {
     const ctx = { ...claim(), dryRun: true };
-    const outcome = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain, makeConfig({ checks: ["echo 'type error in adapter.ts'; exit 2"] })));
-    expect(outcome).toMatchObject({ status: "succeeded", warning: expect.stringMatching(/^dry run: would hand back: the steward's checks failed\n[\s\S]*type error in adapter\.ts/) });
+    const outcome = await runImplement(ctx, depsFor(agentBrain({ ...implemented, summary: "" }, async () => undefined)));
+    expect(outcome).toEqual({ status: "succeeded", warning: "dry run: would hand back: the agent's result was invalid\nsummary is empty" });
     expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("refuses a Done ticket without running the brain", async () => {
     tracker.addIssue({ ...issue, state: { name: "Done", type: "completed" } });
-    const brain = editingBrain(implemented);
-    const outcome = await runImplement(claim(), makeDeps(brain.runBrain));
+    const brain = agentBrain(implemented);
+    const outcome = await runImplement(claim(), depsFor(brain));
     expect(outcome).toEqual({ status: "failed", error: "API-1 is Done; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
     expect(brain.calls).toHaveLength(0);
   });
 
-  it("does not commit or push when the ticket is closed while the agent runs", async () => {
-    const brain = editingBrain(implemented, async (w) => {
-      await writeFile(join(w, "src/adapter.ts"), "export const adapter = 2;\n");
+  it("pushes nothing when the ticket is closed while the agent runs", async () => {
+    const brain = agentBrain(implemented, async (workspace, push) => {
       tracker.addIssue({ ...issue, state: { name: "Canceled", type: "canceled" } });
+      await commitAndPush(workspace, push);
     });
-    const outcome = await runImplement(claim(), makeDeps(brain.runBrain));
+    const outcome = await runImplement(claim(), depsFor(brain));
+    expect(brain.pushes).toMatchObject([{ ok: false, reason: "API-1 is Canceled; Ticket Steward does not work on Done or Canceled tickets" }]);
     expect(outcome).toEqual({ status: "failed", error: "API-1 is Canceled; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
+    expect(await remoteBranches()).toBe("");
     expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("does not hand back when the ticket is closed while the agent runs", async () => {
-    const brain = editingBrain({ ...implemented, outcome: "needs_info", branchType: null, questions: ["Which stream?"] }, async () => {
+    const brain = agentBrain({ ...implemented, outcome: "needs_info", questions: ["Which stream?"] }, async () => {
       tracker.addIssue({ ...issue, state: { name: "Done", type: "completed" } });
     });
-    const outcome = await runImplement(claim(), makeDeps(brain.runBrain));
+    const outcome = await runImplement(claim(), depsFor(brain));
     expect(outcome).toEqual({ status: "failed", error: "API-1 is Done; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
     expect(tracker.labelSwaps()).toEqual([]);
   });
@@ -341,46 +401,34 @@ describe("runImplement", () => {
     await git(repo.root, ["init", "--quiet", "--bare", jobDir]);
     await git(jobDir, ["config", `url.${join(repo.root, "nowhere.git")}.insteadOf`, repo.repo]);
 
-    const outcome = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
+    const outcome = await runImplement(ctx, depsFor(agentBrain(implemented)));
 
     expect(outcome).toEqual({ status: "succeeded" });
-    expect(await git(repo.repo, ["rev-parse", "--verify", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe(stores.jobs.get(ctx.jobId)?.commitSha);
+    expect(await git(repo.repo, ["rev-parse", "--verify", `refs/heads/${BRANCH}`])).toBe(stores.jobs.get(ctx.jobId)?.commitSha);
   });
 
   it("leaves labels alone for a CLI-triggered job", async () => {
-    await runImplement(claim({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" }), makeDeps(editingBrain(implemented).runBrain));
+    await runImplement(claim({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" }), depsFor(agentBrain(implemented)));
     expect(tracker.labelSwaps()).toEqual([]);
   });
 
-  it("runs the brain and the steward's checks against the slot's app port", async () => {
+  it("runs the brain and the push tool's checks against the slot's app port", async () => {
     const appPortBase = (await freeTcpPort()) - 1;
     const runner = fakeSlotRunner();
     const slots = { count: 1, socket: "/run/steward-slot.sock", appPortBase, upTimeoutSeconds: 180, env: {} };
     const base = makeConfig({ checks: [`test "$STEWARD_PORT" = "${appPortBase + 1}"`] });
-    const brain = editingBrain(implemented);
+    const brain = agentBrain(implemented);
     const ctx = claim();
 
-    const outcome = await runImplement(ctx, {
-      ...makeDeps(brain.runBrain, { ...base, workspace: { ...base.workspace, port: undefined }, slots }),
-      slot: { n: 1, client: new SlotClient(slots, runner.run) },
-    });
+    const deps = depsFor(brain, { ...base, workspace: { ...base.workspace, port: undefined }, slots });
+    const outcome = await runImplement(ctx, brain.bind({ ...deps, slot: { n: 1, client: new SlotClient(slots, runner.run) } }));
 
     expect(outcome).toEqual({ status: "succeeded" });
-    expect(stores.jobs.get(ctx.jobId)?.pushedAt).not.toBeNull();
+    expect(brain.pushes).toMatchObject([{ ok: true }]);
     expect(brain.calls[0]?.env.STEWARD_PORT).toBe(String(appPortBase + 1));
     expect(runner.calls).toEqual([["down", "1"], ["up", "1"], ["ports", "1"], ["down", "1"]]);
   });
 });
-
-/** Makes the source repo reject pushes until the returned function is called. */
-const rejectPushes = async (): Promise<() => Promise<void>> => {
-  const marker = join(repo.root, "reject-push");
-  const hook = join(repo.repo, ".git", "hooks", "pre-receive");
-  await writeFile(hook, `#!/bin/sh\nif [ -e '${marker}' ]; then echo rejected >&2; exit 1; fi\n`);
-  await chmod(hook, 0o755);
-  await writeFile(marker, "");
-  return () => rm(marker);
-};
 
 describe("the fix loop start", () => {
   const GREPTILE = {
@@ -389,58 +437,70 @@ describe("the fix loop start", () => {
   };
   const withGreptile = (): StewardConfig => ({ ...makeConfig(), greptile: GREPTILE });
 
-  /** A fake brain that edits the adapter, returns `implemented` and leaves session `session-impl`; run through `runBrain`. */
-  const sessionBrain = (): { brain: FakeBrain; runBrain: NonNullable<PipelineDeps["runBrain"]> } => {
-    const brain = new FakeBrain({ result: implemented, editWorkspace: { "src/adapter.ts": "export const adapter = 2;\n" }, sessionId: "session-impl" });
-    return { brain, runBrain: async (_config, input) => brain.run(input, () => undefined) };
+  /** An agent that commits, pushes and leaves session `session-impl`. */
+  const sessionBrain = (): AgentBrain => {
+    const brain = agentBrain(implemented);
+    return { ...brain, runBrain: async (config: unknown, input: BrainInput) => ({ ...(await brain.runBrain(config, input)), sessionId: "session-impl" }) };
   };
 
   const awaitJobs = () => stores.jobs.list({ limit: 50 }).filter((job) => job.kind === "await_review");
 
   it("starts a loop on a stable worktree after a label-triggered push", async () => {
-    const { brain, runBrain } = sessionBrain();
+    const brain = sessionBrain();
     const ctx = claim();
 
-    const outcome = await runImplement(ctx, makeDeps(runBrain, withGreptile()));
+    const outcome = await runImplement(ctx, depsFor(brain, withGreptile()));
 
     expect(outcome).toEqual({ status: "succeeded" });
-    expect(brain.lastInput().workspacePath).toBe(join(repo.dataDir, "work", "ticket-API-1"));
+    expect(brain.calls[0]?.workspacePath).toBe(join(repo.dataDir, "work", "ticket-API-1"));
     const job = stores.jobs.get(ctx.jobId);
     expect(job?.sessionId).toBe("session-impl");
     const loop = stores.loops.forImplementJob(ctx.jobId);
-    expect(loop).toMatchObject({ headSha: job?.commitSha, sessionId: "session-impl", worktreeName: "ticket-API-1", branch: "fix/API-1-adapter-drops-the-last-chunk", labelDriven: true, round: 0 });
+    expect(loop).toMatchObject({ headSha: job?.commitSha, sessionId: "session-impl", worktreeName: "ticket-API-1", branch: BRANCH, labelDriven: true, round: 0 });
     expect(loop?.baseSha).toBe(await git(repo.repo, ["rev-parse", "main"]));
     expect(awaitJobs().map((row) => row.trigger)).toEqual([{ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: loop?.id, step: "await" }]);
   });
 
+  it("starts no loop when the agent left unpushed work", async () => {
+    const brain = agentBrain(implemented, async (workspace, push) => {
+      await commitAndPush(workspace, push);
+      await writeFile(join(workspace, "notes.md"), "draft\n");
+    });
+    const ctx = claim();
+
+    expect(await runImplement(ctx, depsFor(brain, withGreptile()))).toEqual({ status: "succeeded", warning: "handed back: the agent left unpushed work" });
+    expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
+    expect(awaitJobs()).toEqual([]);
+  });
+
   it("starts no loop for a cli trigger, which keeps the per-attempt worktree", async () => {
-    const { brain, runBrain } = sessionBrain();
+    const brain = sessionBrain();
     const ctx = claim({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
 
-    expect(await runImplement(ctx, makeDeps(runBrain, withGreptile()))).toEqual({ status: "succeeded" });
+    expect(await runImplement(ctx, depsFor(brain, withGreptile()))).toEqual({ status: "succeeded" });
 
-    expect(brain.lastInput().workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
+    expect(brain.calls[0]?.workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
     expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
     expect(awaitJobs()).toEqual([]);
   });
 
   it("starts no loop without greptile configured", async () => {
-    const { brain, runBrain } = sessionBrain();
+    const brain = sessionBrain();
     const ctx = claim();
 
-    expect(await runImplement(ctx, makeDeps(runBrain))).toEqual({ status: "succeeded" });
+    expect(await runImplement(ctx, depsFor(brain))).toEqual({ status: "succeeded" });
 
-    expect(brain.lastInput().workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
+    expect(brain.calls[0]?.workspacePath).toBe(join(repo.dataDir, "work", `${ctx.jobId}-1`));
     expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
   });
 
-  it("starts the loop exactly once when publishImplementOnly retries after a crash", async () => {
-    const { runBrain } = sessionBrain();
+  it("starts the loop exactly once, on the stored base, when publishImplementOnly retries after a crash", async () => {
+    const brain = sessionBrain();
     const ctx = claim();
-    vi.spyOn(stores.jobs, "markPushed").mockImplementationOnce(() => {
-      throw new Error("crashed after push");
+    vi.spyOn(stores.loops, "create").mockImplementationOnce(() => {
+      throw new Error("crashed before the loop");
     });
-    expect((await runImplement(ctx, makeDeps(runBrain, withGreptile()))).status).toBe("failed");
+    expect((await runImplement(ctx, depsFor(brain, withGreptile()))).status).toBe("failed");
     expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
 
     tracker.failNextSwap();
@@ -451,6 +511,7 @@ describe("the fix loop start", () => {
     const job = stores.jobs.get(ctx.jobId);
     expect(stores.loops.forImplementJob(ctx.jobId)).toMatchObject({ headSha: job?.commitSha, sessionId: "session-impl", worktreeName: "ticket-API-1", baseSha: await git(repo.repo, ["rev-parse", "main"]) });
     expect(awaitJobs()).toHaveLength(1);
+    expect(brain.calls).toHaveLength(1);
   });
 });
 
@@ -458,40 +519,21 @@ describe("publishImplementOnly", () => {
   it("re-publishes after a failed label swap without pushing again", async () => {
     const ctx = claim();
     tracker.failNextSwap();
-    const first = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
+    const first = await runImplement(ctx, depsFor(agentBrain(implemented)));
     expect(first.status).toBe("publish_failed");
-    const pushed = await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"]);
+    const pushed = await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`]);
 
     const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
 
     expect(retry).toEqual({ status: "succeeded" });
-    expect(await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe(pushed);
-    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
-  });
-
-  it("pushes from the bundle on retry after the first push was rejected", async () => {
-    const allowPushes = await rejectPushes();
-    const ctx = claim();
-
-    const first = await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
-    expect(first).toMatchObject({ status: "publish_failed", error: expect.stringContaining("push:") });
-    expect(stores.jobs.get(ctx.jobId)?.pushedAt ?? null).toBeNull();
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-agent"]);
-
-    await allowPushes();
-    const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
-
-    expect(retry).toEqual({ status: "succeeded" });
-    const job = stores.jobs.get(ctx.jobId);
-    expect(await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe(job?.commitSha);
-    expect(job?.pushedAt).not.toBeNull();
+    expect(await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(pushed);
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
   });
 
   it("treats its own already-landed push as pushed when the record was lost", async () => {
     const ctx = claim();
     tracker.failNextSwap();
-    await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain));
+    await runImplement(ctx, depsFor(agentBrain(implemented)));
     stores.db.prepare("UPDATE jobs SET pushed_at = NULL WHERE id = ?").run(ctx.jobId);
 
     const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
@@ -501,59 +543,23 @@ describe("publishImplementOnly", () => {
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
   });
 
-  it("does not push on retry when the ticket was canceled after a failed push", async () => {
-    const allowPushes = await rejectPushes();
+  it("hands back without pushing when the recorded push never landed", async () => {
     const ctx = claim();
-    expect((await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain))).status).toBe("publish_failed");
-    tracker.addIssue({ ...issue, state: { name: "Canceled", type: "canceled" } });
-    await allowPushes();
+    const sha = await git(repo.repo, ["rev-parse", "main"]);
+    stores.jobs.recordCommit(ctx.jobId, BRANCH, sha);
+    stores.jobs.saveImplementResult(ctx.jobId, { result: implemented, handback: null, baseSha: sha });
 
     const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
 
-    expect(retry).toEqual({ status: "failed", error: "API-1 is Canceled; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
-    expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
-    expect(tracker.labelSwaps()).toEqual([]);
-  });
-
-  it("routes a crash right after the push to the retry path, which publishes without pushing again", async () => {
-    const ctx = claim();
-    vi.spyOn(stores.jobs, "markPushed").mockImplementationOnce(() => {
-      throw new Error("crashed after push");
-    });
-    expect((await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain))).status).toBe("failed");
-    const job = stores.jobs.get(ctx.jobId);
-    expect(job?.implementResult).not.toBeNull();
-    expect(job?.pushedAt ?? null).toBeNull();
-    const pushed = await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"]);
-    expect(pushed).toBe(job?.commitSha);
-
-    const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
-
-    expect(retry).toEqual({ status: "succeeded" });
-    expect(stores.jobs.get(ctx.jobId)?.pushedAt).not.toBeNull();
-    expect(await git(repo.repo, ["rev-parse", "refs/heads/fix/API-1-adapter-drops-the-last-chunk"])).toBe(pushed);
-    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
-  });
-
-  it("hands back on retry when someone else's branch now carries the ticket", async () => {
-    const allowPushes = await rejectPushes();
-    const ctx = claim();
-    expect((await runImplement(ctx, makeDeps(editingBrain(implemented).runBrain))).status).toBe("publish_failed");
-    await git(repo.repo, ["branch", "feature/API-1-by-hand"]);
-    await allowPushes();
-
-    const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
-
-    expect(retry).toEqual({ status: "succeeded", warning: "handed back: a branch for API-1 already exists" });
-    expect(await git(repo.repo, ["branch", "--list", "fix/API-1-*"])).toBe("");
-    expect(recorded(ctx.jobId)).toContain("feature/API-1-by-hand");
+    expect(retry).toEqual({ status: "succeeded", warning: "handed back: the push did not complete" });
+    expect(await remoteBranches()).toBe("");
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toEqual({ label: "readyForHuman", reason: "the push did not complete", detail: BRANCH });
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
-    expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toMatchObject({ reason: "a branch for API-1 already exists", detail: "feature/API-1-by-hand" });
   });
 
   it("does not record a push when the remote is unreachable", async () => {
     const ctx = claim();
-    const deps = makeDeps(editingBrain(implemented).runBrain);
+    const deps = depsFor(agentBrain(implemented));
     const unreachable = { ...deps, config: { ...deps.config, workspace: { ...deps.config.workspace, fetchUrl: join(repo.root, "missing.git") } } };
 
     const outcome = await runImplement(ctx, unreachable);

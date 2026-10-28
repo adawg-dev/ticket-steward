@@ -28,6 +28,13 @@ describe("implement prompt", () => {
     expect(prompt).toContain("feature, fix, chore, refactor");
   });
 
+  it("asks the agent to commit with the identifier and push through the push tool", () => {
+    const prompt = renderImplementPrompt(template, vars);
+    expect(prompt).toContain("Every commit subject starts with `API-1: `");
+    expect(prompt).toContain("Call the `push` tool with `branchType` set to one of: feature, fix, chore, refactor");
+    expect(prompt).not.toContain("commitMessage");
+  });
+
   it("asks the agent to verify only what its change affects", () => {
     const prompt = renderImplementPrompt(template, vars);
     expect(prompt).toContain("## Verify what your change affects");
@@ -36,7 +43,7 @@ describe("implement prompt", () => {
 
   it("lists the steward's own checks when there are some", () => {
     const prompt = renderImplementPrompt(template, { ...vars, hasChecks: true, checks: "- `pnpm turbo check-types lint --filter='...[abc]'`" });
-    expect(prompt).toContain("the steward runs these itself, and a failure hands the ticket back:\n\n- `pnpm turbo check-types lint --filter='...[abc]'`");
+    expect(prompt).toContain("the steward runs these itself, and a failure refuses the push:\n\n- `pnpm turbo check-types lint --filter='...[abc]'`");
   });
 
   it("uses the brief as the spec when there is one", () => {

@@ -32,8 +32,6 @@ const issue: TicketBundle = {
 
 const implemented: ImplementResult = {
   outcome: "implemented",
-  branchType: "fix",
-  commitMessage: "Keep the last chunk\n\nFlush the buffer before closing.",
   summary: "Flush the buffer before closing the stream.",
   reviewNotes: ["Check the streaming test."],
   checksRun: ["tsc: ok"],
@@ -73,14 +71,15 @@ afterEach(async () => {
 });
 
 describe("steward implement", () => {
-  it("dry run prints the branch and commit message and writes nothing", async () => {
+  it("dry run prints the agent's unpushed work and writes nothing", async () => {
     const brain = new FakeBrain({ result: implemented, editWorkspace: { "src/adapter.ts": "export const adapter = 2;\n" } });
     const { ctx, stdout } = makeContext({ factories: { tracker, codehost: new FakeCodeHost(), brain } });
 
     await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "implement", "API-1", "--dry-run"]);
 
-    expect(stdout()).toContain("would commit on fix/API-1-adapter-drops-the-last-chunk");
-    expect(stdout()).toContain("API-1: Keep the last chunk");
+    expect(stdout()).toContain("dry run: no push tool; the agent's work on");
+    expect(stdout()).toContain("uncommitted:\n  src/adapter.ts");
+    expect(brain.lastInput().mcpServers).not.toHaveProperty("push");
     expect(tracker.labelSwaps()).toEqual([]);
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });

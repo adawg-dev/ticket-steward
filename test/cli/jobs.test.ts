@@ -171,7 +171,7 @@ describe("steward jobs", () => {
 
   describe("retry of an implement job", () => {
     const implementEvent: TriggerEvent = { ...createdEvent, kind: "issue.labeled", action: "implement" };
-    const result = { outcome: "implemented" as const, branchType: "fix", commitMessage: "Keep the last chunk", summary: "s", reviewNotes: [], checksRun: [], questions: [], failureDetail: null };
+    const result = { outcome: "implemented" as const, summary: "s", reviewNotes: [], checksRun: [], questions: [], failureDetail: null };
     const retryLine = async (setup: (id: number) => void): Promise<string> => {
       const id = stores.jobs.enqueue(implementEvent);
       stores.jobs.claimById(id);
@@ -189,13 +189,13 @@ describe("steward jobs", () => {
       expect(await retryLine(() => undefined)).toBe("full run");
     });
 
-    it("pushes from the bundle when the push never landed", async () => {
+    it("checks the remote without pushing when the push was never marked", async () => {
       expect(
         await retryLine((id) => {
           stores.jobs.recordCommit(id, "fix/API-1-keep", "d".repeat(40));
           stores.jobs.saveImplementResult(id, { result, handback: null });
         }),
-      ).toBe("publish-only (push fix/API-1-keep from the bundle, then labels)");
+      ).toBe("publish-only (check whether fix/API-1-keep landed, then labels; never pushes)");
     });
 
     it("only publishes once the push landed", async () => {

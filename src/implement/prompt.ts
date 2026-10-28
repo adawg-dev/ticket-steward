@@ -14,7 +14,7 @@ export interface ImplementPromptVars {
   stewardPort: number;
   hasBrief: boolean;
   brief: string;
-  /** Comma-separated implement.branchTypes. */
+  /** Comma-separated implement.branchTypes: the choices for the push tool's `branchType` on the first push. */
   branchTypes: string;
   /** True when implement.checks is non-empty. */
   hasChecks: boolean;
