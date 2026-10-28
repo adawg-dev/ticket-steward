@@ -3,15 +3,14 @@ import { mkdir, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { buildWorkspaceEnv } from "../brain/env.js";
 import type { PipelineDeps } from "../core/deps.js";
-import { closedReason } from "../core/intake.js";
 import { errorMessage, jobDirOf } from "../core/workspace.js";
 import { branchName } from "../implement/branch.js";
 import { BranchExistsError, guardRange, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, uncommittedPaths, type PushMode } from "../implement/git.js";
 import { CHECK_TAIL_BYTES, guardSecrets, lsRemoteSite, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
-import { transaction, type Push } from "../store/index.js";
 import { gitOrThrow } from "../workspace/git.js";
 import type { RemoteCredentials } from "../workspace/mirror.js";
 import { runSetup } from "../workspace/setup.js";
+import type { PushLedger, RemoteHead } from "./ledger.js";
 import type { PushTarget } from "./target.js";
 
 const MINUTE_MS = 60_000;
@@ -19,85 +18,22 @@ const PUSH_BUNDLE = "push.bundle";
 const PUSH_REPO = "push.git";
 const NO_REPLACE = { GIT_NO_REPLACE_OBJECTS: "1" };
 
-export type PushDeps = Pick<PipelineDeps, "config" | "secrets" | "stores" | "mirror" | "tracker" | "redactor">;
+export type PushDeps = Pick<PipelineDeps, "config" | "secrets" | "mirror" | "redactor"> & { ledger: PushLedger };
 
 export type PushResult = { ok: true; branch: string; sha: string; commits: number } | { ok: false; reason: string; detail: string };
-
-/** Where a push starts: a new branch on the job's base, or the branch's last steward-pushed head. */
-type Start = { kind: "create"; base: string } | { kind: "fastForward"; branch: string; base: string };
 
 const refuse = (reason: string, detail = ""): PushResult => ({ ok: false, reason, detail });
 
 const short = (sha: string): string => sha.slice(0, 7);
 
-/** Records a landed push everywhere the steward reads it: the push row, the implement job, or the loop's head. */
-const markLanded = (deps: PushDeps, target: PushTarget, push: Pick<Push, "id" | "sha">): void => {
-  const { stores } = deps;
-  transaction(stores.db, () => {
-    stores.pushes.markPushed(push.id);
-    // The loop's head moves with the push, so the gate reads it as the loop's own and never as a person's.
-    if (target.loopId !== null) stores.loops.update(target.loopId, { pendingPush: { sha: push.sha, pushed: true }, headSha: push.sha });
-    else stores.jobs.markPushed(target.jobId);
-  });
-};
-
-/** The job's or loop's push record before this push, put back if the push does not land. */
-type Prior = { kind: "loop"; loopId: number; pendingPush: { sha: string; pushed: boolean } | null } | { kind: "job"; jobId: number; branch: string | null; commitSha: string | null; pushed: boolean };
-
-const priorOf = (deps: PushDeps, target: PushTarget): Prior => {
-  if (target.loopId !== null) return { kind: "loop", loopId: target.loopId, pendingPush: deps.stores.loops.get(target.loopId)?.pendingPush ?? null };
-  const job = deps.stores.jobs.get(target.jobId);
-  return { kind: "job", jobId: target.jobId, branch: job?.branch ?? null, commitSha: job?.commitSha ?? null, pushed: (job?.pushedAt ?? null) !== null };
-};
-
-/**
- * After a push that did not land, so a refused push never reads as unpushed work over a push that did land. A first push
- * has nothing to go back to; its commit stays recorded as not pushed.
- */
-const restorePrior = (deps: PushDeps, prior: Prior): void => {
-  const { stores } = deps;
-  if (prior.kind === "loop") {
-    stores.loops.update(prior.loopId, { pendingPush: prior.pendingPush });
-    return;
-  }
-  const { jobId, branch, commitSha } = prior;
-  if (branch === null || commitSha === null || !prior.pushed) return;
-  transaction(stores.db, () => {
-    stores.jobs.recordCommit(jobId, branch, commitSha);
-    stores.jobs.markPushed(jobId);
-  });
-};
-
-/**
- * A push recorded but not marked (the steward stopped between the push and its record): landed when the remote branch
- * is at its commit, so the next push starts from there instead of being refused by the lease.
- */
-export const settleUnfinished = async (deps: PushDeps, target: PushTarget, remote: RemoteCredentials): Promise<void> => {
-  const latest = deps.stores.pushes.latest(target.jobId);
-  if (latest === null || latest.pushedAt !== null) return;
-  const site = await lsRemoteSite({ jobDir: jobDirOf(deps.config.dataDir, target.jobId) }, remote);
-  const branches = await remoteTicketBranches(site.remote, site.cwd, target.identifier);
-  if (branches.some(({ ref, sha }) => ref === `refs/heads/${latest.branch}` && sha === latest.sha)) markLanded(deps, target, latest);
-};
-
-/**
- * A loop pushes onto its head; a job that pushed already onto its last push, or onto the head the job recorded when the
- * steward pushed it before push rows existed; otherwise `target` decides.
- */
-const startOf = (deps: PushDeps, target: PushTarget): Start | PushResult => {
-  if (target.loopId !== null) {
-    const loop = deps.stores.loops.get(target.loopId);
-    if (loop === null) return refuse("this run's fix loop no longer exists");
-    return { kind: "fastForward", branch: loop.branch, base: loop.headSha };
-  }
-  const last = deps.stores.pushes.latestPushed(target.jobId);
-  if (last !== null) return { kind: "fastForward", branch: last.branch, base: last.sha };
-  const job = deps.stores.jobs.get(target.jobId);
-  if (job !== null && job.pushedAt !== null && job.branch !== null && job.commitSha !== null) return { kind: "fastForward", branch: job.branch, base: job.commitSha };
-  if (target.mode === "create") return { kind: "create", base: target.baseSha };
-  if (target.branch === null) return refuse("this run has no branch to push to");
-  return { kind: "fastForward", branch: target.branch, base: target.baseSha };
-};
+/** The remote's head of `branch`, read with `ls-remote` from a scratch dir in the job dir. */
+export const remoteHeadOf =
+  (deps: Pick<PipelineDeps, "config">, target: PushTarget, remote: RemoteCredentials): RemoteHead =>
+  async (branch) => {
+    const site = await lsRemoteSite({ jobDir: jobDirOf(deps.config.dataDir, target.jobId) }, remote);
+    const branches = await remoteTicketBranches(site.remote, site.cwd, target.identifier);
+    return branches.find(({ ref }) => ref === `refs/heads/${branch}`)?.sha ?? null;
+  };
 
 /** Commits in `base..head` whose subject does not start with `<identifier>: `. */
 const unprefixed = async (worktreePath: string, base: string, head: string, identifier: string): Promise<string[]> => {
@@ -154,9 +90,8 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   const worktreePath = target.worktreePath;
   const jobDir = jobDirOf(deps.config.dataDir, target.jobId);
 
-  await settleUnfinished(deps, target, remote);
-  const start = startOf(deps, target);
-  if ("ok" in start) return start;
+  const start = await deps.ledger.start(target, remoteHeadOf(deps, target, remote));
+  if (start.kind === "refused") return refuse(start.reason);
 
   // 0. The checks below read the worktree's git directory, so it must still be the steward's.
   const tampered = await gitDirProblem(worktreePath, deps.mirror.path);
@@ -190,9 +125,8 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   if (!checked.ok) return refuse("the steward's checks failed", deps.redactor.redact(checked.tail));
 
   // 6. The run can last an hour; never push for a ticket closed meanwhile.
-  const ticket = await deps.tracker.fetchTicket(target.issueId);
-  const closed = closedReason(target.identifier, ticket.state);
-  if (closed !== null) return refuse(closed);
+  const ticket = await deps.ledger.ticket(target);
+  if (ticket.closed !== null) return refuse(ticket.closed);
 
   // 7. A first push names its branch the steward's way and never takes over a branch that already carries the ticket.
   let branch: string;
@@ -212,24 +146,17 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   }
 
   // 8. Intent first, so a push that lands before its record is recognized as the steward's.
-  const { stores } = deps;
-  const prior = priorOf(deps, target);
-  const pushId = transaction(stores.db, () => {
-    const id = stores.pushes.record({ jobId: target.jobId, loopId: target.loopId, branch, sha, previousSha: start.kind === "create" ? null : start.base, note: input.note ?? null });
-    if (target.loopId !== null) stores.loops.update(target.loopId, { pendingPush: { sha, pushed: false } });
-    else stores.jobs.recordCommit(target.jobId, branch, sha);
-    return id;
-  });
+  const { id: pushId } = await deps.ledger.record(target, { branch, sha, previousSha: start.kind === "create" ? null : start.base, note: input.note ?? null });
   try {
     await mkdir(jobDir, { recursive: true, mode: 0o700 });
     await saveBundle(worktreePath, start.base, join(jobDir, PUSH_BUNDLE));
     await pushFromBundle(deps, jobDir, { remote, sha, base: start.base, branch, identifier: target.identifier, branchTypes: settings.branchTypes, mode });
   } catch (err) {
-    restorePrior(deps, prior);
+    await deps.ledger.revert(target, pushId);
     if (err instanceof BranchExistsError) return refuse(`a branch for ${target.identifier} already exists`, err.ref.replace(/^refs\/heads\//, ""));
     return refuse("the push was rejected", deps.redactor.redact(errorMessage(err)));
   }
-  markLanded(deps, target, { id: pushId, sha });
+  await deps.ledger.landed(target, pushId, sha);
   const commits = Number(await gitOrThrow(["rev-list", "--count", `${start.base}..${sha}`], worktreePath));
   return { ok: true, branch, sha, commits };
 };

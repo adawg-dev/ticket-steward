@@ -9,7 +9,8 @@ import type { JobOutcome, RunContext } from "../core/types.js";
 import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, prepareWorkspace, redactOutcome, sessionsDir, type JobPaths } from "../core/workspace.js";
 import { unpushedWork } from "../implement/git.js";
 import { guardSecrets, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
-import { settleUnfinished } from "../push/service.js";
+import { settleUnfinished } from "../push/ledger.js";
+import { remoteHeadOf } from "../push/service.js";
 import type { PushTarget } from "../push/target.js";
 import { transaction, type Loop, type LoopPatch, type LoopRound, type Push } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
@@ -199,7 +200,7 @@ interface AgentPushes {
 const agentPushes = async (fix: Fix, worktree: Worktree, target: PushTarget): Promise<AgentPushes> => {
   const { ctx, deps } = fix;
   // A push the tool recorded but stopped before marking counts when the remote branch is at its commit.
-  await settleUnfinished(deps, target, fix.remote);
+  await settleUnfinished(deps, target, remoteHeadOf(deps, target, fix.remote));
   const pushed = deps.stores.pushes.latestPushed(ctx.jobId);
   const { files: overlayFiles } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
   const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);

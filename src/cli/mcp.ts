@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { createCodeHost, startCodeHostMcpServer } from "../codehost/index.js";
 import { execOrbit } from "../orbit/run.js";
 import { orbitRemote, startOrbitMcpServer } from "../orbit/server.js";
+import { storeLedger } from "../push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../push/service.js";
 import { startPushMcpServer } from "../push/server.js";
 import { PushTargetSchema, type PushTarget } from "../push/target.js";
@@ -39,7 +40,8 @@ export const registerMcp = (program: Command, ctx: CliContext): void => {
       }
       const loaded = await ctx.loadConfig({ configPath });
       const redactor = await buildRedactor(loaded);
-      const deps = { config: loaded.config, secrets: loaded.secrets, stores: openStores(loaded.config.dataDir), mirror: openMirror(loaded), tracker: openTracker(loaded, ctx), redactor };
+      const ledger = storeLedger({ stores: openStores(loaded.config.dataDir), tracker: openTracker(loaded, ctx) });
+      const deps = { config: loaded.config, secrets: loaded.secrets, mirror: openMirror(loaded), ledger, redactor };
       await startPushMcpServer({
         push: (request) =>
           pushFromWorktree({ deps, target, branchType: request.branchType ?? null, ...(request.note === undefined ? {} : { note: request.note }) }).catch(

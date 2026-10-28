@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { Redactor } from "../../src/core/redact.js";
+import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushDeps } from "../../src/push/service.js";
 import type { PushTarget } from "../../src/push/target.js";
 import { openStores, type Stores } from "../../src/store/index.js";
@@ -65,9 +66,8 @@ const makeConfig = (checks: string[] = []): StewardConfig => ({
 const makeDeps = (config: StewardConfig = makeConfig()): PushDeps => ({
   config,
   secrets: { GITLAB_PUSH_TOKEN: PUSH_TOKEN },
-  stores,
   mirror: repo.mirror,
-  tracker,
+  ledger: storeLedger({ stores, tracker }),
   redactor: new Redactor([PUSH_TOKEN]),
 });
 

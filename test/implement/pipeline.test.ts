@@ -8,6 +8,7 @@ import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import type { ImplementResult } from "../../src/implement/result.js";
 import { publishImplementOnly, runImplement } from "../../src/implement/pipeline.js";
+import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
 import { openStores, type Stores } from "../../src/store/index.js";
@@ -118,7 +119,7 @@ const agentBrain = (result: unknown, act: AgentStep = commitAndPush) => {
     await act(input.workspacePath, async (branchType = null) => {
       if (target === null || deps === null) throw new Error("the run has no push tool");
       // The MCP server turns a thrown error into a refusal; so does this stand-in.
-      const pushed = await pushFromWorktree({ deps, target, branchType }).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: String(err) }));
+      const pushed = await pushFromWorktree({ deps: { ...deps, ledger: storeLedger(deps) }, target, branchType }).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: String(err) }));
       pushes.push(pushed);
       return pushed;
     });

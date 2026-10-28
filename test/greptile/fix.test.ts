@@ -13,6 +13,7 @@ import { runFix } from "../../src/greptile/fix.js";
 import { runRestart } from "../../src/greptile/start.js";
 import { LOOP_MARKER } from "../../src/greptile/publish.js";
 import type { FixResult } from "../../src/greptile/result.js";
+import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
@@ -143,7 +144,7 @@ class AgentBrain extends FakeBrain {
     await this.act(input.workspacePath, async () => {
       if (target === null || this.deps === null) throw new Error("the run has no push tool");
       // The MCP server turns a thrown error into a refusal; so does this stand-in.
-      const pushed = await pushFromWorktree({ deps: this.deps, target, branchType: null }).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: String(err) }));
+      const pushed = await pushFromWorktree({ deps: { ...this.deps, ledger: storeLedger(this.deps) }, target, branchType: null }).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: String(err) }));
       this.pushes.push(pushed);
       return pushed;
     });
