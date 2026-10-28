@@ -1,7 +1,7 @@
 import type { HelperResult, SlotPorts, SlotRunner } from "../../src/workspace/slots.js";
 
 /** The real helper's port formula, for fakes only; the steward itself never computes it. */
-export const helperPorts = (n: number): SlotPorts => ({ postgres: 15032 + 100 * n, redis: 16079 + 100 * n, rabbitmq: 15072 + 100 * n });
+export const helperPorts = (n: number): SlotPorts => ({ postgres: 15032 + 100 * n, redis: 16079 + 100 * n, rabbitmq: 17072 + 100 * n });
 
 export interface FakeSlotRunner {
   run: SlotRunner;

@@ -19,12 +19,13 @@ usage() {
   exit 2
 }
 
-# The only copy of the port formula; compose interpolates the exported variables. Postgres ends in 32, RabbitMQ in 72
+# The only copy of the port formula; compose interpolates the exported variables. RabbitMQ starts at 17172, clear of the
+# 15672 a local RabbitMQ management UI binds. Postgres ends in 32, RabbitMQ in 72
 # and Redis in 79, so no two slots up to 20 share a port.
 export_ports() {
   export STEWARD_SLOT_POSTGRES_PORT=$((15032 + 100 * $1))
   export STEWARD_SLOT_REDIS_PORT=$((16079 + 100 * $1))
-  export STEWARD_SLOT_RABBITMQ_PORT=$((15072 + 100 * $1))
+  export STEWARD_SLOT_RABBITMQ_PORT=$((17072 + 100 * $1))
 }
 
 compose() {

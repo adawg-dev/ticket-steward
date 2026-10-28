@@ -540,7 +540,7 @@ fails the job (not retried) and doctor, by name. Templates: `{{app}}`, `{{postgr
 `{{rabbitmq}}`; any other `{{name}}` fails config load. The overlay directory itself never changes, so
 the redactor and the implement secret guard still know the remote credentials the overrides replaced.
 Host ports come from the helper's `ports <n>`: Postgres `15032 + 100n`, Redis `16079 + 100n`, RabbitMQ
-`15072 + 100n`, all on 127.0.0.1. The slot credentials are throwaway, not secrets.
+`17072 + 100n` (clear of a local RabbitMQ management UI on 15672), all on 127.0.0.1. The slot credentials are throwaway, not secrets.
 
 Per job: free the app port, `down` then `up` the slot (abandoned after `upTimeoutSeconds`, at most 290; the helper
 instance itself is capped at 300 s), create the worktree, copy the overlay with the overrides, run

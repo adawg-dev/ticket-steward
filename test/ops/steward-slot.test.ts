@@ -54,25 +54,25 @@ describe("steward-slot", () => {
   });
 
   it("prints the slot's ports as one JSON line, without running docker", async () => {
-    expect((await slot(["ports", "1"])).stdout).toBe('{"postgres":15132,"redis":16179,"rabbitmq":15172}');
-    expect((await slot(["ports", "9"])).stdout).toBe('{"postgres":15932,"redis":16979,"rabbitmq":15972}');
-    expect((await slot(["ports", "20"])).stdout).toBe('{"postgres":17032,"redis":18079,"rabbitmq":17072}');
+    expect((await slot(["ports", "1"])).stdout).toBe('{"postgres":15132,"redis":16179,"rabbitmq":17172}');
+    expect((await slot(["ports", "9"])).stdout).toBe('{"postgres":15932,"redis":16979,"rabbitmq":17972}');
+    expect((await slot(["ports", "20"])).stdout).toBe('{"postgres":17032,"redis":18079,"rabbitmq":19072}');
     expect(await dockerCalls()).toEqual([]);
   });
 
   it("brings project steward-slot-<n> up and waits, with the slot's ports exported", async () => {
     expect((await slot(["up", "2"])).exitCode).toBe(0);
-    expect(await dockerCalls()).toEqual([`compose -p steward-slot-2 -f ${COMPOSE} up -d --wait --wait-timeout 120|15232|16279|15272`]);
+    expect(await dockerCalls()).toEqual([`compose -p steward-slot-2 -f ${COMPOSE} up -d --wait --wait-timeout 120|15232|16279|17272`]);
   });
 
   it("brings the project down with its volumes and orphans", async () => {
     expect((await slot(["down", "3"])).exitCode).toBe(0);
-    expect(await dockerCalls()).toEqual([`compose -p steward-slot-3 -f ${COMPOSE} down --volumes --remove-orphans --timeout 10|15332|16379|15372`]);
+    expect(await dockerCalls()).toEqual([`compose -p steward-slot-3 -f ${COMPOSE} down --volumes --remove-orphans --timeout 10|15332|16379|17372`]);
   });
 
   it("lists the project's running containers", async () => {
     expect((await slot(["status", "1"])).exitCode).toBe(0);
-    expect(await dockerCalls()).toEqual(["ps --filter label=com.docker.compose.project=steward-slot-1 --format {{.Names}} {{.Status}}|15132|16179|15172"]);
+    expect(await dockerCalls()).toEqual(["ps --filter label=com.docker.compose.project=steward-slot-1 --format {{.Names}} {{.Status}}|15132|16179|17172"]);
   });
 
   it("check prints ok when the compose file parses and every image is present", async () => {
@@ -80,11 +80,11 @@ describe("steward-slot", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("ok");
     expect(await dockerCalls()).toEqual([
-      `compose -f ${COMPOSE} config --quiet|15132|16179|15172`,
-      `compose -f ${COMPOSE} config --images|15132|16179|15172`,
-      "image inspect timescale/timescaledb-ha:pg17-ts2.27-all|15132|16179|15172",
-      "image inspect redis:7-alpine|15132|16179|15172",
-      "image inspect rabbitmq:4.2.0-management|15132|16179|15172",
+      `compose -f ${COMPOSE} config --quiet|15132|16179|17172`,
+      `compose -f ${COMPOSE} config --images|15132|16179|17172`,
+      "image inspect timescale/timescaledb-ha:pg17-ts2.27-all|15132|16179|17172",
+      "image inspect redis:7-alpine|15132|16179|17172",
+      "image inspect rabbitmq:4.2.0-management|15132|16179|17172",
     ]);
   });
 
@@ -107,11 +107,11 @@ describe("steward-slot --socket", () => {
     const result = await request("up 2\n");
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("exit 0");
-    expect(await dockerCalls()).toEqual([`compose -p steward-slot-2 -f ${COMPOSE} up -d --wait --wait-timeout 120|15232|16279|15272`]);
+    expect(await dockerCalls()).toEqual([`compose -p steward-slot-2 -f ${COMPOSE} up -d --wait --wait-timeout 120|15232|16279|17272`]);
   });
 
   it("sends the command's output before the exit line", async () => {
-    expect((await request("ports 1\n")).stdout).toBe('{"postgres":15132,"redis":16179,"rabbitmq":15172}\nexit 0');
+    expect((await request("ports 1\n")).stdout).toBe('{"postgres":15132,"redis":16179,"rabbitmq":17172}\nexit 0');
   });
 
   it("reports a failing command's status in-band and exits 0 itself, so the unit never fails", async () => {

@@ -15,7 +15,7 @@ describe("SlotClient", () => {
 
   it("parses the helper's ports JSON", async () => {
     const runner = fakeSlotRunner();
-    expect(await new SlotClient(SETTINGS, runner.run).ports(2)).toEqual({ postgres: 15232, redis: 16279, rabbitmq: 15272 });
+    expect(await new SlotClient(SETTINGS, runner.run).ports(2)).toEqual({ postgres: 15232, redis: 16279, rabbitmq: 17272 });
     expect(runner.calls).toEqual([["ports", "2"]]);
   });
 
@@ -27,7 +27,7 @@ describe("SlotClient", () => {
 
   it("starts with down, then up under the configured timeout, then reads the ports", async () => {
     const runner = fakeSlotRunner();
-    expect(await new SlotClient(SETTINGS, runner.run).start(1)).toEqual({ postgres: 15132, redis: 16179, rabbitmq: 15172 });
+    expect(await new SlotClient(SETTINGS, runner.run).start(1)).toEqual({ postgres: 15132, redis: 16179, rabbitmq: 17172 });
     expect(runner.calls).toEqual([["down", "1"], ["up", "1"], ["ports", "1"]]);
     expect(runner.timeouts).toEqual([60_000, 180_000, 60_000]);
   });
@@ -99,7 +99,7 @@ describe("SlotClient", () => {
 
 describe("renderSlotEnv", () => {
   it("renders every template, with or without spaces in the braces, and keeps null", () => {
-    const slot = { n: 1, appPort: 4101, ports: { postgres: 15132, redis: 16179, rabbitmq: 15172 } };
+    const slot = { n: 1, appPort: 4101, ports: { postgres: 15132, redis: 16179, rabbitmq: 17172 } };
     expect(
       renderSlotEnv(
         {
@@ -117,7 +117,7 @@ describe("renderSlotEnv", () => {
       DB_PORT: "15132",
       TG_CONN_STR: "postgres://postgres:steward-slot@localhost:15132/concentrate_tg",
       REDIS_URL: "redis://localhost:16179",
-      RABBITMQ_URL: "amqp://steward:steward-slot@localhost:15172",
+      RABBITMQ_URL: "amqp://steward:steward-slot@localhost:17172",
       BASE_URL: "http://localhost:4101",
       DB_HOST: "localhost",
       REDIS_CLUSTER_NODES: null,
@@ -163,10 +163,10 @@ describe("socketRunner", () => {
     });
 
   it("sends one request line and returns the output before the exit line", async () => {
-    await serve(() => '{"postgres":15132,"redis":16179,"rabbitmq":15172}\nexit 0\n');
+    await serve(() => '{"postgres":15132,"redis":16179,"rabbitmq":17172}\nexit 0\n');
     const result = await socketRunner(socketPath)(["ports", "1"], { timeoutMs: 5_000 });
     expect(requests).toEqual(["ports 1\n"]);
-    const body = '{"postgres":15132,"redis":16179,"rabbitmq":15172}\n';
+    const body = '{"postgres":15132,"redis":16179,"rabbitmq":17172}\n';
     expect(result).toEqual({ exitCode: 0, stdout: body, output: body, timedOut: false, canceled: false });
   });
 
@@ -220,7 +220,7 @@ describe("socketRunner", () => {
     await new Promise<void>((ready) => listening.listen(socketPath, () => ready()));
     const run = socketRunner(socketPath);
 
-    const body = '{"postgres":15232,"redis":16279,"rabbitmq":15272}\n';
+    const body = '{"postgres":15232,"redis":16279,"rabbitmq":17272}\n';
     expect(await run(["ports", "2"], { timeoutMs: 5_000 })).toEqual({ exitCode: 0, stdout: body, output: body, timedOut: false, canceled: false });
     expect((await run(["up", "01"], { timeoutMs: 5_000 })).exitCode).toBe(2);
   });
