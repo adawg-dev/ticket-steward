@@ -1,0 +1,84 @@
+# Ticket Steward as a Compose stack (docs/ops.md, "Running with Docker Compose"):
+#   docker compose --env-file ops/compose.env up -d --build
+# Three services in one network namespace (the dind service's): slot containers that dind publishes on 127.0.0.1
+# are on 127.0.0.1 for the steward too, exactly as on the host. Only slot-helper can reach dockerd; the steward
+# reaches slot-helper over its socket and never gets Docker access.
+name: ticket-steward
+
+services:
+  dind:
+    image: docker:29.2.1-dind
+    privileged: true
+    restart: unless-stopped
+    # A unix socket only: no 2375/2376 listener in the shared netns, where the agent could reach it.
+    command: ["dockerd", "--host=unix:///var/run/dind/docker.sock"]
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    volumes:
+      - dind-sock:/var/run/dind
+      - dind-data:/var/lib/docker
+      # ops/slots-compose.yml bind-mounts this path into the Postgres container; dind's daemon resolves it here.
+      - ./ops/slots-init:/etc/ticket-steward/slots/init:ro
+    ports:
+      # The steward's webhooks and /health; the steward shares this service's network namespace.
+      - "127.0.0.1:${STEWARD_PORT:-3020}:3020"
+    healthcheck:
+      test: ["CMD", "docker", "--host=unix:///var/run/dind/docker.sock", "version"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  slot-helper:
+    build:
+      context: ./ops
+      dockerfile: slot-helper/Dockerfile
+    network_mode: service:dind
+    restart: unless-stopped
+    environment:
+      DOCKER_HOST: unix:///var/run/dind/docker.sock
+      STEWARD_UID: ${STEWARD_UID:-1001}
+      STEWARD_GID: ${STEWARD_GID:-1001}
+    volumes:
+      - dind-sock:/var/run/dind
+      - slot-sock:/run/slot
+    depends_on:
+      dind:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "test", "-S", "/run/slot/steward-slot.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  steward:
+    build:
+      context: .
+    network_mode: service:dind
+    restart: unless-stopped
+    # serve waits for in-flight jobs on SIGTERM; the systemd unit's TimeoutStopSec.
+    stop_grace_period: 120s
+    # The live host runs it as the existing steward user (998:998), which owns both bind-mounted directories.
+    user: "${STEWARD_UID:-1001}:${STEWARD_GID:-1001}"
+    volumes:
+      - ${STEWARD_CONFIG_DIR:-/etc/ticket-steward}:/etc/ticket-steward:ro
+      - ${STEWARD_DATA_DIR:-/var/lib/ticket-steward}:/var/lib/ticket-steward
+      # slots.socket in the config is /run/slot/steward-slot.sock.
+      - slot-sock:/run/slot
+    depends_on:
+      dind:
+        condition: service_healthy
+      slot-helper:
+        condition: service_healthy
+    healthcheck:
+      # server.port must stay 3020: dind publishes that container port.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3020/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  dind-sock:
+  dind-data:
+  slot-sock:

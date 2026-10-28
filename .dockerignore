@@ -1,0 +1,11 @@
+# The steward image needs package files, src, bin and prompts; ops/slot-helper builds from ops/.
+.git
+node_modules
+dist
+coverage
+test
+docs
+examples
+.env
+.env.*
+*.log

@@ -30,6 +30,8 @@ export interface CliFactories {
   slotRunner?: SlotRunner;
   /** Stands in for /usr/local/sbin/steward-slot in the helper ownership check. */
   slotHelperPath?: string;
+  /** Stands in for /run/steward-slot.sock, the socket path that means the helper is installed on this host. */
+  slotSystemdSocket?: string;
 }
 
 export interface CliContext {

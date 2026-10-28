@@ -263,12 +263,29 @@ const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Che
 
 /** Where the install puts the helper; ops/steward-slot@.service runs it from here. */
 export const SLOT_HELPER_PATH = "/usr/local/sbin/steward-slot";
+/** ops/steward-slot.socket; any other slots.socket means the helper runs in the Compose stack's slot-helper container. */
+export const SLOT_SYSTEMD_SOCKET = "/run/steward-slot.sock";
 const SLOTS_DOC = 'docs/ops.md, "Worker slots"';
+const COMPOSE_DOC = 'docs/ops.md, "Running with Docker Compose"';
 
-/** The helper runs as root: nobody but root may be able to change it. Doctor can read it (it is world-readable). */
-const slotHelperCheck = (helper: string): Check => ({
+/** Where the helper runs: installed on this host behind systemd, or in the slot-helper container. */
+type SlotHelperHost = { kind: "systemd"; helper: string } | { kind: "container"; systemdSocket: string };
+
+/** The command an operator runs to take slot n down by hand. */
+const slotDownCommand = (host: SlotHelperHost, n: number): string =>
+  host.kind === "systemd" ? `${host.helper} down ${n} as root` : `docker compose exec slot-helper steward-slot down ${n}`;
+
+/**
+ * On the host the helper runs as root: nobody but root may be able to change it. Doctor can read it (it is world-readable).
+ * In a container the helper file is not on this filesystem; the image is its owner, so only the socket is checked.
+ */
+const slotHelperCheck = (host: SlotHelperHost, socketPath: string): Check => ({
   name: "slot helper",
   run: async () => {
+    if (host.kind === "container") {
+      return ok(`slots.socket is ${socketPath}, not ${host.systemdSocket}: the helper runs in the slot-helper container; host ownership check skipped`);
+    }
+    const { helper } = host;
     if (!existsSync(helper)) return flunk(`${helper} does not exist; install ops/steward-slot (${SLOTS_DOC})`);
     const info = await stat(helper);
     if (info.uid !== 0) return flunk(`${helper} is not owned by root; chown root:root ${helper}`);
@@ -278,10 +295,13 @@ const slotHelperCheck = (helper: string): Check => ({
 });
 
 /** The socket exists and the helper behind it answers `check` (compose file parses, images pulled). */
-const slotSocketCheck = (socketPath: string, client: SlotClient): Check => ({
+const slotSocketCheck = (host: SlotHelperHost, socketPath: string, client: SlotClient): Check => ({
   name: "slot socket",
   run: async () => {
-    if (!existsSync(socketPath)) return flunk(`${socketPath} does not exist; systemctl enable --now steward-slot.socket (${SLOTS_DOC})`);
+    if (!existsSync(socketPath)) {
+      const remedy = host.kind === "systemd" ? `systemctl enable --now steward-slot.socket (${SLOTS_DOC})` : `is the slot-helper service up? (${COMPOSE_DOC})`;
+      return flunk(`${socketPath} does not exist; ${remedy}`);
+    }
     if (!(await stat(socketPath)).isSocket()) return flunk(`${socketPath} is not a socket`);
     const result = await client.check();
     return result.ok ? ok(`${socketPath}: check ok`) : flunk(`check over ${socketPath} failed: ${result.output}; see ${SLOTS_DOC}`);
@@ -289,7 +309,7 @@ const slotSocketCheck = (socketPath: string, client: SlotClient): Check => ({
 });
 
 /** Doctor expects every slot down (serve stopped or idle), so a held service port usually means a slot left up. */
-const slotPortsCheck = (config: StewardConfig, helper: string, client: SlotClient, n: number): Check => ({
+const slotPortsCheck = (config: StewardConfig, host: SlotHelperHost, client: SlotClient, n: number): Check => ({
   name: `slot ${n} ports`,
   run: async () => {
     const ports = await client.ports(n);
@@ -297,7 +317,7 @@ const slotPortsCheck = (config: StewardConfig, helper: string, client: SlotClien
     const busy: string[] = [];
     for (const [name, port] of named) if (!(await isPortFree(port))) busy.push(`${name} ${port}`);
     if (busy.length === 0) return ok(`${named.map(([name, port]) => `${name} ${port}`).join(", ")} free`);
-    if ((await client.status(n)) !== "") return flunk(`slot ${n} is up (${busy.join(", ")} in use); stop serve or run ${helper} down ${n} as root`);
+    if ((await client.status(n)) !== "") return flunk(`slot ${n} is up (${busy.join(", ")} in use); stop serve or run ${slotDownCommand(host, n)}`);
     return flunk(`in use: ${busy.join(", ")}`);
   },
 });
@@ -326,11 +346,13 @@ const portChecks = ({ config }: LoadedConfig, ctx: CliContext): Check[] => {
     ];
   }
   const client = new SlotClient(slots, ctx.factories?.slotRunner);
-  const helper = ctx.factories?.slotHelperPath ?? SLOT_HELPER_PATH;
+  const systemdSocket = ctx.factories?.slotSystemdSocket ?? SLOT_SYSTEMD_SOCKET;
+  const host: SlotHelperHost =
+    slots.socket === systemdSocket ? { kind: "systemd", helper: ctx.factories?.slotHelperPath ?? SLOT_HELPER_PATH } : { kind: "container", systemdSocket };
   return [
-    slotHelperCheck(helper),
-    slotSocketCheck(slots.socket, client),
-    ...Array.from({ length: slots.count }, (_, index) => slotPortsCheck(config, helper, client, index + 1)),
+    slotHelperCheck(host, slots.socket),
+    slotSocketCheck(host, slots.socket, client),
+    ...Array.from({ length: slots.count }, (_, index) => slotPortsCheck(config, host, client, index + 1)),
     slotEnvCheck(config, slots),
   ];
 };

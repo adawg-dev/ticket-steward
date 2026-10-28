@@ -1,4 +1,4 @@
-# Ticket Steward slot helper socket (docs/ops.md §1.11). Install to /etc/systemd/system/, then
+# Ticket Steward slot helper socket (docs/ops.md §1.10). Install to /etc/systemd/system/, then
 #   systemctl daemon-reload && systemctl enable --now steward-slot.socket
 # Only root and group steward may connect; each connection starts one steward-slot@.service instance as root.
 # The steward unit keeps NoNewPrivileges=yes: it gains nothing, it only connects.

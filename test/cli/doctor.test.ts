@@ -282,7 +282,7 @@ describe("slot checks", () => {
 
   const slotLines = async (
     runner: FakeSlotRunner,
-    options: { env?: Record<string, string | null>; port?: number | null; socket?: string } = {},
+    options: { env?: Record<string, string | null>; port?: number | null; socket?: string; container?: boolean } = {},
   ): Promise<{ lines: string[]; out: string }> => {
     const configPath = await writeConfig(dir, {
       dataDir: repo.dataDir,
@@ -292,7 +292,10 @@ describe("slot checks", () => {
       serverPort: await freeTcpPort(),
       slots: { count: 2, socket: options.socket ?? socketPath, appPortBase, env: options.env ?? {} },
     });
-    const { ctx, stdout } = makeContext({ factories: { codehostMcpSpec: fakeCodehostMcpSpec, slotRunner: runner.run, slotHelperPath: helper } });
+    // The temp socket stands in for the systemd one unless the test runs doctor as it would inside the Compose stack.
+    const slotSystemdSocket = options.container === true ? "/run/steward-slot.sock" : (options.socket ?? socketPath);
+    const factories = { codehostMcpSpec: fakeCodehostMcpSpec, slotRunner: runner.run, slotHelperPath: helper, slotSystemdSocket };
+    const { ctx, stdout } = makeContext({ factories });
     await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"]).catch(() => undefined);
     return { lines: stdout().split("\n").filter((line) => line.includes("] slot ")), out: stdout() };
   };
@@ -344,6 +347,32 @@ describe("slot checks", () => {
     runner.respond("check", { exitCode: 1, stdout: "", output: reason });
     const { lines } = await slotLines(runner);
     expect(lines).toContain(`[fail] slot socket: check over ${socketPath} failed: ${reason}; see docs/ops.md, "Worker slots"`);
+  });
+
+  it("skips the host ownership check when the helper runs in a container", async () => {
+    const { lines } = await slotLines(slotRunner(), { container: true, env: { DB_PORT: "{{postgres}}" } });
+    expect(lines.slice(0, 2)).toEqual([
+      `[ok] slot helper: slots.socket is ${socketPath}, not /run/steward-slot.sock: the helper runs in the slot-helper container; host ownership check skipped`,
+      `[ok] slot socket: ${socketPath}: check ok`,
+    ]);
+  });
+
+  it("names the Compose service for a missing container socket and a slot left up", async () => {
+    const missing = join(dir, "missing.sock");
+    const missingLines = (await slotLines(slotRunner(), { container: true, socket: missing })).lines;
+    expect(missingLines).toContain(`[fail] slot socket: ${missing} does not exist; is the slot-helper service up? (docs/ops.md, "Running with Docker Compose")`);
+
+    const runner = slotRunner();
+    runner.respond("status", { stdout: "steward-slot-1-postgres-1 Up 3 minutes\n" });
+    const held = createServer();
+    const postgres = ports.get(1)?.postgres ?? 0;
+    await new Promise<void>((resolve) => held.listen(postgres, resolve));
+    try {
+      const { lines } = await slotLines(runner, { container: true });
+      expect(lines).toContain(`[fail] slot 1 ports: slot 1 is up (postgres ${postgres} in use); stop serve or run docker compose exec slot-helper steward-slot down 1`);
+    } finally {
+      await new Promise<void>((resolve) => held.close(() => resolve()));
+    }
   });
 
   it("reports workspace.port next to slots as a config failure", async () => {

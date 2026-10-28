@@ -1,4 +1,4 @@
-# One slot-helper request (docs/ops.md §1.11). Started by steward-slot.socket per connection; never enable it directly.
+# One slot-helper request (docs/ops.md §1.10). Started by steward-slot.socket per connection; never enable it directly.
 # Runs as root: the helper validates the request itself and is the only thing on this host the steward can ask to touch Docker.
 [Unit]
 Description=Ticket Steward slot helper request

@@ -36,7 +36,7 @@ export const MAX_SLOTS = 20;
 const SlotsSchema = z
   .object({
     count: z.number().int().min(1).max(MAX_SLOTS),
-    /** The slot helper's socket (ops/steward-slot.socket); systemd runs the root helper per connection. */
+    /** The slot helper's socket: ops/steward-slot.socket, where systemd runs the root helper per connection, or the Compose stack's /run/slot/steward-slot.sock. */
     socket: z.string().min(1).default("/run/steward-slot.sock"),
     /** Slot n's app port is appPortBase + n. */
     appPortBase: z.number().int().positive().max(65_526),

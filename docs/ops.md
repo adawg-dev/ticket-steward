@@ -456,7 +456,8 @@ cannot prove Developer access; the first real push does) and, for GitLab, `imple
 no Developer-role or project-bot push or merge grant (read with `GITLAB_TOKEN`); Playwright's Chromium is installed;
 `workspace.port` is free, or, with `slots` (§1.10): `/usr/local/sbin/steward-slot` is root-owned and not
 group- or world-writable, `slots.socket` exists, is a socket and answers `check`, every slot's app and
-service ports are free (a slot left up is named), and every `slots.env` key is defined in the overlay.
+service ports are free (a slot left up is named), and every `slots.env` key is defined in the overlay. Under Docker
+Compose (§1.11) the ownership check is skipped, and doctor says so.
 
 ```bash
 sudo cp ops/ticket-steward.service /etc/systemd/system/ticket-steward.service
@@ -590,6 +591,77 @@ resourceGuard: { minAvailableMemoryMb: 4096, maxLoadPerCpu: 1.5, startSpacingSec
 - Doctor reports `slot <n> is up` while serve is stopped: a crashed run left it; `steward-slot down <n>`.
 - A port in use that is not a slot: `ss -ltnp 'sport = :<port>'` names the holder; move `appPortBase` or stop it.
 - `steward jobs` prints `# running: slot 1 job 12, …` while serve runs; `/health` has the same list under `worker.running`.
+
+### 1.11 Running with Docker Compose
+
+The alternative to the systemd install (§1.2–§1.10): the steward, its slot helper and a Docker daemon for the slots
+run as one Compose stack from a checkout of this repo (`compose.yaml`). The config and data directories are the
+same, bind-mounted from the host, so the steward behaves as it does under systemd.
+
+| Service | Image | Role |
+| --- | --- | --- |
+| `dind` | `docker:29.2.1-dind`, privileged | dockerd for the slot containers, on a unix socket only (no 2375/2376 listener); publishes port 3020 to `127.0.0.1:${STEWARD_PORT}` |
+| `slot-helper` | `ops/slot-helper/Dockerfile` | the same `ops/steward-slot`, served by socat on `/run/slot/steward-slot.sock` (one helper per connection, owner `STEWARD_UID:STEWARD_GID`, mode 0660); the only service with the docker socket |
+| `steward` | `Dockerfile` | `steward serve` as `STEWARD_UID:STEWARD_GID`; Node 24, pnpm 11.13.0, git, psql, Playwright Chromium; no Docker CLI or socket |
+
+`slot-helper` and `steward` share `dind`'s network namespace, so slot ports that dind publishes on `127.0.0.1` are on
+`127.0.0.1` for the steward and the agent exactly as on the host: `slots.env` and `appPortBase` stay unchanged. The
+image sets `STEWARD_LISTEN_HOST=0.0.0.0` so the published port reaches the server (the host install keeps binding
+localhost). The accepted risk is the host install's: the agent can connect to the helper socket and `down` another slot.
+
+**Setup** (from the checkout, as a user in the `docker` group):
+
+```bash
+cp ops/compose.env.example ops/compose.env   # STEWARD_PORT, STEWARD_UID/GID, STEWARD_CONFIG_DIR, STEWARD_DATA_DIR
+docker compose --env-file ops/compose.env build
+docker compose --env-file ops/compose.env up -d dind slot-helper
+# the slot images live in dind's own image store (the dind-data volume), so pull them there once
+for image in timescale/timescaledb-ha:pg17-ts2.27-all redis:7-alpine rabbitmq:4.2.0-management; do
+  docker compose --env-file ops/compose.env exec slot-helper docker pull "$image"
+done
+docker compose --env-file ops/compose.env up -d
+docker compose --env-file ops/compose.env exec steward steward doctor
+curl -s 127.0.0.1:3020/health
+```
+
+Config changes: `slots.socket: "/run/slot/steward-slot.sock"`; `server.port` stays `3020` (the port dind
+publishes and the healthcheck uses). Doctor treats any `slots.socket` other than `/run/steward-slot.sock` as the
+helper in a container: it skips the host ownership check of `/usr/local/sbin/steward-slot` and says so, and still
+requires the socket to answer `check`. Every other check is the same as §1.8.
+
+**Day to day.** `docker compose --env-file ops/compose.env logs -f steward` replaces `journalctl`; `exec steward steward jobs`
+replaces running `steward` on the host; `exec slot-helper steward-slot status <n>` and `down <n>` replace the root
+helper commands of §1.10; `up -d --build` after a `git pull` updates the stack. Stopping waits up to 120 s for
+in-flight jobs, like the unit's `TimeoutStopSec`. One request over the socket from the steward container:
+
+```bash
+docker compose --env-file ops/compose.env exec steward node -e 'const s=require("net").connect("/run/slot/steward-slot.sock",()=>s.write(process.argv[1]+"\n"));s.pipe(process.stdout)' check
+```
+
+**Migrating the live host from systemd.** On the live host the stack runs as the existing `steward` user
+(`STEWARD_UID=998`, `STEWARD_GID=998` in `ops/compose.env`), which owns `/etc/ticket-steward` and
+`/var/lib/ticket-steward`, so nothing is chowned and the systemd units stay a working rollback.
+
+1. Back up `/var/lib/ticket-steward/steward.db`, `/etc/ticket-steward/steward.config.ts` and `/etc/ticket-steward/.env`.
+2. `systemctl stop ticket-steward steward-slot.socket` (serve waits for in-flight jobs and brings every slot down).
+3. Set `slots.socket: "/run/slot/steward-slot.sock"` in the config.
+4. Build, start `dind` and `slot-helper`, pull the slot images and start the stack as in Setup.
+5. Doctor passes inside the container, `/health` answers on `127.0.0.1:3020` (the `cloudflared` tunnel keeps
+   pointing there), and one webhook delivery shows in `logs steward`.
+6. `systemctl disable ticket-steward steward-slot.socket`. The units and `/usr/local/sbin/steward-slot` stay
+   installed until the owner removes them.
+
+Rollback: `docker compose --env-file ops/compose.env down` (without `-v`, which would also drop the pulled slot
+images), set `slots.socket` back to `/run/steward-slot.sock`, `systemctl enable --now steward-slot.socket ticket-steward`.
+
+**Troubleshooting.**
+
+- `another steward process holds /var/lib/ticket-steward/run.lock` in a crash loop: the lock names a pid that is
+  alive and whose start time matches, so another steward really runs on this data dir (a systemd unit, or a
+  `steward` started by hand). A lock left by an older steward holds only a pid; if nothing else runs, delete it.
+- `cannot reach the slot helper at /run/slot/steward-slot.sock`: `ENOENT`, `slot-helper` is not running
+  (`ps`, `logs slot-helper`); `EACCES`, the steward runs as another uid/gid than the socket's owner (set both through `STEWARD_UID`/`STEWARD_GID`, never `user:` alone).
+- Doctor's `check` fails with `image … is not pulled`: pull it through `slot-helper` as in Setup.
 
 ## 2. Why the overlay holds sandbox credentials
 
