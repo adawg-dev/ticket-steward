@@ -1,8 +1,10 @@
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { StewardConfigSchema } from "./schema.js";
+import { overlayTemplateIssues } from "../overlay/template.js";
 import { loadSecretsFrom } from "./secretSource.js";
 import type { SecretFetcher, Secrets } from "./secretSource.js";
 import type { StewardConfig } from "./schema.js";
@@ -29,6 +31,16 @@ export const resolveFromConfigDir = (configDir: string, p: string): string => {
   return isAbsolute(p) ? p : resolve(configDir, p);
 };
 
+/**
+ * Refuses a template entry the egress proxy cannot stand in for. A template dir that is not there yet (a container
+ * that never renders it) is left to `render-overlay` and doctor.
+ */
+const checkOverlayTemplate = async (templateDir: string): Promise<void> => {
+  if (!(await stat(templateDir).then((s) => s.isDirectory(), () => false))) return;
+  const issues = await overlayTemplateIssues(templateDir);
+  if (issues.length > 0) throw new Error(issues.map((issue) => `workspace.overlayTemplateDir: ${issue}`).join("\n"));
+};
+
 /** `secretFetcher` stands in for Secrets Manager when `secrets.source` is "aws" (tests). */
 export const loadConfig = async (opts: { configPath?: string; cwd?: string; secretFetcher?: SecretFetcher }): Promise<LoadedConfig> => {
   const configPath = resolve(opts.configPath ?? join(opts.cwd ?? process.cwd(), CONFIG_FILENAME));
@@ -41,6 +53,9 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string; secr
     workspace: {
       ...parsed.workspace,
       overlayDir: resolveFromConfigDir(configDir, parsed.workspace.overlayDir),
+      ...(parsed.workspace.overlayTemplateDir === undefined
+        ? {}
+        : { overlayTemplateDir: resolveFromConfigDir(configDir, parsed.workspace.overlayTemplateDir) }),
       ...(parsed.workspace.skillsDir === undefined
         ? {}
         : { skillsDir: resolveFromConfigDir(configDir, parsed.workspace.skillsDir) }),
@@ -48,6 +63,7 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string; secr
     ...(parsed.implement === undefined ? {} : { implement: { ...parsed.implement, prompt: resolveFromConfigDir(configDir, parsed.implement.prompt) } }),
     ...(parsed.greptile === undefined ? {} : { greptile: { ...parsed.greptile, prompt: resolveFromConfigDir(configDir, parsed.greptile.prompt) } }),
   };
+  if (config.workspace.overlayTemplateDir !== undefined) await checkOverlayTemplate(config.workspace.overlayTemplateDir);
   const secretsConfig = config.secrets ?? { source: "file" };
   const secrets = await loadSecretsFrom(secretsConfig, configDir, opts.secretFetcher);
   if (config.implement !== undefined && (secrets.GITLAB_PUSH_TOKEN ?? "") === "") {

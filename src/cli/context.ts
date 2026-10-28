@@ -5,6 +5,7 @@ import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { codehostMcpSpec } from "../codehost/server.js";
 import type { CodeHost } from "../codehost/types.js";
 import { loadConfig, type LoadedConfig } from "../config/load.js";
+import type { SecretFetcher } from "../config/secretSource.js";
 import type { OrbitExec } from "../orbit/run.js";
 import type { TicketBundle } from "../tracker/types.js";
 import type { Tracker } from "../tracker/types.js";
@@ -35,6 +36,8 @@ export interface CliFactories {
   slotSystemdSocket?: string;
   /** Stands in for the Orbit CLI in doctor's Orbit checks. */
   orbitExec?: OrbitExec;
+  /** Stands in for Secrets Manager in `render-overlay`. */
+  secretFetcher?: SecretFetcher;
   /** Stands in for the interactive Claude Code process `steward chat` runs; resolves to its exit code. */
   spawnInteractive?: SpawnInteractive;
 }

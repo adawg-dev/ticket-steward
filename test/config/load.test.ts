@@ -226,3 +226,22 @@ describe("loadConfig with secrets from AWS Secrets Manager", () => {
     await expect(loadConfig({ cwd: dir, secretFetcher: fetcher({}) })).rejects.toThrow("Secrets Manager: DEV_PUSH not found");
   });
 });
+
+describe("loadConfig with an overlay template", () => {
+  const withTemplate = configSource().replace("port: 4100,", 'port: 4100, overlayTemplateDir: "./overlay-template",');
+
+  it("resolves overlayTemplateDir against the config dir", async () => {
+    await writeSource(join(dir, "steward.config.ts"), withTemplate);
+    await mkdir(join(dir, "overlay-template"));
+    await writeFile(join(dir, "overlay-template", ".env"), "STRIPE_SECRET_KEY={{secret:DEV_S@api.stripe.com}}\n");
+    const { config } = await loadConfig({ cwd: dir });
+    expect(config.workspace.overlayTemplateDir).toBe(join(dir, "overlay-template"));
+  });
+
+  it("refuses a template entry the egress proxy cannot stand in for", async () => {
+    await writeSource(join(dir, "steward.config.ts"), withTemplate);
+    await mkdir(join(dir, "overlay-template"));
+    await writeFile(join(dir, "overlay-template", ".env"), "AWS_SECRET_ACCESS_KEY={{signed:DEV_X}}\n");
+    await expect(loadConfig({ cwd: dir })).rejects.toThrow("workspace.overlayTemplateDir: .env:1: DEV_X is used to sign requests; the egress proxy cannot stand in for it");
+  });
+});

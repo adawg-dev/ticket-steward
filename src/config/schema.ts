@@ -145,6 +145,8 @@ export const StewardConfigSchema = z.object({
     fetchUrl: z.string(),
     baseBranch: z.string(),
     overlayDir: z.string(),
+    /** The Kubernetes runtime's overlay: env files whose `{{secret:…}}`, `{{local}}` entries `render-overlay` fills per run. */
+    overlayTemplateDir: z.string().optional(),
     skillsDir: z.string().optional(),
     setup: z.array(z.string()),
     setupTimeoutMinutes: z.number().positive().default(15),

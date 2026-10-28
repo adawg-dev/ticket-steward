@@ -67,6 +67,15 @@ export const parseSecretValue = (raw: string): string => {
   return typeof first === "string" ? first : JSON.stringify(first);
 };
 
+/** One secret's parsed value; missing or empty is an error naming the id, never a value. */
+export const readSecretValue = async (fetcher: SecretFetcher, id: string): Promise<string> => {
+  const raw = await fetcher.get(id);
+  if (raw === null) throw new Error(`Secrets Manager: ${id} not found`);
+  const value = parseSecretValue(raw);
+  if (value === "") throw new Error(`Secrets Manager: ${id} is empty`);
+  return value;
+};
+
 /** The steward's secrets: the config dir's `.env`, or each mapped Secrets Manager id in turn. */
 export const loadSecretsFrom = async (config: SecretsConfig, configDir: string, fetcher?: SecretFetcher): Promise<Secrets> => {
   if (config.source === "file") {
@@ -75,12 +84,6 @@ export const loadSecretsFrom = async (config: SecretsConfig, configDir: string, 
   }
   const source = fetcher ?? awsSecretFetcher(config.region);
   const values: Record<string, string> = {};
-  for (const [name, id] of Object.entries(config.map)) {
-    const raw = await source.get(id);
-    if (raw === null) throw new Error(`Secrets Manager: ${id} not found`);
-    const value = parseSecretValue(raw);
-    if (value === "") throw new Error(`Secrets Manager: ${id} is empty`);
-    values[name] = value;
-  }
+  for (const [name, id] of Object.entries(config.map)) values[name] = await readSecretValue(source, id);
   return SecretsSchema.parse(values);
 };
