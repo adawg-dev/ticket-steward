@@ -1,7 +1,7 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BrainInput, BrainRun } from "../../src/brain/types.js";
+import { INTERRUPTED_ERROR, type BrainInput, type BrainRun } from "../../src/brain/types.js";
 import { latestSession } from "../../src/chat/session.js";
 import { CHAT_MARKER } from "../../src/chat/result.js";
 import { runChat } from "../../src/chat/run.js";
@@ -12,6 +12,8 @@ import type { RunContext } from "../../src/core/types.js";
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
+import type { RunExecutor } from "../../src/run/executor.js";
+import { RunSpecSchema, type RunReport, type RunSpec, type WorkReport } from "../../src/run/protocol.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
@@ -223,6 +225,19 @@ describe("runChat", () => {
     expect(await git(join(repo.dataDir, "work", "ticket-API-1"), ["rev-parse", "HEAD"])).toBe(headSha);
   });
 
+  it("runs setup in a recreated worktree only, never again in the session's reused one", async () => {
+    const loopId = createLoop();
+    const deps = makeDeps(new FakeBrain({ result: { reply: "ok" } }));
+    // Outside the worktree, so it is not left work.
+    deps.config.workspace.setup = ["echo ran >> ../setup.log"];
+    const log = join(repo.dataDir, "work", "setup.log");
+
+    expect(await runChat(claim(loopId), deps)).toEqual({ status: "succeeded" });
+    expect(await readFile(log, "utf8")).toBe("ran\n");
+    expect(await runChat(claim(loopId), deps)).toEqual({ status: "succeeded" });
+    expect(await readFile(log, "utf8")).toBe("ran\n");
+  });
+
   it("a push through the tool moves the loop's head, so the loop reads it as its own", async () => {
     const loopId = createLoop();
     const brain = new AgentBrain({ result: { reply: "Put the retry back." } }, commitAndPush);
@@ -310,5 +325,96 @@ describe("runChat", () => {
     expect(await runChat(ctx, deps)).toEqual({ status: "succeeded" });
     expect(brain.runs).toBe(1);
     expect(gitlab.replies.map((reply) => reply.body)).toEqual([`Answer.\n\n${CHAT_MARKER}`]);
+  });
+});
+
+describe("runChat through an executor", () => {
+  const reportOf = (spec: RunSpec, patch: Partial<RunReport> = {}): RunReport => ({
+    runId: spec.runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-x", output: { reply: "Answer." }, usage: { inputTokens: 1, outputTokens: 1 }, ...patch,
+  });
+
+  /** An executor that records the specs it is handed and reports `patch` and `work` for each. */
+  const executing = (patch: Partial<RunReport> = {}, work: Partial<WorkReport> = {}): RunExecutor & { specs: RunSpec[] } => {
+    const specs: RunSpec[] = [];
+    return {
+      specs,
+      execute: async (spec) => {
+        specs.push(spec);
+        return { report: reportOf(spec, patch), work: { runId: spec.runId, unpushed: "", pushedSha: null, ...work } };
+      },
+    };
+  };
+
+  it("posts a reply listing the unpushed work the executor found, marked as the steward's", async () => {
+    const loopId = createLoop();
+    const executor = executing({ output: { reply: "Started on it." } }, { unpushed: "a1b2c3d API-1: wip" });
+
+    const outcome = await runChat(claim(loopId), { ...makeDeps(new FakeBrain()), executor });
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "the agent left unpushed work" });
+    expect(gitlab.replies).toEqual([
+      { discussionId: DISCUSSION, body: `Started on it.\n\nLeft in the agent's worktree, not pushed:\n\n\`\`\`\na1b2c3d API-1: wip\n\`\`\`\n\n${CHAT_MARKER}` },
+    ]);
+    expect(stores.loops.get(loopId)?.sessionId).toBe("session-x");
+  });
+
+  it("hands the executor a chat spec on the pushed branch that resumes the session and carries no secret", async () => {
+    const loopId = createLoop();
+    const executor = executing();
+    const ctx = claim(loopId);
+
+    await runChat(ctx, { ...makeDeps(new FakeBrain()), executor });
+
+    const worktreePath = join(repo.dataDir, "work", "ticket-API-1");
+    expect(executor.specs).toHaveLength(1);
+    expect(RunSpecSchema.parse(JSON.parse(JSON.stringify(executor.specs[0])))).toMatchObject({
+      runId: `${ctx.jobId}-1`,
+      kind: "chat",
+      output: "chat",
+      checkout: { ref: BRANCH, sha: headSha },
+      baseSha,
+      worktreePath,
+      personCommits: null,
+      resumeSessionId: "session-1",
+      limits: { timeoutMinutes: 1, maxTurns: 5 },
+      push: { jobId: ctx.jobId, mode: "fastForward", branch: BRANCH, baseSha, loopId, worktreePath },
+      interactive: false,
+    });
+    expect(executor.specs[0]?.prompt).toContain("why did you drop the retry?");
+    expect(JSON.stringify(executor.specs[0])).not.toContain("glpat-push-token-value");
+  });
+
+  it("checks out the job's base with no push target when nothing was pushed", async () => {
+    const jobId = implementJob({ pushed: false });
+    const executor = executing();
+
+    await runChat(claim(null), { ...makeDeps(new FakeBrain()), executor });
+
+    expect(executor.specs[0]).toMatchObject({ checkout: { ref: null, sha: baseSha }, push: null, checks: [], worktreePath: join(repo.dataDir, "work", `${jobId}-1`) });
+  });
+
+  it("retries an interrupted run or a failed setup, keeping the tail, and posts nothing", async () => {
+    const loopId = createLoop();
+    const interrupted = executing({ ok: false, error: "interrupted", interrupted: true, sessionId: null, output: null });
+    expect(await runChat(claim(loopId), { ...makeDeps(new FakeBrain()), executor: interrupted })).toEqual({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+
+    const setup = executing({ ok: false, error: "setup failed:\npnpm: not found\n", setupFailed: true, sessionId: null, output: null });
+    const ctx = claim(loopId);
+    expect(await runChat(ctx, { ...makeDeps(new FakeBrain()), executor: setup })).toEqual({ status: "failed", error: "setup failed:\npnpm: not found\n", retryable: true });
+    expect(stores.attempts.forJob(ctx.jobId)[0]?.setupTail).toBe("pnpm: not found\n");
+
+    const failing: RunExecutor = { execute: () => Promise.reject(new Error("cannot create the run's Job")) };
+    expect(await runChat(claim(loopId), { ...makeDeps(new FakeBrain()), executor: failing })).toEqual({ status: "failed", error: "cannot create the run's Job", retryable: true });
+    expect(gitlab.replies).toEqual([]);
+  });
+
+  it("says the session could not be resumed when the executor reports it lost", async () => {
+    const loopId = createLoop();
+    const lost = executing({ ok: false, error: "No conversation found with session ID: session-1", sessionId: null, output: null });
+
+    const outcome = await runChat(claim(loopId), { ...makeDeps(new FakeBrain()), executor: lost });
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "the agent's run failed: No conversation found with session ID: session-1" });
+    expect(gitlab.replies[0]?.body).toBe(`The agent's session could not be resumed.\n\n${CHAT_MARKER}`);
   });
 });

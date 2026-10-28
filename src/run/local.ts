@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { buildBrainEnv } from "../brain/env.js";
+import { sessionWorktree } from "../chat/session.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { brainInput, bringSlotUp, cleanupWorkspace, errorMessage, furnishWorktree, jobPort, sessionsDir } from "../core/workspace.js";
 import { unpushedWork } from "../implement/git.js";
@@ -13,16 +14,31 @@ import { executeRun } from "./execute.js";
 import type { RunExecutor } from "./executor.js";
 import type { RunSpec, WorkReport } from "./protocol.js";
 
-/** Brings the slot up (with `slots`), creates the worktree at the spec's commit and lays the steward's files into it. */
-const prepareLocalWorkspace = async (deps: PipelineDeps, spec: RunSpec, env: Record<string, string>, onWorktree: (worktree: Worktree) => void): Promise<Worktree> => {
+/** The run's worktree: built for this run, or the session's, which a chat reuses and keeps (sessions are keyed by path). */
+interface LocalWorkspace {
+  worktree: Worktree;
+  /** `workspace.setup` already ran in it for an earlier run: a reused session worktree. */
+  setUp: boolean;
+}
+
+/**
+ * Brings the slot up (with `slots`), then the worktree at the spec's commit with the steward's files laid into it: a new
+ * one, or for a chat the session's own (reused as it stands, or recreated at the same path when it was swept).
+ */
+const prepareLocalWorkspace = async (deps: PipelineDeps, spec: RunSpec, env: Record<string, string>, onWorktree: (worktree: Worktree) => void): Promise<LocalWorkspace> => {
   const port = jobPort(deps);
   const slot = await bringSlotUp(deps, port);
+  await mkdir(spec.artifactsDir, { recursive: true, mode: 0o700 });
+  if (spec.kind === "chat") {
+    const session = { worktreeName: basename(spec.worktreePath), headSha: spec.checkout.sha };
+    const { worktree, created } = await sessionWorktree(deps, session, { env, port, slot });
+    return { worktree, setUp: !created };
+  }
   const worktree = await createWorktree(deps.mirror, dirname(spec.worktreePath), basename(spec.worktreePath), spec.checkout.sha);
   onWorktree(worktree);
-  await mkdir(spec.artifactsDir, { recursive: true, mode: 0o700 });
   // Setup runs in executeRun, after the overlay and the Orbit index.
   await furnishWorktree(deps, worktree.path, env, { port, slot, setup: false });
-  return worktree;
+  return { worktree, setUp: false };
 };
 
 /**
@@ -37,7 +53,8 @@ const pushedShaOf = async (deps: PipelineDeps, spec: RunSpec): Promise<string | 
       logger.warn({ jobId: spec.jobId, err: errorMessage(err) }, "could not settle the run's last push");
     });
   }
-  return deps.stores.pushes.latestPushed(spec.jobId)?.sha ?? null;
+  // The job the pushes are recorded on: a chat without a loop records them on the session's implement job.
+  return deps.stores.pushes.latestPushed(spec.push.jobId)?.sha ?? null;
 };
 
 /** What the agent left in the worktree after the last push (or the checkout); never the files the steward copied in. */
@@ -46,7 +63,8 @@ const workOf = async (deps: PipelineDeps, spec: RunSpec, worktree: Worktree): Pr
   try {
     const { files: overlayFiles } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
     const stewardFiles = await stewardCopies(deps.config.workspace.skillsDir, overlayFiles);
-    const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: pushedSha ?? spec.checkout.sha, stewardFiles });
+    // A reused session worktree may not have caught up to the checkout: what it started at is what the run left after.
+    const work = await unpushedWork({ worktreePath: worktree.path, pushedSha: pushedSha ?? worktree.sha, stewardFiles });
     return { runId: spec.runId, unpushed: work.summary, pushedSha };
   } catch (err) {
     // Read as unpushed work, so the run hands back to a person instead of passing over what could not be checked.
@@ -57,7 +75,7 @@ const workOf = async (deps: PipelineDeps, spec: RunSpec, worktree: Worktree): Pr
 /**
  * Runs the execute half in-process on the steward's host: the mirror's worktree, the job's slot, the overlay and the
  * Orbit index, the MCP servers spawned over stdio, then `executeRun`. The worktree is removed afterwards, unless the run
- * failed and `workspace.keepOnFailure` keeps it. Rejects when the workspace could not be built.
+ * failed and `workspace.keepOnFailure` keeps it or it is a chat's session worktree. Rejects when the workspace could not be built.
  */
 export const localExecutor = (deps: PipelineDeps): RunExecutor => ({
   execute: async (spec, signal = deps.signal) => {
@@ -66,11 +84,11 @@ export const localExecutor = (deps: PipelineDeps): RunExecutor => ({
     const workspace: { worktree: Worktree | null } = { worktree: null };
     let ok = false;
     try {
-      const worktree = await prepareLocalWorkspace(runDeps, spec, env, (created) => {
+      const { worktree, setUp } = await prepareLocalWorkspace(runDeps, spec, env, (created) => {
         workspace.worktree = created;
       });
       const input = brainInput(runDeps, spec, worktree, spec.prompt, env, spec.output, spec.push === null ? {} : { push: spec.push });
-      const report = await executeRun(spec, {
+      const report = await executeRun(setUp ? { ...spec, setup: [] } : spec, {
         workspace: worktree,
         brain: deps.config.brain,
         brainEnv: input.env,

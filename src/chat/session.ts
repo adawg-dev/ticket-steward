@@ -1,11 +1,12 @@
 import { join } from "node:path";
 import { DEFAULT_SESSION_RETENTION_DAYS, type StewardConfig } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
-import { furnishWorktree } from "../core/workspace.js";
+import { furnishWorktree, MINUTE_MS, SETUP_TAIL_BYTES } from "../core/workspace.js";
 import type { Stores } from "../store/index.js";
 import { git } from "../workspace/git.js";
 import type { Mirror } from "../workspace/mirror.js";
 import { loopProtection, sessionProjectDir } from "../workspace/retention.js";
+import { runSetup } from "../workspace/setup.js";
 import type { Slot } from "../workspace/slots.js";
 import { createWorktree, openWorktree, type Worktree } from "../workspace/worktree.js";
 
@@ -56,26 +57,44 @@ const catchUp = async (mirror: Mirror, worktree: Worktree, headSha: string): Pro
 };
 
 /**
- * The session's worktree, ready for a run on `placement`'s port and slot. An existing one is reused with its changes
- * (caught up to the head only when clean and behind) and gets the overlay again for this run's port; a missing one is
- * recreated at the same path (sessions are keyed by path) at `headSha` after a fetch, then furnished and set up like a job's.
+ * The session's worktree, its steward files laid in for a run on `placement`'s port and slot. An existing one is reused
+ * with its changes (caught up to the head only when clean and behind); a missing one is recreated at the same path
+ * (sessions are keyed by path) at `headSha` after a fetch, and `created` says it still needs `workspace.setup`.
  */
+export const sessionWorktree = async (
+  deps: Pick<PipelineDeps, "config" | "mirror" | "redactor" | "signal">,
+  session: Pick<AgentSession, "worktreeName" | "headSha">,
+  placement: { env: Record<string, string>; port: number; slot: Slot | null },
+): Promise<{ worktree: Worktree; created: boolean }> => {
+  const workRoot = join(deps.config.dataDir, "work");
+  const existing = await openWorktree(deps.mirror, workRoot, session.worktreeName);
+  const furnish = (worktree: Worktree): Promise<unknown> =>
+    furnishWorktree(deps, worktree.path, placement.env, { port: placement.port, slot: placement.slot, setup: false });
+  if (existing !== null) {
+    const worktree = await catchUp(deps.mirror, existing, session.headSha);
+    await furnish(worktree);
+    return { worktree, created: false };
+  }
+  await deps.mirror.fetch();
+  const worktree = await createWorktree(deps.mirror, workRoot, session.worktreeName, session.headSha);
+  await furnish(worktree);
+  return { worktree, created: true };
+};
+
+/** `sessionWorktree`, with `workspace.setup` run in a recreated one (`steward chat`, which runs no executor). */
 export const ensureWorktree = async (
   deps: Pick<PipelineDeps, "config" | "mirror" | "redactor" | "signal">,
   session: Pick<AgentSession, "worktreeName" | "headSha">,
   placement: { env: Record<string, string>; port: number; slot: Slot | null },
 ): Promise<Worktree> => {
-  const workRoot = join(deps.config.dataDir, "work");
-  const existing = await openWorktree(deps.mirror, workRoot, session.worktreeName);
-  if (existing !== null) {
-    const worktree = await catchUp(deps.mirror, existing, session.headSha);
-    await furnishWorktree(deps, worktree.path, placement.env, { port: placement.port, slot: placement.slot, setup: false });
-    return worktree;
-  }
-  await deps.mirror.fetch();
-  const worktree = await createWorktree(deps.mirror, workRoot, session.worktreeName, session.headSha);
-  const failed = await furnishWorktree(deps, worktree.path, placement.env, { port: placement.port, slot: placement.slot, setup: true });
-  if (failed !== null) throw new Error(`setup failed:\n${failed.setupTail}`);
+  const { worktree, created } = await sessionWorktree(deps, session, placement);
+  if (!created) return worktree;
+  const setup = await runSetup(deps.config.workspace.setup, worktree.path, placement.env, {
+    timeoutMs: deps.config.workspace.setupTimeoutMinutes * MINUTE_MS,
+    tailBytes: SETUP_TAIL_BYTES,
+    ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+  });
+  if (!setup.ok) throw new Error(`setup failed:\n${deps.redactor.redact(setup.tail)}`);
   return worktree;
 };
 

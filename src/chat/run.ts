@@ -1,20 +1,23 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import Mustache from "mustache";
-import { buildBrainEnv, INTERRUPTED_ERROR, runBrainDetached } from "../brain/index.js";
-import type { BrainRun } from "../brain/types.js";
+import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { chatPromptPath } from "../cli/paths.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { PipelineDeps } from "../core/deps.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
-import { brainInput, cleanupWorkspace, crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, sessionsDir, startSlot } from "../core/workspace.js";
+import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError } from "../core/workspace.js";
 import { unpushedWork } from "../implement/git.js";
-import { guardSecrets, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
+import { guardSecrets, runIdOf, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
 import type { PushTarget } from "../push/target.js";
+import { setupTailOf } from "../run/execute.js";
+import { localExecutor } from "../run/local.js";
+import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import type { TriggerEvent } from "../tracker/types.js";
 import { logger } from "../log.js";
 import type { Worktree } from "../workspace/worktree.js";
 import { CHAT_MARKER, NO_SESSION_REPLY, validateChatResult, type StoredChat } from "./result.js";
-import { ensureWorktree, latestSession, type AgentSession } from "./session.js";
+import { latestSession, type AgentSession } from "./session.js";
 
 const { render } = Mustache;
 
@@ -113,31 +116,29 @@ export const leftoverWork = async (deps: Pick<PipelineDeps, "config" | "stores" 
 const withLeftover = (reply: string, leftover: string): string =>
   leftover === "" ? reply : `${reply}\n\nLeft in the agent's worktree, not pushed:\n\n\`\`\`\n${leftover}\n\`\`\``;
 
-/** The brain run: the worktree and slot ready, the session resumed with the message, its reply stored and posted. */
-const converse = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, session: AgentSession): Promise<JobOutcome> => {
+/**
+ * The prepare half: the MR, the push target and the prompt, and a spec that resumes the session in its worktree, on the
+ * pushed branch head (else the implement job's base). Either a spec to execute, or the job's outcome.
+ */
+const prepareChat = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, session: AgentSession): Promise<{ spec: RunSpec } | { outcome: JobOutcome }> => {
   const port = jobPort(deps);
-  const env = buildBrainEnv(deps.secrets, deps.config.brain, port, sessionsDir(deps.config), deps.config.implement?.commitAuthor);
   const paths = jobPaths(ctx, deps, { worktreeName: session.worktreeName });
+  const worktreePath = join(paths.workRoot, paths.worktreeName);
   const settings = deps.config.implement;
-  let worktree: Worktree;
+  const push = sessionPushTarget(deps, session, { path: worktreePath }, {
+    jobId: session.loopId === null ? session.jobId : ctx.jobId, identifier: ctx.identifier, issueId: ctx.issueId, port,
+  });
+  const checks = push === undefined || settings === undefined ? [] : stewardChecks(settings.checks, push.baseSha);
   let prompt: string;
-  let push: PushTarget | undefined;
   try {
     const mr = await gitlab.getMergeRequest(trigger.projectId, trigger.mrIid);
-    const slot = await startSlot(ctx, deps, port);
-    await mkdir(paths.artifactsDir, { recursive: true, mode: 0o700 });
-    worktree = await ensureWorktree(deps, session, { env, port, slot });
-    push = sessionPushTarget(deps, session, worktree, {
-      jobId: session.loopId === null ? session.jobId : ctx.jobId, identifier: ctx.identifier, issueId: ctx.issueId, port,
-    });
-    const checks = push === undefined || settings === undefined ? [] : stewardChecks(settings.checks, push.baseSha);
     prompt = renderChatPrompt(await readFile(chatPromptPath, "utf8"), {
       identifier: ctx.identifier,
       author: trigger.author,
       message: trigger.message,
       mrUrl: mr.webUrl,
-      workspacePath: worktree.path,
-      headSha: worktree.sha,
+      workspacePath: worktreePath,
+      headSha: session.headSha,
       stewardPort: port,
       artifactsDir: paths.artifactsDir,
       canPush: push !== undefined,
@@ -146,40 +147,82 @@ const converse = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi
       hasChecks: checks.length > 0,
     });
   } catch (err) {
-    return prepareFailed(deps, err);
+    return { outcome: prepareFailed(deps, err) };
   }
+  const spec: RunSpec = {
+    version: 1,
+    runId: runIdOf(ctx),
+    jobId: ctx.jobId,
+    kind: "chat",
+    identifier: ctx.identifier,
+    issueId: ctx.issueId,
+    checkout: { ref: session.branch, sha: session.headSha },
+    baseSha: baseShaOf(deps, session) ?? session.headSha,
+    worktreePath,
+    artifactsDir: paths.artifactsDir,
+    transcriptPath: paths.transcriptPath,
+    prompt,
+    personCommits: null,
+    output: "chat",
+    resumeSessionId: session.sessionId,
+    limits: { timeoutMinutes: deps.config.brain.timeoutMinutes, maxTurns: deps.config.brain.maxTurns, setupTimeoutMinutes: deps.config.workspace.setupTimeoutMinutes },
+    push: push ?? null,
+    setup: deps.config.workspace.setup,
+    checks,
+    interactive: false,
+  };
+  return { spec };
+};
 
-  let run: BrainRun;
-  try {
-    run = await (deps.runBrain ?? runBrainDetached)(
-      deps.config.brain,
-      brainInput(deps, paths, worktree, prompt, env, "chat", { resumeSessionId: session.sessionId, ...(push === undefined ? {} : { push }) }),
-      deps.redactor,
-      { ...(deps.signal === undefined ? {} : { signal: deps.signal }) },
-    );
-  } catch (err) {
-    return decide(ctx, deps, gitlab, trigger, { reply: "The agent could not answer: its run failed to start.", warning: `the agent's run failed: ${errorMessage(err)}` });
+/** The finish half, from the executor's report and the work it found: retry, or store and post the reply with what was left unpushed. */
+const finishChat = (
+  ctx: RunContext,
+  deps: PipelineDeps,
+  gitlab: GitLabMrApi,
+  trigger: ChatTrigger,
+  session: AgentSession,
+  spec: RunSpec,
+  executed: { report: RunReport; work: WorkReport },
+): Promise<JobOutcome> => {
+  const { report, work } = executed;
+  if (report.setupFailed) {
+    patchAttempt(ctx, deps, { setupTail: setupTailOf(report) });
+    return Promise.resolve(report.interrupted ? { status: "failed", error: INTERRUPTED_ERROR, retryable: true } : { status: "failed", error: report.error ?? "setup failed", retryable: true });
   }
-  patchAttempt(ctx, deps, { transcriptPath: paths.transcriptPath, ...(run.usage === undefined ? {} : { usage: run.usage }) });
+  patchAttempt(ctx, deps, { transcriptPath: spec.transcriptPath, ...(report.usage === null ? {} : { usage: report.usage }) });
   // An interrupted run resumes from the session it started from; the partial turn is lost.
-  if (!run.ok && run.error === INTERRUPTED_ERROR) return { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
-  if (run.sessionId !== undefined) {
+  if (report.interrupted) return Promise.resolve({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+  if (report.sessionId !== null) {
     // The next chat, fix round or `steward chat` resumes where this one ended.
-    if (session.loopId !== null) deps.stores.loops.update(session.loopId, { sessionId: run.sessionId });
-    else deps.stores.jobs.recordSession(session.jobId, run.sessionId);
-    deps.stores.jobs.recordSession(ctx.jobId, run.sessionId);
+    if (session.loopId !== null) deps.stores.loops.update(session.loopId, { sessionId: report.sessionId });
+    else deps.stores.jobs.recordSession(session.jobId, report.sessionId);
+    deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
   }
-  const leftover = await leftoverWork(deps, session, worktree, push);
-  if (!run.ok) {
-    const error = run.error ?? "brain run failed";
+  const leftover = deps.redactor.redact(work.unpushed);
+  if (!report.ok) {
+    const error = report.error ?? "brain run failed";
     const reply = SESSION_ERROR.test(error) ? "The agent's session could not be resumed." : "The agent could not answer: its run failed.";
     return decide(ctx, deps, gitlab, trigger, { reply: withLeftover(reply, leftover), warning: `the agent's run failed: ${deps.redactor.redact(error)}` });
   }
-  const validated = validateChatResult(run.output);
+  const validated = validateChatResult(report.output);
   if (!validated.ok) {
     return decide(ctx, deps, gitlab, trigger, { reply: withLeftover("The agent's answer could not be read.", leftover), warning: `the agent's result was invalid: ${validated.error}` });
   }
   return decide(ctx, deps, gitlab, trigger, { reply: withLeftover(validated.result.reply, leftover), warning: leftover === "" ? null : "the agent left unpushed work" });
+};
+
+/** The brain run: prepare, execute (in-process or in a run pod), finish. */
+const converse = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, session: AgentSession): Promise<JobOutcome> => {
+  const prepared = await prepareChat(ctx, deps, gitlab, trigger, session);
+  if ("outcome" in prepared) return prepared.outcome;
+  let executed: { report: RunReport; work: WorkReport };
+  try {
+    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal);
+  } catch (err) {
+    if (err instanceof SetupError) patchAttempt(ctx, deps, { setupTail: err.tail });
+    return prepareFailed(deps, err);
+  }
+  return finishChat(ctx, deps, gitlab, trigger, session, prepared.spec, executed);
 };
 
 const executeChat = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
@@ -197,11 +240,7 @@ const executeChat = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutc
 
 /**
  * The chat job: resumes the ticket's latest agent session in its worktree (recreated at the same path if it was swept)
- * with the note's message, then posts the agent's reply in the note's discussion. The worktree is the session's, so it is
- * kept; only the port and slot are freed.
+ * with the note's message, then posts the agent's reply in the note's discussion. The worktree is the session's, so the
+ * executor keeps it; only the port and slot are freed.
  */
-export const runChat = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
-  const outcome = redactOutcome(await executeChat(ctx, deps).catch(crashed), deps.redactor);
-  await cleanupWorkspace(deps, null, outcome);
-  return outcome;
-};
+export const runChat = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => redactOutcome(await executeChat(ctx, deps).catch(crashed), deps.redactor);
