@@ -17,10 +17,18 @@ const credentialEnv = (secrets: Secrets, brain: BrainConfig): Record<string, str
   return env;
 };
 
+/**
+ * Where Playwright's browsers live, when the steward's env names it. The image installs Chromium outside HOME, which
+ * is the bind-mounted data dir, so every process that may start a browser has to be told.
+ */
+export const playwrightEnv = (): Record<string, string> =>
+  process.env.PLAYWRIGHT_BROWSERS_PATH === undefined ? {} : { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH };
+
 /** The job's process env without any credential: setup, checks and commit hooks run with this. */
 export const buildWorkspaceEnv = (port: number): Record<string, string> => ({
   PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
   HOME: process.env.HOME ?? homedir(),
+  ...playwrightEnv(),
   LANG: process.env.LANG ?? "C.UTF-8",
   TERM: process.env.TERM ?? "dumb",
   NODE_ENV: "development",

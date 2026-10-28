@@ -75,6 +75,14 @@ describe("brainInput", () => {
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement").mcpServers).not.toHaveProperty("push");
   });
 
+  it("tells the Playwright server where the browsers are only when the steward's env names it", () => {
+    vi.stubEnv("PLAYWRIGHT_BROWSERS_PATH", "/opt/ms-playwright");
+    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement").mcpServers.playwright?.env?.PLAYWRIGHT_BROWSERS_PATH).toBe("/opt/ms-playwright");
+    vi.stubEnv("PLAYWRIGHT_BROWSERS_PATH", undefined);
+    expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement").mcpServers.playwright?.env).not.toHaveProperty("PLAYWRIGHT_BROWSERS_PATH");
+    vi.unstubAllEnvs();
+  });
+
   it("passes the session to resume only when given", () => {
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "fix", { resumeSessionId: "s0" }).resumeSessionId).toBe("s0");
     expect(brainInput(fullDeps, paths, worktree, "prompt", {}, "implement")).not.toHaveProperty("resumeSessionId");

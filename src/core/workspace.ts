@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { INTERRUPTED_ERROR, type BrainInput, type BrainOutput, type McpServerSpec } from "../brain/types.js";
+import { playwrightEnv } from "../brain/env.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import { pushMcpSpec, type PushTarget } from "../push/target.js";
 import { appPortOf } from "../config/schema.js";
@@ -72,7 +73,7 @@ const playwrightMcpSpec = (): McpServerSpec => {
     command: process.execPath,
     // Console output at info level ran to 100k+ characters per call; warnings and errors are what bugs show up as.
     args: [join(dirname(packagePath), relative), "--console-level", "warning"],
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir() },
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), ...playwrightEnv() },
   };
 };
 

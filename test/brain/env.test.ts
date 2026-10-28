@@ -16,6 +16,19 @@ const allSecrets = {
   OPENAI_BASE_URL: "https://proxy.example.com/v1",
 };
 
+describe("buildWorkspaceEnv", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("passes PLAYWRIGHT_BROWSERS_PATH through only when it is set", () => {
+    vi.stubEnv("PLAYWRIGHT_BROWSERS_PATH", "/opt/ms-playwright");
+    expect(buildWorkspaceEnv(4100).PLAYWRIGHT_BROWSERS_PATH).toBe("/opt/ms-playwright");
+    vi.stubEnv("PLAYWRIGHT_BROWSERS_PATH", undefined);
+    expect(buildWorkspaceEnv(4100)).not.toHaveProperty("PLAYWRIGHT_BROWSERS_PATH");
+  });
+});
+
 describe("buildBrainEnv", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
