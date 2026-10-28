@@ -27,7 +27,12 @@ VMs; not EC2, not EKS). Two goals drive the shape:
   self-contained Kubernetes Job.
 - One pod per run (replaces "one runner container per slot"): runs never share processes, env or tokens.
 - Session transcripts persist in **MinIO in the cluster, on a PVC**, not AWS S3 (no AWS storage bill).
-- Claude Code brain only (the openai-agents brain runs tools in its own process and is refused).
+- Claude Code brain only for now (the openai-agents brain runs tools in its own process and is refused). Other brains
+  may come later if their sessions are durable (resumable from a stored transcript), their tools run in the agent
+  container, and they reach their model through keyproxy.
+- **The dispatcher exposes an authenticated HTTP API** for job and ticket state, chat sessions and leases. Today's CLI
+  becomes a client of it. A proper CLI, an MCP server and a web UI are planned as later work (owner) and must be able
+  to build on this API without changes to the dispatcher's internals. Building them is not part of this design.
 
 ## Goals
 
@@ -71,11 +76,28 @@ VMs; not EC2, not EKS). Two goals drive the shape:
    and their own localhost, the dispatcher only on its callback endpoint, and never the Kubernetes API, MinIO's admin
    API or other run pods. The dispatcher's service account may create and watch Jobs/pods in its namespace only.
 
-## Non-goals
+8. **App credentials are placeholders; an egress sidecar swaps in the real values** (owner: do it in this design).
+   Every value in kickoff's env files is classified in the overlay template:
+   - **Outbound API keys** (Stripe, SendGrid, Twilio, HubSpot, Exa, Switchpoint, Artificial Analysis, Vail,
+     LemonSqueezy, the redaction service, Descope management, Unleash…): the agent's file gets a unique placeholder
+     (`STEWARD_PH_<NAME>_<random>`). All HTTP(S) from the agent container goes through the **egress sidecar**
+     (`HTTPS_PROXY`/`HTTP_PROXY`). It terminates TLS with a per-run CA that only the agent container trusts
+     (`NODE_EXTRA_CA_CERTS`, the system store, Chromium's), replaces placeholders in headers, query string and body
+     **only for that secret's allowlisted hosts**, and re-encrypts to the real host. Basic auth (Twilio) is decoded,
+     swapped and re-encoded. A placeholder sent to any other host is left unchanged and logged. The agent can *use*
+     the test APIs but can never read or send out the real values.
+   - **Local secrets the app uses itself** (JWT signing, encryption keys and salts, webhook signing secrets): these
+     are never sent anywhere, so the proxy can't stand in for them. They become throwaway literals per run, as the
+     preview VMs already do (`API_KEY_SECRET=secret`). The run's database is new each time, so nothing depends on
+     their real values.
+   - **Slot services and public IDs** (local Postgres/Redis/RabbitMQ, Descope project IDs, the Stripe publishable
+     key, HubSpot portal ID): plain literals.
+   - **Keys a request is signed with rather than carried in** (AWS SigV4-style HMAC): the proxy cannot swap these.
+     None are known in kickoff today. Config load refuses a template entry of this kind, and doctor reports it.
+   - Egress for everything else stays open (npm, GitHub and so on), with no substitution.
+   - The tools sidecar's secret guard checks both the real values and the placeholders, so neither can be committed.
 
-- **Overlay app credentials** (Stripe test, provider keys, Descope test project…, from `DEV_`) still reach the agent as
-  files in the worktree. Swapping them for placeholders through an intercepting proxy is the next design. Until then
-  they stay test-only with spend caps.
+## Non-goals
 - Provisioning the k3s cluster itself (nodes, CNI, ingress controller). This design lists what the cluster must provide.
 - Elastic scaling; HA for the dispatcher (SQLite, one replica).
 - Migrating the current Compose host is in scope only as a cut-over step at the end (sessions and DB copied over).
