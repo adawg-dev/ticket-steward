@@ -284,3 +284,25 @@ describe("resourceGuard config", () => {
     expect(StewardConfigSchema.safeParse({ ...minimalInput, resourceGuard: { startSpacingSeconds: -1 } }).success).toBe(false);
   });
 });
+
+describe("secrets config", () => {
+  it("is absent by default, which reads .env", () => {
+    expect(StewardConfigSchema.parse(minimalInput).secrets).toBeUndefined();
+    expect(StewardConfigSchema.parse({ ...minimalInput, secrets: { source: "file" } }).secrets).toEqual({ source: "file" });
+  });
+
+  it("accepts an AWS region and a map of env names to secret ids", () => {
+    const secrets = { source: "aws", region: "us-west-2", map: { GITLAB_TOKEN: "DEV_STEWARD_GITLAB_TOKEN" } };
+    expect(StewardConfigSchema.parse({ ...minimalInput, secrets }).secrets).toEqual(secrets);
+  });
+
+  it("rejects a missing region, a bad env name and an empty secret id", () => {
+    expect(StewardConfigSchema.safeParse({ ...minimalInput, secrets: { source: "aws", map: {} } }).success).toBe(false);
+    expect(StewardConfigSchema.safeParse({ ...minimalInput, secrets: { source: "aws", region: "us-west-2", map: { "NOT-AN-ENV": "DEV_A" } } }).success).toBe(false);
+    expect(StewardConfigSchema.safeParse({ ...minimalInput, secrets: { source: "aws", region: "us-west-2", map: { GITLAB_TOKEN: "" } } }).success).toBe(false);
+  });
+
+  it("rejects an unknown source", () => {
+    expect(StewardConfigSchema.safeParse({ ...minimalInput, secrets: { source: "vault" } }).success).toBe(false);
+  });
+});

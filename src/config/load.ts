@@ -1,31 +1,14 @@
-import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse } from "dotenv";
 import { createJiti } from "jiti";
-import { z } from "zod";
 import { StewardConfigSchema } from "./schema.js";
+import { loadSecretsFrom } from "./secretSource.js";
+import type { SecretFetcher, Secrets } from "./secretSource.js";
 import type { StewardConfig } from "./schema.js";
 
-export const SecretsSchema = z.object({
-  LINEAR_API_KEY: z.string().optional(),
-  LINEAR_WEBHOOK_SECRET: z.string().optional(),
-  MIRROR_TOKEN: z.string().optional(),
-  MIRROR_USERNAME: z.string().optional(),
-  GITLAB_TOKEN: z.string().optional(),
-  GITLAB_WEBHOOK_SECRET: z.string().optional(),
-  GITLAB_WEBHOOK_SIGNING_TOKEN: z.string().optional(),
-  GITLAB_PUSH_TOKEN: z.string().optional(),
-  GITHUB_TOKEN: z.string().optional(),
-  ANTHROPIC_API_KEY: z.string().optional(),
-  ANTHROPIC_AUTH_TOKEN: z.string().optional(),
-  ANTHROPIC_BASE_URL: z.string().optional(),
-  CLAUDE_CODE_OAUTH_TOKEN: z.string().optional(),
-  OPENAI_API_KEY: z.string().optional(),
-  OPENAI_BASE_URL: z.string().optional(),
-});
-export type Secrets = z.infer<typeof SecretsSchema>;
+export { SecretsSchema } from "./secretSource.js";
+export type { Secrets } from "./secretSource.js";
 
 export interface LoadedConfig {
   config: StewardConfig;
@@ -46,12 +29,8 @@ export const resolveFromConfigDir = (configDir: string, p: string): string => {
   return isAbsolute(p) ? p : resolve(configDir, p);
 };
 
-const readSecrets = async (configDir: string): Promise<Secrets> => {
-  const raw = await readFile(join(configDir, ".env"), "utf8").catch(() => "");
-  return SecretsSchema.parse(parse(raw));
-};
-
-export const loadConfig = async (opts: { configPath?: string; cwd?: string }): Promise<LoadedConfig> => {
+/** `secretFetcher` stands in for Secrets Manager when `secrets.source` is "aws" (tests). */
+export const loadConfig = async (opts: { configPath?: string; cwd?: string; secretFetcher?: SecretFetcher }): Promise<LoadedConfig> => {
   const configPath = resolve(opts.configPath ?? join(opts.cwd ?? process.cwd(), CONFIG_FILENAME));
   const configDir = dirname(configPath);
   const jiti = createJiti(import.meta.url, { alias: { [PACKAGE_ALIAS]: packageEntryPath }, moduleCache: false });
@@ -69,7 +48,10 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string }): P
     ...(parsed.implement === undefined ? {} : { implement: { ...parsed.implement, prompt: resolveFromConfigDir(configDir, parsed.implement.prompt) } }),
     ...(parsed.greptile === undefined ? {} : { greptile: { ...parsed.greptile, prompt: resolveFromConfigDir(configDir, parsed.greptile.prompt) } }),
   };
-  const secrets = await readSecrets(configDir);
-  if (config.implement !== undefined && (secrets.GITLAB_PUSH_TOKEN ?? "") === "") throw new Error("implement requires GITLAB_PUSH_TOKEN in .env");
+  const secretsConfig = config.secrets ?? { source: "file" };
+  const secrets = await loadSecretsFrom(secretsConfig, configDir, opts.secretFetcher);
+  if (config.implement !== undefined && (secrets.GITLAB_PUSH_TOKEN ?? "") === "") {
+    throw new Error(`implement requires GITLAB_PUSH_TOKEN in ${secretsConfig.source === "file" ? ".env" : "secrets.map"}`);
+  }
   return { config, secrets, configPath, configDir };
 };

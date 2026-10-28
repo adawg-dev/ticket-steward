@@ -203,3 +203,26 @@ describe("implement secrets", () => {
     expect(loaded.secrets.GITLAB_PUSH_TOKEN).toBe("glpat-push-token-value");
   });
 });
+
+describe("loadConfig with secrets from AWS Secrets Manager", () => {
+  const awsBlock = (map: Record<string, string>) => `secrets: { source: "aws", region: "us-west-2", map: ${JSON.stringify(map)} },`;
+  /** Serves `values` by id; anything else is not found. */
+  const fetcher = (values: Record<string, string>) => ({ get: async (id: string) => values[id] ?? null });
+
+  it("reads the mapped secrets through the fetcher and ignores .env", async () => {
+    await writeSource(join(dir, "steward.config.ts"), configSource(awsBlock({ GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_API_KEY: "DEV_LINEAR" })), "LINEAR_API_KEY=from-env-file\n");
+    const { config, secrets } = await loadConfig({ cwd: dir, secretFetcher: fetcher({ DEV_PUSH: '{"GITLAB_PUSH_TOKEN":"glpat-aws"}', DEV_LINEAR: "lin_api_aws" }) });
+    expect(config.secrets).toEqual({ source: "aws", region: "us-west-2", map: { GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_API_KEY: "DEV_LINEAR" } });
+    expect(secrets).toEqual({ GITLAB_PUSH_TOKEN: "glpat-aws", LINEAR_API_KEY: "lin_api_aws" });
+  });
+
+  it("keeps the push token rule, naming the secrets map", async () => {
+    await writeSource(join(dir, "steward.config.ts"), configSource(awsBlock({ LINEAR_API_KEY: "DEV_LINEAR" })));
+    await expect(loadConfig({ cwd: dir, secretFetcher: fetcher({ DEV_LINEAR: "lin_api_aws" }) })).rejects.toThrow("implement requires GITLAB_PUSH_TOKEN in secrets.map");
+  });
+
+  it("fails naming a missing secret id", async () => {
+    await writeSource(join(dir, "steward.config.ts"), configSource(awsBlock({ GITLAB_PUSH_TOKEN: "DEV_PUSH" })));
+    await expect(loadConfig({ cwd: dir, secretFetcher: fetcher({}) })).rejects.toThrow("Secrets Manager: DEV_PUSH not found");
+  });
+});

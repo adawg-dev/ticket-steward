@@ -106,6 +106,17 @@ const ChatSchema = z.object({
   sessionRetentionDays: z.number().int().positive().default(DEFAULT_SESSION_RETENTION_DAYS),
 });
 
+/** Where the steward's own secrets come from: the config dir's `.env`, or AWS Secrets Manager by the default credential chain. */
+const SecretsConfigSchema = z.discriminatedUnion("source", [
+  z.object({ source: z.literal("file") }),
+  z.object({
+    source: z.literal("aws"),
+    region: z.string().min(1),
+    /** Env name to Secrets Manager id, e.g. `{ GITLAB_TOKEN: "DEV_STEWARD_GITLAB_TOKEN" }`; names that are not steward secrets are dropped. */
+    map: z.record(z.string().regex(ENV_KEY), z.string().min(1)),
+  }),
+]);
+
 export const StewardConfigSchema = z.object({
   dataDir: z.string(),
   brain: z.discriminatedUnion("kind", [
@@ -163,6 +174,8 @@ export const StewardConfigSchema = z.object({
   resourceGuard: ResourceGuardSchema.optional(),
   /** Talking to a ticket's agent session again; unset means no comment-driven chat (sessions are still kept for 180 days). */
   chat: ChatSchema.optional(),
+  /** Unset reads `.env` from the config dir, as `{ source: "file" }` does. */
+  secrets: SecretsConfigSchema.optional(),
 }).superRefine((config, ctx) => {
   if (config.greptile !== undefined) {
     if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["greptile"], message: "greptile requires implement" });
@@ -193,6 +206,7 @@ export type LabelsConfig = NonNullable<StewardConfig["tracker"]["labels"]>;
 export type ImplementConfig = NonNullable<StewardConfig["implement"]>;
 export type GreptileConfig = NonNullable<StewardConfig["greptile"]>;
 export type ChatConfig = NonNullable<StewardConfig["chat"]>;
+export type SecretsConfig = NonNullable<StewardConfig["secrets"]>;
 export type ResourceGuardConfig = z.infer<typeof ResourceGuardSchema>;
 export const RESOURCE_GUARD_DEFAULTS: ResourceGuardConfig = ResourceGuardSchema.parse({});
 export type SlotsConfig = NonNullable<StewardConfig["slots"]>;
