@@ -164,6 +164,19 @@ describe("retentionProtection", () => {
     expect(removed.removedSessionDirs).not.toContain(runningDir);
     expect(removed.removedSessionDirs).not.toContain(endedDir);
   });
+
+  it("keeps the worktree and session of an open steward chat (a live lease), however old", async () => {
+    sessionJob({ worktreeName: "1-1", sessionId: "session-1", ageDays: 400 });
+    await createWorktree(repo.mirror, join(repo.dataDir, "work"), "1-1", repo.sha);
+    const dir = await sessionDir("1-1", 400);
+    stores.leases.create({ issueId: "issue-1", worktreeName: "1-1", slot: null, pid: process.pid });
+
+    const removed = await runSweep();
+
+    expect(removed.removedWorktrees).toEqual([]);
+    expect(removed.removedSessionDirs).not.toContain(dir);
+    expect(existsSync(join(repo.dataDir, "work", "1-1"))).toBe(true);
+  });
 });
 
 describe("ensureWorktree", () => {

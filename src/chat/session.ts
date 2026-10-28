@@ -82,19 +82,24 @@ export const ensureWorktree = async (
 export const sessionRetentionDays = (config: Pick<StewardConfig, "chat">): number => config.chat?.sessionRetentionDays ?? DEFAULT_SESSION_RETENTION_DAYS;
 
 /**
- * What retention must keep: loop worktrees and their sessions within `retention.days` (as before), plus the session dirs
- * of every loop or job session whose ticket was active within `sessionRetentionDays`. Worktree eviction is unchanged.
+ * What retention must keep: loop worktrees and their sessions within `retention.days` (as before), the worktree and session
+ * of every open `steward chat` (its lease), plus the session dirs of every loop or job session whose ticket was active
+ * within `sessionRetentionDays`. Worktree eviction is otherwise unchanged.
  */
 export const retentionProtection = (
-  stores: Pick<Stores, "jobs" | "loops">,
+  stores: Pick<Stores, "jobs" | "loops" | "leases">,
   config: Pick<StewardConfig, "dataDir" | "retention" | "chat">,
   now: Date = new Date(),
 ): { protect: string[]; protectSessionPaths: string[] } => {
   const workRoot = join(config.dataDir, "work");
   const loops = loopProtection(workRoot, stores.loops.keptWithin(config.retention.days));
+  const chats = stores.leases.active(now).map((lease) => join(workRoot, lease.worktreeName));
   const since = new Date(now.getTime() - sessionRetentionDays(config) * DAY_MS);
   const sessions = [...stores.loops.sessionWorktreesActiveSince(since), ...stores.jobs.sessionWorktreesActiveSince(since)].map((name) =>
     sessionProjectDir(join(workRoot, name)),
   );
-  return { protect: loops.protect, protectSessionPaths: [...new Set([...loops.protectSessionPaths, ...sessions])] };
+  return {
+    protect: [...loops.protect, ...chats],
+    protectSessionPaths: [...new Set([...loops.protectSessionPaths, ...sessions, ...chats.map(sessionProjectDir)])],
+  };
 };

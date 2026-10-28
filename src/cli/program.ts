@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { registerChat } from "./chat.js";
 import { defaultContext, exitWith, type CliContext } from "./context.js";
 import { registerDoctor } from "./doctor.js";
 import { registerFix } from "./fix.js";
@@ -27,6 +28,7 @@ export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   registerServe(program, ctx);
   registerImplement(program, ctx);
   registerFix(program, ctx);
+  registerChat(program, ctx);
   registerJobs(program, ctx);
   registerTemplates(program, ctx);
   registerMcp(program, ctx);

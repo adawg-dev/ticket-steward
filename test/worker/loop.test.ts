@@ -748,6 +748,20 @@ describe("startWorker", () => {
     expect(runner.calls).toEqual(ALL_SLOTS_DOWN);
   });
 
+  it("leaves a slot a steward chat leased up, and its lane claims nothing while the lease lives", async () => {
+    const held = heldRuns();
+    runImplementMock.mockImplementation(held.impl);
+    const runner = fakeSlotRunner();
+    stores.leases.create({ issueId: "issue-9", worktreeName: "ticket-API-9", slot: 1, pid: process.pid });
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    const handle = start(onSlots(runner));
+
+    await vi.waitFor(() => expect(handle.state().running).toEqual([{ slot: 2, jobId }]));
+    expect(runner.calls.filter((call) => call[0] === "down")).toEqual(ALL_SLOTS_DOWN.filter((call) => call[1] !== "1"));
+    held.release(jobId);
+    await waitForStatus(jobId, "succeeded");
+  });
+
   it("stop aborts every running job, waits for all of them, brings every slot down, then releases the lock", async () => {
     const held = heldRuns();
     runImplementMock.mockImplementation(held.impl);

@@ -1,6 +1,9 @@
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 
+/** The tools the brain's policy hook sees; `steward chat` installs the same rules as a settings hook. */
+export const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
+
 export type PolicyDecision = { allow: true } | { allow: false; reason: string };
 
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "write_file"]);

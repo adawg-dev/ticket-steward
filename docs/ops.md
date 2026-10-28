@@ -470,6 +470,21 @@ chat: {
 - The webhook answers `chat`, `chat_restart`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
   `chat_failed` (the access check could not reach GitLab) for an `/agent` note.
 
+**In the terminal.** `steward chat <KEY>` (in the stack: `docker compose exec steward steward chat API-123`) opens the
+ticket's latest agent session in the Claude Code terminal UI, in its worktree (recreated if retention removed it), with
+the brain's credentials, `CLAUDE_CONFIG_DIR`, MCP servers (`push` only when the ticket has a pushed steward branch) and
+tool rules (a `PreToolUse` hook, `steward chat-hook`: no writes outside the worktree, no mirror, DB, config or sessions,
+no `docker`/`sudo`/`git push`; commits are allowed). It needs no `chat` block, only the claude-code brain.
+
+- It refuses while a job for the ticket runs, naming the job, and while another `steward chat` holds the ticket.
+- While open it holds a lease (`chat_leases` in the DB, heartbeated every 30 s, ignored after 120 s without one): jobs
+  for the ticket wait, and it takes a slot no job is using, whose worker lane claims nothing until the chat ends.
+  Without `slots` the one lane is the slot, so the queue waits while the chat is open. With no slot free it exits 1;
+  `--no-slot` chats without slot services instead (the app's containers are not started).
+- Retention keeps the worktree and session while the chat is open.
+- On exit it releases the lease and the slot and lists uncommitted files and unpushed commits; pushing happens only
+  through the `push` tool inside the session.
+
 ### 1.8 Doctor, then start the service
 
 ```bash

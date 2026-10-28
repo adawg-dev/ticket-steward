@@ -4,6 +4,7 @@ import { StoredFixSchema, type StoredFix } from "../greptile/result.js";
 import { StoredImplementSchema, type StoredImplement } from "../implement/result.js";
 import type { TriggerEvent } from "../tracker/types.js";
 import { nowIso, readStored, type Database } from "./db.js";
+import { leaseCutoff } from "./leases.js";
 
 /** Issue jobs (implement), the fix loop's steps (await_review, fix, restart) and chat turns from MR notes. */
 export type JobKind = "implement" | "await_review" | "fix" | "restart" | "chat";
@@ -49,6 +50,8 @@ export interface Job {
   notBefore: string | null;
   /** A GitLab webhook woke the loop while this job ran: its deferral comes due at once instead of after the poll interval. */
   wakeRequested: boolean;
+  /** The slot the job was claimed on (each worker lane's own; 1 for inline runs); `acquireLease` skips a running job's. */
+  slot: number | null;
   /**
    * Stored columns holding JSON that cannot be read: a bad result is null, a bad trigger is a bare `cli` trigger built from
    * the row's columns. Such a job must fail, not run.
@@ -83,6 +86,7 @@ interface JobRow {
   finished_at: string | null;
   not_before: string | null;
   wake_requested: number;
+  slot: number | null;
 }
 
 const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "loop", "chat"]);
@@ -128,6 +132,7 @@ const toJob = (row: JobRow): Job => {
     finishedAt: row.finished_at,
     notBefore: row.not_before,
     wakeRequested: row.wake_requested === 1,
+    slot: row.slot,
     unreadable,
   };
 };
@@ -160,7 +165,7 @@ const jobColumns = (event: TriggerEvent): JobColumns => {
   return { ...ticket, kind: "implement", subject: null };
 };
 
-const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, wake_requested = 0, started_at = ?";
+const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, wake_requested = 0, started_at = ?, slot = ?";
 
 export class JobStore {
   private readonly insert;
@@ -168,6 +173,8 @@ export class JobStore {
   private readonly existsSucceeded;
   private readonly claimOldest;
   private readonly claimOne;
+  private readonly selectRunningForIssue;
+  private readonly selectRunningSlots;
   private readonly failRetired;
   private readonly storeImplement;
   private readonly storeFix;
@@ -208,9 +215,11 @@ export class JobStore {
       // A handed-back implement job also finishes succeeded; only one that pushed a branch implemented the ticket.
       "SELECT EXISTS (SELECT 1 FROM jobs WHERE issue_id = ? AND status = 'succeeded' AND kind = ? AND (kind <> 'implement' OR pushed_at IS NOT NULL)) AS found",
     );
-    // The oldest due job with no running job on the same ticket (issue_id) or on the same non-null subject. One statement,
-    // and better-sqlite3 is synchronous, so two loops can never claim the same job.
-    this.claimOldest = db.prepare<[string, string, number], JobRow>(
+    // The oldest due job with no running job on the same ticket (issue_id) or on the same non-null subject, and no active
+    // `steward chat` lease on its ticket or on the claiming lane's slot: a lease counts as a running job. One statement, and
+    // better-sqlite3 is synchronous, so two loops can never claim the same job; `acquireLease` decides in an immediate
+    // transaction, so a claim and a lease never both take one slot.
+    this.claimOldest = db.prepare<[string, number, string, number, string, number], JobRow>(
       `${CLAIM} WHERE id = (
          SELECT q.id FROM jobs q
          WHERE q.status = 'queued' AND (q.not_before IS NULL OR q.not_before <= ?)
@@ -219,10 +228,14 @@ export class JobStore {
              SELECT 1 FROM jobs r WHERE r.status = 'running' AND (
                r.issue_id = q.issue_id
                OR (q.subject IS NOT NULL AND r.subject = q.subject)))
+           AND NOT EXISTS (
+             SELECT 1 FROM chat_leases l WHERE l.heartbeat_at >= ? AND (l.issue_id = q.issue_id OR l.slot = ?))
          ORDER BY q.id LIMIT 1)
        RETURNING *`,
     );
-    this.claimOne = db.prepare<[string, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
+    this.claimOne = db.prepare<[string, number, number], JobRow>(`${CLAIM} WHERE id = ? AND status != 'running' RETURNING *`);
+    this.selectRunningForIssue = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE issue_id = ? AND status = 'running' ORDER BY id LIMIT 1");
+    this.selectRunningSlots = db.prepare<[], { slot: number }>("SELECT DISTINCT slot FROM jobs WHERE status = 'running' AND slot IS NOT NULL ORDER BY slot");
     this.failRetired = db.prepare<[string, string]>(
       `UPDATE jobs SET status = 'failed', error = ?, finished_at = ?, wake_requested = 0
        WHERE status IN ('queued', 'running') AND kind NOT IN (${JOB_KINDS.map((kind) => `'${kind}'`).join(", ")})`,
@@ -368,16 +381,33 @@ export class JobStore {
     return this.selectSessionWorktrees.all(since.toISOString()).map((row) => row.worktree_name);
   }
 
-  /** Claims the oldest due job; `waitsOnly` limits it to await_review jobs, which poll APIs and need no host resources. */
-  claimNext(options: { waitsOnly?: boolean } = {}): Job | null {
-    const now = nowIso();
-    const row = this.claimOldest.get(now, now, options.waitsOnly === true ? 1 : 0);
+  /**
+   * Claims the oldest due job for the lane on `slot` (default 1); `waitsOnly` limits it to await_review jobs, which poll APIs
+   * and need no host resources. Nothing is claimed while a `steward chat` lease holds the slot.
+   */
+  claimNext(options: { waitsOnly?: boolean; slot?: number } = {}): Job | null {
+    const now = new Date();
+    const at = now.toISOString();
+    const slot = options.slot ?? 1;
+    const row = this.claimOldest.get(at, slot, at, options.waitsOnly === true ? 1 : 0, leaseCutoff(now), slot);
     return row === undefined ? null : toJob(row);
   }
 
+  /** Claims one job for an inline run, which uses slot 1 under run.lock. */
   claimById(id: number): Job | null {
-    const row = this.claimOne.get(nowIso(), id);
+    const row = this.claimOne.get(nowIso(), 1, id);
     return row === undefined ? null : toJob(row);
+  }
+
+  /** A running job on the ticket, if any: `steward chat` refuses to open while one runs. */
+  runningForIssue(issueId: string): Job | null {
+    const row = this.selectRunningForIssue.get(issueId);
+    return row === undefined ? null : toJob(row);
+  }
+
+  /** The slots running jobs were claimed on. */
+  runningSlots(): number[] {
+    return this.selectRunningSlots.all().map((row) => row.slot);
   }
 
   /** Ends the job with its outcome; a deferred one is not an end, so it goes back to the queue through `defer`. */

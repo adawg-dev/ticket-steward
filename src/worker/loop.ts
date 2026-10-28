@@ -185,18 +185,23 @@ class Worker {
     logger.info("worker stopped");
   }
 
-  /** Brings the helper's whole slot range down, so slots the agent started itself or left over after lowering `slots.count` are cleaned; without `slots` there are no containers. */
+  /**
+   * Brings the helper's whole slot range down, so slots the agent started itself or left over after lowering `slots.count`
+   * are cleaned; without `slots` there are no containers. A slot an open `steward chat` leased is its, and stays up.
+   */
   private async downAll(): Promise<void> {
     const ref = this.deps.slot;
     if (ref === undefined) return;
-    await Promise.all(Array.from({ length: MAX_SLOTS }, (_, i) => ref.client.down(i + 1)));
+    const leased = new Set(this.deps.stores.leases.active().flatMap((lease) => (lease.slot === null ? [] : [lease.slot])));
+    const slots = Array.from({ length: MAX_SLOTS }, (_, i) => i + 1).filter((n) => !leased.has(n));
+    await Promise.all(slots.map((n) => ref.client.down(n)));
   }
 
   private async loop(lane: Lane): Promise<void> {
     while (!this.stopped) {
       let job: Job | null;
       try {
-        job = this.claim();
+        job = this.claim(lane);
       } catch (err) {
         // A store error while claiming must not end the loop; wait out the poll interval and try again.
         logger.error({ slot: lane.slot, err: errorMessage(err) }, "job claim failed");
@@ -213,11 +218,12 @@ class Worker {
   /**
    * A rejected Linear API key pauses the queue: jobs stay queued until the steward restarts with a working key. While the
    * resource guard holds, only await_review jobs are claimed; claims are synchronous, so two lanes never pass it together.
+   * A lane whose slot a `steward chat` leased claims nothing until the lease ends.
    */
-  private claim(): Job | null {
+  private claim(lane: Lane): Job | null {
     if (this.sweeping || this.deps.tracker.apiKeyRejected()) return null;
     const hold = this.heavyHold();
-    const job = this.deps.stores.jobs.claimNext({ waitsOnly: hold !== null });
+    const job = this.deps.stores.jobs.claimNext({ waitsOnly: hold !== null, slot: lane.slot });
     if (job !== null && job.kind !== "await_review") this.lastHeavyStart = Date.now();
     return job;
   }

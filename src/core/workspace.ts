@@ -161,6 +161,15 @@ const stewardSkillNames = (skillsDir: string | undefined): string[] =>
         .map((entry) => entry.name)
         .sort();
 
+/** What the agent may neither read nor write: the mirror, the DB, the overlay, the config dir and the session store. */
+export const brainDenyPaths = (config: PipelineDeps["config"], configPath: string, mirrorDir: string): string[] => [
+  mirrorDir,
+  join(config.dataDir, DB_FILENAME),
+  config.workspace.overlayDir,
+  dirname(configPath),
+  sessionsDir(config),
+];
+
 export const brainInput = (
   deps: PipelineDeps,
   paths: JobPaths,
@@ -189,7 +198,7 @@ export const brainInput = (
       ...(opts.push === undefined ? {} : { push: pushMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, target: opts.push }) }),
     },
     inlineSkills: stewardSkillNames(config.workspace.skillsDir),
-    denyPaths: [mirror.path, join(config.dataDir, DB_FILENAME), config.workspace.overlayDir, dirname(deps.configPath), sessionsDir(config)],
+    denyPaths: brainDenyPaths(config, deps.configPath, mirror.path),
     output,
     ...(opts.resumeSessionId === undefined ? {} : { resumeSessionId: opts.resumeSessionId }),
   };

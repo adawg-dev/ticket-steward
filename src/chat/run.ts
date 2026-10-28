@@ -66,34 +66,39 @@ const decide = (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi, trigge
 };
 
 /** The original base the session's branch grew from: the loop's, else the implement job's. */
-const baseShaOf = (deps: PipelineDeps, session: AgentSession): string | null =>
+const baseShaOf = (deps: Pick<PipelineDeps, "stores">, session: AgentSession): string | null =>
   session.loopId !== null ? (deps.stores.loops.get(session.loopId)?.baseSha ?? null) : (deps.stores.jobs.get(session.jobId)?.baseSha ?? null);
 
 /**
  * The push tool's target, only when the ticket has a pushed steward branch. A loop's chat pushes onto the loop's head like a
  * fix round. Without a loop the push is recorded on the implement job, whose last push is the branch head, so the next
- * chat (and `latestSession`) starts from what this one pushed.
+ * chat (and `latestSession`) starts from what this one pushed. `jobId` is the job the push is recorded on: a chat job's
+ * own on a loop, the session's implement job otherwise (and always for `steward chat`, which has no job).
  */
-const pushTarget = (ctx: RunContext, deps: PipelineDeps, session: AgentSession, worktree: Worktree): PushTarget | undefined => {
+export const sessionPushTarget = (
+  deps: Pick<PipelineDeps, "config" | "secrets" | "stores">,
+  session: AgentSession,
+  worktree: Pick<Worktree, "path">,
+  run: { jobId: number; identifier: string; issueId: string; port: number },
+): PushTarget | undefined => {
   if (session.branch === null || settingsOf(deps) === null) return undefined;
   const baseSha = baseShaOf(deps, session);
   if (baseSha === null) return undefined;
   return {
-    jobId: session.loopId === null ? session.jobId : ctx.jobId,
-    worktreePath: worktree.path, identifier: ctx.identifier, issueId: ctx.issueId,
-    mode: "fastForward", branch: session.branch, baseSha, loopId: session.loopId, port: jobPort(deps),
+    jobId: run.jobId, worktreePath: worktree.path, identifier: run.identifier, issueId: run.issueId,
+    mode: "fastForward", branch: session.branch, baseSha, loopId: session.loopId, port: run.port,
   };
 };
 
 /** The branch head the store holds after the run: the loop's, or the implement job's last push. */
-const branchHead = (deps: PipelineDeps, session: AgentSession): string | null =>
+const branchHead = (deps: Pick<PipelineDeps, "stores">, session: AgentSession): string | null =>
   session.loopId !== null ? (deps.stores.loops.get(session.loopId)?.headSha ?? null) : (deps.stores.jobs.get(session.jobId)?.commitSha ?? null);
 
 /**
  * What the run left that never reached the branch: uncommitted paths and commits after the branch head (or, answer-only,
  * after the commit the run started at). The steward never commits or pushes it; the reply says so.
  */
-const leftoverWork = async (deps: PipelineDeps, session: AgentSession, worktree: Worktree, push: PushTarget | undefined): Promise<string> => {
+export const leftoverWork = async (deps: Pick<PipelineDeps, "config" | "stores" | "secrets" | "redactor">, session: AgentSession, worktree: Worktree, push: PushTarget | undefined): Promise<string> => {
   try {
     const pushedSha = (push === undefined ? null : branchHead(deps, session)) ?? worktree.sha;
     const { files: overlayFiles } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);
@@ -122,7 +127,9 @@ const converse = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi
     const slot = await startSlot(ctx, deps, port);
     await mkdir(paths.artifactsDir, { recursive: true, mode: 0o700 });
     worktree = await ensureWorktree(deps, session, { env, port, slot });
-    push = pushTarget(ctx, deps, session, worktree);
+    push = sessionPushTarget(deps, session, worktree, {
+      jobId: session.loopId === null ? session.jobId : ctx.jobId, identifier: ctx.identifier, issueId: ctx.issueId, port,
+    });
     const checks = push === undefined || settings === undefined ? [] : stewardChecks(settings.checks, push.baseSha);
     prompt = renderChatPrompt(await readFile(chatPromptPath, "utf8"), {
       identifier: ctx.identifier,

@@ -2,18 +2,17 @@ import { query, type HookCallback, type McpServerConfig, type Options, type SDKM
 import { chatResultJsonSchema } from "../chat/result.js";
 import { fixResultJsonSchema } from "../greptile/result.js";
 import { implementResultJsonSchema } from "../implement/result.js";
-import { evaluateTool } from "./policy.js";
+import { evaluateTool, POLICY_HOOK_MATCHER } from "./policy.js";
 import type { Brain, BrainInput, BrainOutput, BrainUsage, OnMessage } from "./types.js";
 
 const ALLOWED_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*", "mcp__push__*"];
-const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
 const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = {
   implement: implementResultJsonSchema,
   fix: fixResultJsonSchema,
   chat: chatResultJsonSchema,
 };
 /** Claude Code deletes transcripts older than this; the steward's retention owns session deletion instead. */
-const CLEANUP_PERIOD_DAYS = 3650;
+export const CLEANUP_PERIOD_DAYS = 3650;
 const FOLLOW_UP_PROMPT = "Stop investigating and emit the final structured result now.";
 
 /** The SDK's `query`, narrowed to what the brain consumes so tests can substitute an async generator. */

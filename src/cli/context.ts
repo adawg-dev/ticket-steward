@@ -1,4 +1,4 @@
-import type { Writable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import type { Command } from "commander";
 import type { Brain } from "../brain/types.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
@@ -32,12 +32,18 @@ export interface CliFactories {
   slotHelperPath?: string;
   /** Stands in for /run/steward-slot.sock, the socket path that means the helper is installed on this host. */
   slotSystemdSocket?: string;
+  /** Stands in for the interactive Claude Code process `steward chat` runs; resolves to its exit code. */
+  spawnInteractive?: SpawnInteractive;
 }
+
+export type SpawnInteractive = (command: string, args: string[], options: { cwd: string; env: Record<string, string> }) => Promise<number>;
 
 export interface CliContext {
   loadConfig: typeof loadConfig;
   stdout: Writable;
   stderr: Writable;
+  /** What `chat-hook` reads its hook input from; process.stdin when unset. */
+  stdin?: Readable;
   fetchImpl: typeof fetch;
   exit?: (code: number) => never;
   factories?: CliFactories;
