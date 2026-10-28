@@ -188,10 +188,11 @@ export class JobStore {
     );
     // The oldest due job with no running job on the same ticket (issue_id) or on the same non-null subject. One statement,
     // and better-sqlite3 is synchronous, so two loops can never claim the same job.
-    this.claimOldest = db.prepare<[string, string], JobRow>(
+    this.claimOldest = db.prepare<[string, string, number], JobRow>(
       `${CLAIM} WHERE id = (
          SELECT q.id FROM jobs q
          WHERE q.status = 'queued' AND (q.not_before IS NULL OR q.not_before <= ?)
+           AND (? = 0 OR q.kind = 'await_review')
            AND NOT EXISTS (
              SELECT 1 FROM jobs r WHERE r.status = 'running' AND (
                r.issue_id = q.issue_id
@@ -301,9 +302,10 @@ export class JobStore {
     this.storeSession.run(sessionId, id);
   }
 
-  claimNext(): Job | null {
+  /** Claims the oldest due job; `waitsOnly` limits it to await_review jobs, which poll APIs and need no host resources. */
+  claimNext(options: { waitsOnly?: boolean } = {}): Job | null {
     const now = nowIso();
-    const row = this.claimOldest.get(now, now);
+    const row = this.claimOldest.get(now, now, options.waitsOnly === true ? 1 : 0);
     return row === undefined ? null : toJob(row);
   }
 

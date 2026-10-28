@@ -80,6 +80,17 @@ const GreptileSchema = z.object({
   mcp: z.object({ url: z.string().min(1).default("https://api.greptile.com/mcp") }).optional(),
 });
 
+/** Holds heavy jobs (everything but await_review) while the host is short on memory or CPU, and spaces their starts. */
+const ResourceGuardSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** Available memory (MemAvailable) below this holds heavy starts. */
+  minAvailableMemoryMb: z.number().nonnegative().default(4096),
+  /** The 1-minute load average divided by the CPU count; above this holds heavy starts. */
+  maxLoadPerCpu: z.number().positive().default(1.5),
+  /** The load average lags about a minute, so heavy starts this close together would all pass the check at once. */
+  startSpacingSeconds: z.number().nonnegative().default(30),
+});
+
 export const StewardConfigSchema = z.object({
   dataDir: z.string(),
   brain: z.discriminatedUnion("kind", [
@@ -133,6 +144,8 @@ export const StewardConfigSchema = z.object({
   slots: SlotsSchema.optional(),
   /** The Greptile fix loop after the implement push; GitLab and the claude-code brain only. */
   greptile: GreptileSchema.optional(),
+  /** Unset applies RESOURCE_GUARD_DEFAULTS. */
+  resourceGuard: ResourceGuardSchema.optional(),
 }).superRefine((config, ctx) => {
   if (config.greptile !== undefined) {
     if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["greptile"], message: "greptile requires implement" });
@@ -158,6 +171,8 @@ export type CodeHostConfig = StewardConfig["codehost"];
 export type LabelsConfig = NonNullable<StewardConfig["tracker"]["labels"]>;
 export type ImplementConfig = NonNullable<StewardConfig["implement"]>;
 export type GreptileConfig = NonNullable<StewardConfig["greptile"]>;
+export type ResourceGuardConfig = z.infer<typeof ResourceGuardSchema>;
+export const RESOURCE_GUARD_DEFAULTS: ResourceGuardConfig = ResourceGuardSchema.parse({});
 export type SlotsConfig = NonNullable<StewardConfig["slots"]>;
 
 /** Slot n's app port with `slots`, otherwise `workspace.port`; config load guarantees one of them. */

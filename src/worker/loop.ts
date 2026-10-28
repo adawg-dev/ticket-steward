@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
+import { RESOURCE_GUARD_DEFAULTS, type ResourceGuardConfig } from "../config/schema.js";
 import { acquireRunLock } from "../core/lock.js";
 import { sessionsDir } from "../core/workspace.js";
 import { publishOnly, redactOutcome, runJob, type PipelineDeps } from "../core/pipeline.js";
@@ -12,6 +13,7 @@ import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
 import { unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
 import { loopProtection, sweep } from "../workspace/retention.js";
+import { holdReason, sampleResources, type Hold, type ResourceSample } from "./resources.js";
 
 export interface WorkerOptions {
   pollMs?: number;
@@ -27,6 +29,8 @@ export interface WorkerOptions {
   runAwaitReview?: typeof runAwaitReview;
   runFix?: typeof runFix;
   runRestart?: typeof runRestart;
+  /** Samples host memory and load for the resource guard. */
+  resources?: () => ResourceSample;
 }
 
 export type WorkerDeps = PipelineDeps & WorkerOptions;
@@ -103,6 +107,12 @@ class Worker {
   private readonly awaitReview: typeof runAwaitReview;
   private readonly fix: typeof runFix;
   private readonly restart: typeof runRestart;
+  private readonly guard: ResourceGuardConfig;
+  private readonly resources: () => ResourceSample;
+  /** When the last heavy job was claimed (epoch ms), for the guard's start spacing. */
+  private lastHeavyStart = Number.NEGATIVE_INFINITY;
+  /** The shortage holding heavy starts, so the log notes only when that changes. */
+  private held: string | null = null;
   private readonly abort = new AbortController();
   private readonly sweepTimer: NodeJS.Timeout;
   private readonly strandedTimer: NodeJS.Timeout;
@@ -130,6 +140,8 @@ class Worker {
     this.awaitReview = deps.runAwaitReview ?? runAwaitReview;
     this.fix = deps.runFix ?? runFix;
     this.restart = deps.runRestart ?? runRestart;
+    this.guard = deps.config.resourceGuard ?? RESOURCE_GUARD_DEFAULTS;
+    this.resources = deps.resources ?? sampleResources;
     this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
     const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
     logger.info({ requeued, failed, slots: this.lanes.length }, "worker started");
@@ -199,10 +211,32 @@ class Worker {
     }
   }
 
-  /** A rejected Linear API key pauses the queue: jobs stay queued until the steward restarts with a working key. */
+  /**
+   * A rejected Linear API key pauses the queue: jobs stay queued until the steward restarts with a working key. While the
+   * resource guard holds, only await_review jobs are claimed; claims are synchronous, so two lanes never pass it together.
+   */
   private claim(): Job | null {
     if (this.sweeping || this.deps.tracker.apiKeyRejected()) return null;
-    return this.deps.stores.jobs.claimNext();
+    const hold = this.heavyHold();
+    const job = this.deps.stores.jobs.claimNext({ waitsOnly: hold !== null });
+    if (job !== null && job.kind !== "await_review") this.lastHeavyStart = Date.now();
+    return job;
+  }
+
+  /** The guard's verdict for a heavy start now; logs when a shortage starts or ends holding them. */
+  private heavyHold(): Hold | null {
+    let hold: Hold | null = null;
+    try {
+      hold = this.guard.enabled ? holdReason(this.guard, this.resources(), Date.now() - this.lastHeavyStart) : null;
+    } catch (err) {
+      // A sampler failure must not stop the queue: start jobs as if the guard were off.
+      logger.warn({ err: errorMessage(err) }, "resource sample failed");
+    }
+    const shortage = hold?.cause === "shortage" ? hold.reason : null;
+    if (shortage !== null && this.held === null) logger.info({ reason: shortage }, "heavy job starts held");
+    if (shortage === null && this.held !== null) logger.info({ was: this.held }, "heavy job starts resumed");
+    this.held = shortage;
+    return hold;
   }
 
   private idle(lane: Lane): Promise<void> {

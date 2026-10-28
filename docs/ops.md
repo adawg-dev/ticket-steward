@@ -550,6 +550,21 @@ come up fails the job as retryable with `setup failed: slot <n>: …` and the he
 attempt's `setupTail`. `steward serve` brings every slot down when it starts and when it stops;
 retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward enrich|implement KEY` without serve runs on slot 1.
 
+**Resource guard.** On by default, with or without `slots`. Before a lane claims a heavy job (enrich,
+implement, fix, restart) the worker checks the host: available memory (`MemAvailable`) must be at least
+`minAvailableMemoryMb` and the 1-minute load average per CPU at most `maxLoadPerCpu`, and the last heavy
+start must be at least `startSpacingSeconds` ago (the load average lags about a minute, so a burst of
+tickets would otherwise all start before it rises). While it holds, the job stays queued and the lane only
+claims `await_review` jobs, which poll APIs and use no host resources, so a fix loop's waits keep their
+deadlines. The log says `heavy job starts held` with the reason when a shortage starts holding and
+`heavy job starts resumed` when it ends; spacing holds are not logged. With the guard, `slots.count` is a
+ceiling rather than a promise: set it to what the host could run on a good day and let the guard trim it.
+
+```ts
+// defaults; omit the block to keep them, or { enabled: false } to turn the guard off
+resourceGuard: { minAvailableMemoryMb: 4096, maxLoadPerCpu: 1.5, startSpacingSeconds: 30 },
+```
+
 **Troubleshooting.**
 
 - `steward-slot status <n>` (as root) lists a slot's containers; `steward-slot down <n>` removes them.

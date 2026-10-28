@@ -1,4 +1,4 @@
-import { StewardConfigSchema, appPortOf, defineConfig } from "../../src/config/schema.js";
+import { RESOURCE_GUARD_DEFAULTS, StewardConfigSchema, appPortOf, defineConfig } from "../../src/config/schema.js";
 import type { StewardConfigInput } from "../../src/config/schema.js";
 
 const minimalInput: StewardConfigInput = {
@@ -246,5 +246,22 @@ describe("slots config", () => {
   it("appPortOf is appPortBase + n with slots and workspace.port without", () => {
     expect(appPortOf(StewardConfigSchema.parse(withSlots(slotsInput)), 2)).toBe(4102);
     expect(appPortOf(StewardConfigSchema.parse(minimalInput), 2)).toBe(4100);
+  });
+});
+
+describe("resourceGuard config", () => {
+  it("is unset in a minimal config; the worker then uses the defaults", () => {
+    expect(StewardConfigSchema.parse(minimalInput).resourceGuard).toBeUndefined();
+    expect(RESOURCE_GUARD_DEFAULTS).toEqual({ enabled: true, minAvailableMemoryMb: 4096, maxLoadPerCpu: 1.5, startSpacingSeconds: 30 });
+  });
+
+  it("fills the defaults around the fields given", () => {
+    const parsed = StewardConfigSchema.parse({ ...minimalInput, resourceGuard: { minAvailableMemoryMb: 8192 } });
+    expect(parsed.resourceGuard).toEqual({ ...RESOURCE_GUARD_DEFAULTS, minAvailableMemoryMb: 8192 });
+  });
+
+  it("rejects a non-positive load ceiling and negative spacing", () => {
+    expect(StewardConfigSchema.safeParse({ ...minimalInput, resourceGuard: { maxLoadPerCpu: 0 } }).success).toBe(false);
+    expect(StewardConfigSchema.safeParse({ ...minimalInput, resourceGuard: { startSpacingSeconds: -1 } }).success).toBe(false);
   });
 });

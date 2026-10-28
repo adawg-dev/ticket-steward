@@ -107,6 +107,16 @@ describe("JobStore", () => {
     expect(stores.jobs.claimNext()).toBeNull();
   });
 
+  it("claimNext with waitsOnly skips older heavy jobs and claims the oldest due await_review", () => {
+    const enrich = stores.jobs.enqueue(createdEvent);
+    const awaitId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-2", identifier: "API-2", teamKey: "API", loopId: 4, step: "await" });
+
+    expect(stores.jobs.claimNext({ waitsOnly: true })?.id).toBe(awaitId);
+    expect(stores.jobs.claimNext({ waitsOnly: true })).toBeNull();
+    expect(stores.jobs.get(enrich)?.status).toBe("queued");
+    expect(stores.jobs.claimNext()?.id).toBe(enrich);
+  });
+
   it("findQueued returns the queued job for the issue", () => {
     const id = stores.jobs.enqueue(createdEvent);
 

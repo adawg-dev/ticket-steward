@@ -15,6 +15,7 @@ import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { SlotClient } from "../../src/workspace/slots.js";
 import { startWorker, type WorkerDeps, type WorkerHandle } from "../../src/worker/loop.js";
+import type { ResourceSample } from "../../src/worker/resources.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
@@ -69,7 +70,10 @@ const makeConfig = (): StewardConfig => ({
   retention: { keptWorktrees: 3, days: 30 },
   prompt: join(dataDir, "prompt.md"),
   server: { port: 3020, publicUrl: "https://steward.example" },
+  resourceGuard: { enabled: false, minAvailableMemoryMb: 4096, maxLoadPerCpu: 1.5, startSpacingSeconds: 30 },
 });
+
+const AMPLE: ResourceSample = { availableMemoryMb: 64_000, loadPerCpu: 0.1 };
 
 const makeDeps = (overrides: Partial<WorkerDeps> = {}): WorkerDeps => ({
   config: makeConfig(),
@@ -87,6 +91,7 @@ const makeDeps = (overrides: Partial<WorkerDeps> = {}): WorkerDeps => ({
   publishOnly: publishOnlyMock,
   pollMs: 5,
   backoffMs: [5, 5],
+  resources: () => AMPLE,
   ...overrides,
 });
 
@@ -786,5 +791,64 @@ describe("startWorker", () => {
 
   it("refuses to start with slots configured but no slot client", () => {
     expect(() => startWorker(makeDeps({ config: slotConfig() }))).toThrow("slots is configured but the worker was given no slot client");
+  });
+  describe("resource guard", () => {
+    const guarded = (spacingSeconds: number, count = 2): StewardConfig => ({
+      ...slotConfig(count),
+      resourceGuard: { enabled: true, minAvailableMemoryMb: 4096, maxLoadPerCpu: 1.5, startSpacingSeconds: spacingSeconds },
+    });
+
+    it("holds a heavy job while memory is short, still runs an await_review, and starts the heavy job once memory frees up", async () => {
+      let sample: ResourceSample = { availableMemoryMb: 1024, loadPerCpu: 0.1 };
+      const runAwaitReview = vi.fn(async () => ({ status: "succeeded" }) as const);
+      const heavy = stores.jobs.enqueue(createdTrigger);
+      const loopId = runningLoop("awaiting_review");
+      const waitId = stores.jobs.enqueue(loopStep(loopId, "await"));
+      start({ ...onSlots(fakeSlotRunner(), guarded(0)), runAwaitReview, resources: () => sample });
+
+      await waitForStatus(waitId, "succeeded");
+      await sleep(30);
+      expect(stores.jobs.get(heavy)?.status).toBe("queued");
+      expect(runJobMock).not.toHaveBeenCalled();
+
+      sample = AMPLE;
+      await waitForStatus(heavy, "succeeded");
+    });
+
+    it("holds a heavy job while the load per CPU is over the ceiling", async () => {
+      let sample: ResourceSample = { availableMemoryMb: 64_000, loadPerCpu: 2 };
+      const heavy = stores.jobs.enqueue(createdTrigger);
+      start({ ...onSlots(fakeSlotRunner(), guarded(0)), resources: () => sample });
+
+      await sleep(30);
+      expect(stores.jobs.get(heavy)?.status).toBe("queued");
+
+      sample = AMPLE;
+      await waitForStatus(heavy, "succeeded");
+    });
+
+    it("starts heavy jobs at least startSpacingSeconds apart, even with free slots", async () => {
+      const held = heldRuns();
+      runJobMock.mockImplementation(held.impl);
+      const first = stores.jobs.enqueue(createdTrigger);
+      const second = stores.jobs.enqueue(issue2);
+      const handle = start(onSlots(fakeSlotRunner(), guarded(0.3)));
+
+      await vi.waitFor(() => expect(handle.state().running.map((entry) => entry.jobId)).toEqual([first]));
+      await sleep(100);
+      expect(stores.jobs.get(second)?.status).toBe("queued");
+
+      await waitForStatus(second, "running");
+      held.release(first);
+      held.release(second);
+      await waitForStatus(second, "succeeded");
+    });
+
+    it("lets nothing through the guard when it is disabled", async () => {
+      const heavy = stores.jobs.enqueue(createdTrigger);
+      start({ resources: () => ({ availableMemoryMb: 0, loadPerCpu: 99 }) });
+
+      await waitForStatus(heavy, "succeeded");
+    });
   });
 });

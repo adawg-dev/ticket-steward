@@ -54,4 +54,6 @@ export default defineConfig({
       RABBITMQ_URL: "amqp://steward:steward-slot@127.0.0.1:{{rabbitmq}}",
     },
   },
+  // Holds heavy job starts while the host is short on memory or CPU (docs/ops.md §1.10); these are the defaults.
+  // resourceGuard: { minAvailableMemoryMb: 4096, maxLoadPerCpu: 1.5, startSpacingSeconds: 30 },
 });
