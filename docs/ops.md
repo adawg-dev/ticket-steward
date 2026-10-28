@@ -471,7 +471,9 @@ chat: {
 - On a handed-back loop, `/agent restart` restarts the loop (the same restart step as re-adding the label); any other
   `/agent` note chats without restarting it.
 - The webhook answers `chat`, `chat_restart`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
-  `chat_failed` (the access check could not reach GitLab) for an `/agent` note.
+  `chat_failed` (the access check could not reach GitLab) for an `/agent` note. A bare `/agent` with no message is
+  `chat_ignored`.
+- An `/agent` note does not wake a loop waiting for review; the loop's next poll (or any other note) does.
 
 **In the terminal.** `steward chat <KEY>` (in the stack: `docker compose exec steward steward chat API-123`) opens the
 ticket's latest agent session in the Claude Code terminal UI, in its worktree (recreated if retention removed it), with
@@ -487,6 +489,9 @@ no `docker`/`sudo`/`git push`; commits are allowed). It needs no `chat` block, o
 - Retention keeps the worktree and session while the chat is open.
 - On exit it releases the lease and the slot and lists uncommitted files and unpushed commits; pushing happens only
   through the `push` tool inside the session.
+- The hook denies (exit 2) whenever it cannot decide, including when the config or `.env` cannot be loaded.
+- It runs outside `serve`'s process, so recreating a worktree can collide with a fetch `serve` is running on the mirror
+  (a git lock error). Run it again.
 
 ### 1.8 Doctor, then start the service
 
@@ -730,6 +735,9 @@ at runtime. A host install puts `orbit` on the steward user's `PATH` itself; wit
   `.env` itself and hands it only to the Orbit processes it runs (60 s limit, output cut at 64 KiB), so the brain
   still receives no GitLab credential. Any failure is a tool error starting `Orbit remote is unavailable:`; it never
   fails the job.
+- `orbit_context` refuses a URL ref whose origin is not `codehost.baseUrl`, so the token only goes to the configured host.
+- The graph under `<dataDir>/orbit` is shared by every worktree and is not swept with them; delete the directory (with
+  no job running) if it grows large, and the next run re-indexes.
 - **Doctor** prints `[ok] orbit: 0.161.0` when the binary runs and `orbit remote` for
   `orbit status --full-path <codehost.project>` with `GITLAB_TOKEN`. Both only warn.
 

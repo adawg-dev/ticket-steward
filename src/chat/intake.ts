@@ -94,7 +94,8 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
   const message = addressedMessage(note.body, chat.prefix);
   if (message === null || !isOurProject(event, config.codehost.project)) return null;
   const mrIid = event.mrIid;
-  if (fromMachine(config, note)) return { action: "chat_ignored", loopId: null };
+  // A bare prefix asks nothing; resuming the agent on an empty message would only spend a run.
+  if (fromMachine(config, note) || message.trim() === "") return { action: "chat_ignored", loopId: null };
   if (stores.deliveries.seen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: null };
 
   let level: number | null;

@@ -2,11 +2,11 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 
 /** The tools the brain's policy hook sees; `steward chat` installs the same rules as a settings hook. */
-export const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|Read|Glob|Grep";
+export const POLICY_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit|Read|Glob|Grep";
 
 export type PolicyDecision = { allow: true } | { allow: false; reason: string };
 
-const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "write_file"]);
+const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "write_file"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "read_file", "list_dir"]);
 const SHELL_TOOLS = new Set(["Bash", "run_shell", "start_process"]);
 /** `push` is the steward's push tool, the agent's only way to publish its commits; `orbit` its read-only GitLab graph. */
@@ -55,7 +55,7 @@ const commandText = (input: unknown): string => {
 
 const targetPath = (input: unknown): string | undefined => {
   const record = asRecord(input);
-  return stringField(record, "file_path") ?? stringField(record, "path");
+  return stringField(record, "file_path") ?? stringField(record, "notebook_path") ?? stringField(record, "path");
 };
 
 const looksLikePath = (token: string): boolean => token.includes("/") || token.includes("..") || HOME_PREFIX.test(token);

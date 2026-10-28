@@ -563,6 +563,14 @@ describe("buildServer", () => {
         expect(jobsOfKind("chat")).toEqual([]);
       });
 
+      it("ignores a bare prefix with no message", async () => {
+        sessionLoop();
+
+        expect((await postGitlab("Note Hook", chatNote("/agent"))).json()).toEqual({ ok: true, action: "chat_ignored" });
+        expect((await postGitlab("Note Hook", chatNote("  /agent   "))).json()).toEqual({ ok: true, action: "chat_ignored" });
+        expect(jobsOfKind("chat")).toEqual([]);
+      });
+
       it("ignores a Reporter and a non-member silently", async () => {
         sessionLoop();
 

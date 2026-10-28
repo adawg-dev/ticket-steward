@@ -1,4 +1,5 @@
-import { mkdir, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { buildWorkspaceEnv } from "../brain/env.js";
 import type { PipelineDeps } from "../core/deps.js";
@@ -129,6 +130,18 @@ const pushFromBundle = async (deps: PushDeps, jobDir: string, input: { remote: R
 };
 
 /**
+ * Why the worktree's git directory cannot be trusted for the checks, or null. The `.git` file is agent-writable: pointed at
+ * another repository, or given grafts or a shallow file, it could hide a commit from the guard while the scratch repo
+ * still pushes it.
+ */
+const gitDirProblem = async (worktreePath: string, mirrorPath: string): Promise<string | null> => {
+  const common = await gitOrThrow(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktreePath);
+  if ((await realpath(common)) !== (await realpath(mirrorPath))) return `the git directory is ${common}, not the steward's mirror`;
+  const hiding = ["shallow", join("info", "grafts")].find((file) => existsSync(join(common, file)));
+  return hiding === undefined ? null : `${join(common, hiding)} is present`;
+};
+
+/**
  * Pushes the worktree's `HEAD` to the run's ticket branch under the steward's push rules: a clean worktree, a linear
  * series of commits prefixed with the identifier on the last pushed head (or the base, creating the branch), the secret
  * guard, the steward's checks, and an open ticket. Every refusal carries the reason the agent sees.
@@ -144,6 +157,10 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   await settleUnfinished(deps, target, remote);
   const start = startOf(deps, target);
   if ("ok" in start) return start;
+
+  // 0. The checks below read the worktree's git directory, so it must still be the steward's.
+  const tampered = await gitDirProblem(worktreePath, deps.mirror.path);
+  if (tampered !== null) return refuse("the worktree's git directory was changed; restore it before pushing", tampered);
 
   // 1. Only committed work is pushed.
   const { files: overlayFiles, secrets } = await guardSecrets(deps.config.workspace.overlayDir, deps.secrets);

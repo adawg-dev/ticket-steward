@@ -5,6 +5,7 @@ import type { Readable } from "node:stream";
 import { join } from "node:path";
 import type { Command } from "commander";
 import { CLEANUP_PERIOD_DAYS } from "../brain/claudeCode.js";
+import type { PolicyDecision } from "../brain/policy.js";
 import { buildBrainEnv } from "../brain/env.js";
 import { chatSettings, evaluateHook, HOOK_DENY_EXIT } from "../chat/hook.js";
 import { acquireLease, holdLease } from "../chat/lease.js";
@@ -14,7 +15,7 @@ import { appPortOf } from "../config/schema.js";
 import { brainDenyPaths, brainInput, sessionsDir, type JobPaths } from "../core/workspace.js";
 import { freePort, isPortFree } from "../workspace/retention.js";
 import type { Slot } from "../workspace/slots.js";
-import { fail, loadFromProgram, println, type CliContext, type SpawnInteractive } from "./context.js";
+import { errorMessage, fail, loadFromProgram, println, type CliContext, type SpawnInteractive } from "./context.js";
 import { jobsDir, mirrorPath, workRoot } from "./paths.js";
 import { buildRuntime, type Runtime } from "./runtime.js";
 
@@ -165,9 +166,15 @@ export const registerChat = (program: Command, ctx: CliContext): void => {
     .requiredOption("--workspace <path>", "the session's worktree")
     .requiredOption("--artifacts <path>", "the session's artifacts directory")
     .action(async (opts: { workspace: string; artifacts: string }) => {
-      const loaded = await loadFromProgram(program, ctx);
-      const denyPaths = brainDenyPaths(loaded.config, loaded.configPath, mirrorPath(loaded.config.dataDir));
-      const decision = evaluateHook(await readAll(ctx.stdin ?? process.stdin), { workspacePath: opts.workspace, artifactsDir: opts.artifacts, denyPaths });
+      // Claude Code blocks only on exit 2; any other failure would let the tool run unchecked, so every error denies.
+      let decision: PolicyDecision;
+      try {
+        const loaded = await loadFromProgram(program, ctx);
+        const denyPaths = brainDenyPaths(loaded.config, loaded.configPath, mirrorPath(loaded.config.dataDir));
+        decision = evaluateHook(await readAll(ctx.stdin ?? process.stdin), { workspacePath: opts.workspace, artifactsDir: opts.artifacts, denyPaths });
+      } catch (err) {
+        decision = { allow: false, reason: `the policy hook failed: ${errorMessage(err)}` };
+      }
       if (!decision.allow) return fail(ctx, decision.reason, HOOK_DENY_EXIT);
     });
 };

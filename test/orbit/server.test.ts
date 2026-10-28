@@ -1,4 +1,4 @@
-import { ORBIT_OUTPUT_BYTES, ORBIT_TOOL_TIMEOUT_MS, orbitMcpSpec, orbitRemote, runOrbitTool, type OrbitRemote } from "../../src/orbit/server.js";
+import { ORBIT_OUTPUT_BYTES, ORBIT_TOOL_TIMEOUT_MS, orbitMcpSpec, orbitRemote, runOrbitContext, runOrbitTool, type OrbitRemote } from "../../src/orbit/server.js";
 import type { OrbitExec, OrbitRun } from "../../src/orbit/run.js";
 
 const gitlab = { kind: "gitlab" as const, baseUrl: "https://gitlab.example.com", project: "acme/app" };
@@ -66,6 +66,24 @@ describe("runOrbitTool", () => {
 
     expect(await runOrbitTool(noToken, ["schema"])).toEqual({ content: [{ type: "text", text: "Orbit remote is unavailable: GITLAB_TOKEN is not set" }], isError: true });
     expect((await runOrbitTool(github, ["schema"])).content[0]?.text).toBe("Orbit remote is unavailable: the code host is not GitLab");
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("runOrbitContext", () => {
+  it("passes refs on the code host through to orbit context", async () => {
+    const { exec, calls } = fakeExec({ stdout: "mr" });
+
+    await runOrbitContext(remoteWith(exec), ["mr:42", "https://gitlab.example.com/acme/app/-/merge_requests/42"]);
+    expect(calls.map((call) => call.args)).toEqual([["context", "--", "mr:42", "https://gitlab.example.com/acme/app/-/merge_requests/42"]]);
+  });
+
+  it("refuses a URL on another host without running Orbit", async () => {
+    const { exec, calls } = fakeExec({ stdout: "x" });
+
+    const result = await runOrbitContext(remoteWith(exec), ["mr:1", "https://evil.example.net/acme/app/-/merge_requests/1"]);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("not on the configured GitLab host");
     expect(calls).toEqual([]);
   });
 });

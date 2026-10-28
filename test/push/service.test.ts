@@ -135,6 +135,23 @@ describe("pushFromWorktree refusals", () => {
     expect(await push()).toEqual({ ok: false, reason: "commit or discard your changes first", detail: "notes.md" });
   });
 
+  it("refuses when the mirror carries a grafts file that could hide commits from the guard", async () => {
+    await agentCommit("API-1: first");
+    await mkdir(join(repo.mirror.path, "info"), { recursive: true });
+    await writeFile(join(repo.mirror.path, "info", "grafts"), "");
+
+    expect(await push()).toMatchObject({ ok: false, reason: "the worktree's git directory was changed; restore it before pushing", detail: expect.stringContaining("grafts is present") });
+  });
+
+  it("refuses when the worktree's .git points at another repository", async () => {
+    await agentCommit("API-1: first");
+    const other = join(repo.dataDir, "other");
+    await git(repo.dataDir, ["clone", "-q", repo.repo, other]);
+    await writeFile(join(worktree.path, ".git"), `gitdir: ${join(other, ".git")}\n`);
+
+    expect(await push()).toMatchObject({ ok: false, detail: expect.stringContaining("not the steward's mirror") });
+  });
+
   it("refuses when there is nothing new on the base", async () => {
     expect(await push()).toEqual({ ok: false, reason: `nothing to push: HEAD is already at ${repo.sha.slice(0, 7)}`, detail: "" });
   });

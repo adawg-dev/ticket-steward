@@ -298,6 +298,24 @@ describe("steward chat-hook", () => {
     await hook(hookInput("Edit", { file_path: "/work/ticket-API-1/src/a.ts", old_string: "a", new_string: "b" })).parse();
   });
 
+  it("denies a NotebookEdit outside the worktree", async () => {
+    const { parse, stderr } = hook(hookInput("NotebookEdit", { notebook_path: "/tmp/x.ipynb", new_source: "x" }));
+
+    await expect(parse()).rejects.toEqual(new ExitSignal(2));
+    expect(stderr()).toContain("outside the worktree");
+  });
+
+  it("denies with exit 2 when its config cannot be loaded", async () => {
+    const context = makeContext({ factories: { tracker: new FakeTracker([]), codehost: new FakeCodeHost(), brain: new FakeBrain() } });
+    context.ctx.stdin = Readable.from([hookInput("Read", { file_path: "/work/ticket-API-1/a.ts" })]);
+    const missing = join(repo.dataDir, "missing.config.ts");
+
+    await expect(
+      buildProgram(context.ctx).parseAsync(["node", "steward", "--config", missing, "chat-hook", "--workspace", "/work/ticket-API-1", "--artifacts", "/a"]),
+    ).rejects.toEqual(new ExitSignal(2));
+    expect(context.stderr()).toContain("the policy hook failed");
+  });
+
   it("denies input that is not a hook payload", async () => {
     const { parse, stderr } = hook("not json");
 

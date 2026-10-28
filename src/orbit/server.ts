@@ -69,6 +69,25 @@ export const runOrbitTool = async (remote: OrbitRemote, args: string[]): Promise
   }
 };
 
+/** A ref that is a URL on another host than the code host; Orbit would send the token wherever a URL ref points. */
+export const foreignRef = (refs: string[], baseUrl: string | undefined): string | undefined =>
+  refs.find((ref) => {
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) return false;
+    if (baseUrl === undefined) return true;
+    try {
+      return new URL(ref).origin !== new URL(baseUrl).origin;
+    } catch {
+      return true;
+    }
+  });
+
+/** orbit_context: refs that point off the code host are refused before Orbit (and the token) sees them. */
+export const runOrbitContext = (remote: OrbitRemote, refs: string[]): Promise<ToolText> => {
+  const foreign = foreignRef(refs, remote.env.GITLAB_URL);
+  if (foreign !== undefined) return Promise.resolve(unavailable(`${foreign} is not on the configured GitLab host`));
+  return runOrbitTool(remote, ["context", "--", ...refs]);
+};
+
 /** Serves read-only Orbit tools. `--` keeps a query or ref from being read as an Orbit flag. */
 export const startOrbitMcpServer = async (remote: OrbitRemote): Promise<void> => {
   const server = new McpServer({ name: "ticket-steward-orbit", version: "0.1.0" });
@@ -96,7 +115,7 @@ export const startOrbitMcpServer = async (remote: OrbitRemote): Promise<void> =>
         "Read GitLab entities with what they cite: merge requests (description, threads, changed files, failed jobs), issues, pipelines, job logs, commits. For code in the worktree, run `orbit context` in the shell instead.",
       inputSchema: ContextInput,
     },
-    async ({ refs }) => runOrbitTool(remote, ["context", "--", ...refs]),
+    async ({ refs }) => runOrbitContext(remote, refs),
   );
 
   await server.connect(new StdioServerTransport());
