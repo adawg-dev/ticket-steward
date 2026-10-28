@@ -1,13 +1,11 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BranchExistsError, type PushMode, bundleBase, commitWithHooks, guardCommit, guardRange, installHookWrappers, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, stageAndGuard, unpushedWork } from "../../src/implement/git.js";
-import { gitEnvRecord } from "../../src/workspace/git.js";
+import { BranchExistsError, type GuardResult, type PushMode, bundleBase, guardRange, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, unpushedWork } from "../../src/implement/git.js";
 import { Mirror } from "../../src/workspace/mirror.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
 import { commitFile, git, makeSourceRepo, removeDir, tmpDir } from "../workspace/helpers.js";
 
-const AUTHOR = { name: "Ticket Steward", email: "steward@example.com" };
 const TYPES = ["feature", "fix", "chore", "refactor"];
 
 let root: string;
@@ -15,8 +13,6 @@ let source: string;
 let base: string;
 let mirror: Mirror;
 let worktree: Worktree;
-
-const env = (): Record<string, string> => ({ ...gitEnvRecord() });
 
 beforeEach(async () => {
   root = await tmpDir();
@@ -31,195 +27,12 @@ afterEach(async () => {
   await removeDir(root);
 });
 
-describe("stageAndGuard", () => {
-  it("stages the change and returns the paths", async () => {
-    await writeFile(join(worktree.path, ".env"), "TOKEN=abc123abc123\n");
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    expect(await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [".env"], secretValues: [] })).toEqual({ ok: true, paths: ["src/a.ts"] });
-  });
-
-  it("refuses an empty change", async () => {
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
-    expect(result).toMatchObject({ ok: false, reason: "the agent reported the work as implemented but changed nothing" });
-  });
-
-  it("leaves out an overlay file that is not gitignored", async () => {
-    await mkdir(join(worktree.path, "apps/web"), { recursive: true });
-    await writeFile(join(worktree.path, "apps/web/.env.local"), "DB_PASSWORD=hunter2hunter2\n");
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: ["apps/web/.env.local"], secretValues: [] });
-    expect(result).toEqual({ ok: true, paths: ["src/a.ts"] });
-  });
-
-  it("leaves out copied skills the repo does not gitignore", async () => {
-    await mkdir(join(worktree.path, ".claude/skills/verify"), { recursive: true });
-    await writeFile(join(worktree.path, ".claude/skills/verify/SKILL.md"), "x\n");
-    await writeFile(join(worktree.path, ".claude/skills/README.md"), "x\n");
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [".claude/skills/verify/SKILL.md", ".claude/skills/README.md"], secretValues: [] });
-    expect(result).toEqual({ ok: true, paths: ["src/a.ts"] });
-  });
-
-  it("keeps a tracked file's HEAD content when a steward copy overwrote it", async () => {
-    const head = await commitFile(source, ".claude/skills/README.md", "repo readme\n");
-    await mirror.fetch();
-    const tracked = await createWorktree(mirror, join(root, "work"), "1-2", head);
-    await writeFile(join(tracked.path, ".claude/skills/README.md"), "steward readme\n");
-    await writeFile(join(tracked.path, "src/a.ts"), "export const a = 2;\n");
-    const result = await stageAndGuard({ worktreePath: tracked.path, stewardFiles: [".claude/skills/README.md"], secretValues: [] });
-    expect(result).toEqual({ ok: true, paths: ["src/a.ts"] });
-  });
-
-  it("stages the agent's edit to a skill the repo itself tracks", async () => {
-    const head = await commitFile(source, ".claude/skills/own/SKILL.md", "v1\n");
-    await mirror.fetch();
-    const tracked = await createWorktree(mirror, join(root, "work"), "1-3", head);
-    await writeFile(join(tracked.path, ".claude/skills/own/SKILL.md"), "v2\n");
-    const result = await stageAndGuard({ worktreePath: tracked.path, stewardFiles: [".claude/skills/README.md"], secretValues: [] });
-    expect(result).toEqual({ ok: true, paths: [".claude/skills/own/SKILL.md"] });
-  });
-
-  it("refuses when only steward copies changed", async () => {
-    await writeFile(join(worktree.path, "notes.md"), "x\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: ["notes.md"], secretValues: [] });
-    expect(result).toMatchObject({ ok: false, reason: "the agent reported the work as implemented but changed nothing" });
-  });
-
-  it("finds a secret in a binary file", async () => {
-    await writeFile(join(worktree.path, "blob.bin"), Buffer.from("\0sk-live-abcdef123456\0"));
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "blob.bin" });
-  });
-
-  it("finds a secret when .gitattributes marks the file -diff", async () => {
-    await writeFile(join(worktree.path, ".gitattributes"), "*.ts -diff\n");
-    await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
-  });
-
-  it("refuses a diff containing a secret value and names the file, not the value", async () => {
-    await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
-  });
-
-  it("finds a secret on an added line that starts with ++", async () => {
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 1;\n++sk-live-abcdef123456\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
-  });
-
-  it("finds a secret in a file whose name is pathspec magic and names the file", async () => {
-    await writeFile(join(worktree.path, ":(glob)zz"), "sk-live-abcdef123456\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: ":(glob)zz" });
-  });
-
-  it("names a file with a quoted name", async () => {
-    await writeFile(join(worktree.path, 'tab\t"q"\u00e9.txt'), "sk-live-abcdef123456\n");
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"] });
-    expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: 'tab\t"q"\u00e9.txt' });
-  });
-
-  it("hands back a change too large to scan instead of scanning a truncated diff", async () => {
-    await writeFile(join(worktree.path, "src/big.txt"), `${"x".repeat(80)}\n`.repeat(100) + "sk-live-abcdef123456\n");
-    const result = await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: ["sk-live-abcdef123456"], maxDiffBytes: 1024 });
-    expect(result).toEqual({ ok: false, reason: "the change is too large to scan for secrets", detail: "src/big.txt" });
-  });
-});
-
-describe("commitWithHooks", () => {
-  const message = "API-1: Keep the last chunk\n\nFlush before close.";
-
-  it("commits with the configured author on top of the base", async () => {
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
-    const hooksDir = join(root, "hooks");
-    await installHookWrappers(worktree.path, hooksDir);
-    const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir, messagePath: join(root, "MSG"), message, author: AUTHOR, env: env() });
-    expect(result.ok).toBe(true);
-    const sha = result.ok ? result.sha : "";
-    expect(await git(worktree.path, ["log", "-1", "--format=%an <%ae>%n%P%n%B", sha])).toBe(`Ticket Steward <steward@example.com>\n${base}\n${message}`);
-  });
-
-  it("runs the repo's husky pre-commit hook and reports its output on failure", async () => {
-    await mkdir(join(worktree.path, ".husky"), { recursive: true });
-    await writeFile(join(worktree.path, ".husky/pre-commit"), 'echo "lint failed: no-unused-vars"\nexit 1\n');
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
-    const hooksDir = join(root, "hooks");
-    expect(await installHookWrappers(worktree.path, hooksDir)).toEqual(["pre-commit"]);
-    const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir, messagePath: join(root, "MSG"), message, author: AUTHOR, env: env() });
-    expect(result.ok).toBe(false);
-    expect(result.ok ? "" : result.output).toContain("lint failed: no-unused-vars");
-  });
-
-  it("does not change the shared git config", async () => {
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
-    const before = await readFile(join(mirror.path, "config"), "utf8");
-    await installHookWrappers(worktree.path, join(root, "hooks"));
-    await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message, author: AUTHOR, env: env() });
-    expect(await readFile(join(mirror.path, "config"), "utf8")).toBe(before);
-  });
-});
-
-describe("guardCommit", () => {
-  const guard = { stewardFiles: [".env"], secretValues: ["sk-live-abcdef123456"] };
-  const commitAll = async (): Promise<string> => {
-    await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--no-gpg-sign", "-m", "c"]);
-    return git(worktree.path, ["rev-parse", "HEAD"]);
-  };
-
-  it("passes a clean single commit on the base", async () => {
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, ...guard });
-    const sha = await commitAll();
-    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: true, paths: ["src/a.ts"] });
-  });
-
-  it("refuses a committed overlay file and a committed secret", async () => {
-    await writeFile(join(worktree.path, ".env"), "TOKEN=abc123abc123\n");
-    await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
-    await git(worktree.path, ["add", "-f", ".env", "src/a.ts"]);
-    const sha = await commitAll();
-    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: false, reason: "the change would commit files the steward copied in", detail: ".env" });
-    await git(worktree.path, ["rm", "--cached", "--quiet", ".env"]);
-    await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--amend", "--no-gpg-sign", "-m", "c"]);
-    const amended = await git(worktree.path, ["rev-parse", "HEAD"]);
-    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha: amended, ...guard })).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
-  });
-
-  it("refuses a commit whose message carries a secret value, never naming the value", async () => {
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, ...guard });
-    await git(worktree.path, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--quiet", "--no-gpg-sign", "-m", "c\n\nkey: sk-live-abcdef123456"]);
-    const sha = await git(worktree.path, ["rev-parse", "HEAD"]);
-    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: false, reason: "the commit message contains a secret value", detail: "commit message" });
-  });
-
-  it("refuses, rather than passes, when the secret scan's diff fails", async () => {
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, ...guard });
-    const sha = await commitAll();
-    // The tree diff still lists the path, but the blob is gone, so the per-file content diff exits non-zero.
-    const blob = await git(worktree.path, ["rev-parse", `${sha}:src/a.ts`]);
-    await rm(await git(worktree.path, ["rev-parse", "--path-format=absolute", "--git-path", `objects/${blob.slice(0, 2)}/${blob.slice(2)}`]));
-    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toEqual({ ok: false, reason: "the change could not be scanned for secrets", detail: "src/a.ts" });
-  });
-
-  it("refuses a commit whose parent is not the base", async () => {
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, ...guard });
-    await commitAll();
-    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 3;\n");
-    await git(worktree.path, ["add", "src/a.ts"]);
-    const sha = await commitAll();
-    expect(await guardCommit({ worktreePath: worktree.path, baseSha: base, sha, ...guard })).toMatchObject({ ok: false, reason: "the commit is not a single commit on top of the base" });
-  });
-});
+/** Commits everything in the worktree, as the agent would. */
+const commitAll = async (message: string): Promise<string> => {
+  await git(worktree.path, ["add", "-A"]);
+  await git(worktree.path, ["commit", "--quiet", "--no-gpg-sign", "-m", message]);
+  return git(worktree.path, ["rev-parse", "HEAD"]);
+};
 
 describe("guardRange", () => {
   const guard = { stewardFiles: [".env"], secretValues: ["sk-live-abcdef123456"] };
@@ -245,6 +58,62 @@ describe("guardRange", () => {
       reason: "the change contains a secret value",
       detail: `commit ${leaking.slice(0, 7)}: src/a.ts`,
     });
+  });
+
+  const guardHead = async (over: { maxDiffBytes?: number } = {}): Promise<GuardResult> =>
+    guardRange({ worktreePath: worktree.path, baseSha: base, headSha: await git(worktree.path, ["rev-parse", "HEAD"]), ...guard, ...over });
+
+  it("refuses an empty range", async () => {
+    expect(await guardRange({ worktreePath: worktree.path, baseSha: base, headSha: base, ...guard })).toMatchObject({ ok: false, reason: "the agent reported the work as implemented but changed nothing" });
+  });
+
+  it("refuses a committed steward copy", async () => {
+    await writeFile(join(worktree.path, ".env"), "TOKEN=abc123abc123\n");
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    await git(worktree.path, ["add", "-f", ".env"]);
+    await commitAll("API-1: one");
+    expect(await guardHead()).toEqual({ ok: false, reason: "the change would commit files the steward copied in", detail: ".env" });
+  });
+
+  it("finds a secret in a binary file", async () => {
+    await writeFile(join(worktree.path, "blob.bin"), Buffer.from("\0sk-live-abcdef123456\0"));
+    await commitAll("API-1: one");
+    expect(await guardHead()).toEqual({ ok: false, reason: "the change contains a secret value", detail: "blob.bin" });
+  });
+
+  it("finds a secret when .gitattributes marks the file -diff", async () => {
+    await writeFile(join(worktree.path, ".gitattributes"), "*.ts -diff\n");
+    await writeFile(join(worktree.path, "src/a.ts"), 'export const key = "sk-live-abcdef123456";\n');
+    await commitAll("API-1: one");
+    expect(await guardHead()).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
+  });
+
+  it("finds a secret on an added line that starts with ++", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 1;\n++sk-live-abcdef123456\n");
+    await commitAll("API-1: one");
+    expect(await guardHead()).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/a.ts" });
+  });
+
+  it("names a file whose name is pathspec magic or needs quoting", async () => {
+    await writeFile(join(worktree.path, ":(glob)zz"), "sk-live-abcdef123456\n");
+    await writeFile(join(worktree.path, 'tab\t"q"\u00e9.txt'), "sk-live-abcdef123456\n");
+    await commitAll("API-1: one");
+    expect(await guardHead()).toEqual({ ok: false, reason: "the change contains a secret value", detail: ':(glob)zz\ntab\t"q"\u00e9.txt' });
+  });
+
+  it("refuses a change too large to scan instead of scanning a truncated diff", async () => {
+    await writeFile(join(worktree.path, "src/big.txt"), `${"x".repeat(80)}\n`.repeat(100) + "sk-live-abcdef123456\n");
+    await commitAll("API-1: one");
+    expect(await guardHead({ maxDiffBytes: 1024 })).toEqual({ ok: false, reason: "the change is too large to scan for secrets", detail: "src/big.txt" });
+  });
+
+  it("refuses, rather than passes, when the secret scan's diff fails", async () => {
+    await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
+    const sha = await commitAll("API-1: one");
+    // The tree diff still lists the path, but the blob is gone, so the per-file content diff exits non-zero.
+    const blob = await git(worktree.path, ["rev-parse", `${sha}:src/a.ts`]);
+    await rm(await git(worktree.path, ["rev-parse", "--path-format=absolute", "--git-path", `objects/${blob.slice(0, 2)}/${blob.slice(2)}`]));
+    expect(await guardHead()).toEqual({ ok: false, reason: "the change could not be scanned for secrets", detail: "src/a.ts" });
   });
 
   it("refuses any commit message in the range that carries a secret, naming the commit", async () => {
@@ -292,30 +161,12 @@ describe("unpushedWork", () => {
   });
 });
 
-describe("installHookWrappers", () => {
-  it("skips post-commit and clears wrappers left by an earlier attempt", async () => {
-    const hooksDir = join(root, "hooks");
-    await mkdir(hooksDir, { recursive: true });
-    await writeFile(join(hooksDir, "commit-msg"), "#!/bin/sh\nexit 0\n");
-    await mkdir(join(worktree.path, ".husky"), { recursive: true });
-    await writeFile(join(worktree.path, ".husky/pre-commit"), "exit 0\n");
-    await writeFile(join(worktree.path, ".husky/post-commit"), "git commit --amend -a --no-edit\n");
-
-    expect(await installHookWrappers(worktree.path, hooksDir)).toEqual(["pre-commit"]);
-    expect(existsSync(join(hooksDir, "commit-msg"))).toBe(false);
-    expect(existsSync(join(hooksDir, "post-commit"))).toBe(false);
-  });
-});
-
 describe("push", () => {
   const commitChange = async (): Promise<string> => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
-    await installHookWrappers(worktree.path, join(root, "hooks"));
-    const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message: "API-1: x", author: AUTHOR, env: env() });
-    if (!result.ok) throw new Error(result.output);
+    const sha = await commitAll("API-1: x");
     await saveBundle(worktree.path, base, join(root, "implement.bundle"));
-    return result.sha;
+    return sha;
   };
   const remote = () => ({ url: source, env: {} });
   const push = (sha: string, over: { baseSha?: string; branch?: string; env?: Record<string, string>; mode?: PushMode } = {}): Promise<void> =>
@@ -377,11 +228,9 @@ describe("push", () => {
       const first = await commitChange();
       await push(first, { branch: BRANCH });
       await writeFile(join(worktree.path, "src/a.ts"), "export const a = 3;\n");
-      await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
-      const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message: "API-1: y", author: AUTHOR, env: env() });
-      if (!result.ok) throw new Error(result.output);
+      const second = await commitAll("API-1: y");
       await saveBundle(worktree.path, first, join(root, "implement.bundle"));
-      return { first, second: result.sha };
+      return { first, second };
     };
 
     it("updates the remote branch from the previous head to a child commit", async () => {
@@ -429,10 +278,7 @@ describe("push", () => {
 describe("bundleBase", () => {
   it("reads the single prerequisite from a bundle made by saveBundle", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");
-    await stageAndGuard({ worktreePath: worktree.path, stewardFiles: [], secretValues: [] });
-    await installHookWrappers(worktree.path, join(root, "hooks"));
-    const result = await commitWithHooks({ worktreePath: worktree.path, hooksDir: join(root, "hooks"), messagePath: join(root, "MSG"), message: "API-1: x", author: AUTHOR, env: env() });
-    if (!result.ok) throw new Error(result.output);
+    await commitAll("API-1: x");
     await saveBundle(worktree.path, base, join(root, "implement.bundle"));
     expect(await bundleBase(join(root, "implement.bundle"))).toBe(base);
   });

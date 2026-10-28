@@ -80,12 +80,6 @@ const shortRef = (ref: string): string => ref.replace(/^refs\/heads\//, "");
 
 const handback = (label: Handback["label"], reason: string, detail = ""): Handback => ({ label, reason, detail });
 
-/** The agent's commit message with the ticket identifier prefixed to its subject. */
-export const commitMessage = (identifier: string, message: string): string => {
-  const [subject = "", ...body] = message.trim().split("\n");
-  return [`${identifier}: ${subject.trim()}`, ...body].join("\n");
-};
-
 const dryRunHandback = ({ reason, detail }: Handback): string => (detail === "" ? `dry run: would hand back: ${reason}` : `dry run: would hand back: ${reason}\n${detail}`);
 
 /** Stored, then published; dry runs stop before storing. */

@@ -301,35 +301,38 @@ implement: {
 }
 ```
 
-**What an implement job does.** Fresh worktree at the latest `dev`, as for every job; the
-agent edits files only. The steward then, stopping at the first failure: requires a non-empty
-diff; stages everything except the files the steward copied in (overlay files and its own
-`.claude/skills/` copies, left out whether or not the repo gitignores them; the repo's own
-tracked skills can still be edited), and refuses if a staged diff (read as text, binary and `-diff` files included) adds a line containing
-the value of a secret-looking overlay variable or one of the steward's own secrets (hand-back
-"the change contains a secret value"; the hand-back detail names paths, never values); runs
-`implement.checks` (`{{baseSha}}` is the job's base commit); commits as `commitAuthor` with
-kickoff's Husky hooks enabled for that one commit; re-checks what was committed (the hooks can
-change it): a single commit on the base, the same path and secret guard over its diff, and no
-secret value in the commit message (hand-back "the commit message contains a secret value",
-detail "commit message"); keeps a copy of the commit as a bundle file in the job dir (not a
-ref, which the mirror's `--prune` fetch would delete); and pushes
-branch `<type>/<IDENTIFIER>-<slug>` (type chosen by the agent from `branchTypes`).
-Before pushing it refuses unless the target matches the branch pattern, no remote branch
-already carries the ticket (any type), and the commit has exactly one parent, the base `dev`
-commit. Every push runs from a fresh scratch bare repo in the job dir with hooks disabled, as
-a create-only push (`--force-with-lease=<ref>:`), so it can never update or force an existing
-branch. Each token-carrying `ls-remote` runs from a steward-made directory or scratch repo
-(the pre-push one in that scratch bare repo), never the mirror or worktree.
+**What an implement job does.** Fresh worktree at the latest `dev`, as for every job. The
+agent edits, commits (as `commitAuthor`, with subjects prefixed `<IDENTIFIER>: `) and pushes
+through the steward's `push` tool; it never runs `git push` and never sees the token. The tool
+pushes `HEAD` to the ticket's own branch only, stopping at the first refusal and returning the
+reason to the agent so it can fix it and call again: the worktree must be clean; `HEAD` must
+be a non-empty, merge-free series on the base (the job's base `dev` commit for the first push,
+the last pushed head after that); every commit subject must carry the identifier; every
+commit's diff (read as text, binary and `-diff` files included) must leave out the files the
+steward copied in (overlay files and its own `.claude/skills/` copies; the repo's own tracked
+skills can still be edited) and must not add a line containing the value of a secret-looking
+overlay variable or one of the steward's own secrets, and no commit message may carry one
+(the refusal names paths or commits, never values); `implement.checks` must pass
+(`{{baseSha}}` is the job's base commit); and the ticket must still be open. The first push
+creates branch `<type>/<IDENTIFIER>-<slug>` (the agent passes the type, one of
+`branchTypes`) and is refused if any remote branch already carries the ticket; later pushes
+fast-forward it. Before pushing, the tool records the commit and keeps a copy as a bundle
+file in the job dir (not a ref, which the mirror's `--prune` fetch would delete). Every push
+runs from a fresh scratch bare repo in the job dir with hooks disabled, with
+`--force-with-lease`, so it can never force a branch or create one that exists. Each
+token-carrying `ls-remote` runs from a steward-made directory or scratch repo, never the
+mirror or worktree. After the run the steward opens the MR; it hands back "the agent did not
+push its change" when nothing was pushed, and "the agent left unpushed work" (listing it)
+when uncommitted changes or unpushed commits remain.
 
 **The secret scan is best-effort.** It catches accidental leaks: a plain-text overlay or
 steward secret in an added line or the commit message. A diff it cannot read or that is too
-large (64 MB per file) is handed back rather than passed. It does not stop an agent that sets
+large (64 MB per file) is refused rather than passed. It does not stop an agent that sets
 out to leak: an encoded value (UTF-16, base64, split strings) gets past it. The real controls
 are the overlay-file guard, a `write_repository`-only push token and human review of the MR.
 
-**Hand-backs are successes.** An empty diff, a guard hit, failing checks or hooks, an
-existing branch, or the agent reporting `failed` or `needs_info` end the job `succeeded` with
+**Hand-backs are successes.** An existing ticket branch, no push, unpushed work, an invalid
+result, or the agent reporting `failed` or `needs_info` end the job `succeeded` with
 the warning `handed back: <reason>` (see it, with the detail and the agent's questions, in
 `steward jobs show`). The ticket gets `ready-for-human` or `needs-info` and no comment; they
 are the answer, not an error. Only a push or label-change failure is `publish_failed`.

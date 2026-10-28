@@ -1,5 +1,4 @@
-import { existsSync } from "node:fs";
-import { chmod, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execa } from "execa";
 import { git, gitEnvRecord, gitOrThrow, scrubCredentials } from "../workspace/git.js";
@@ -7,16 +6,12 @@ import type { RemoteCredentials } from "../workspace/mirror.js";
 import { branchRefPattern, carriesTicket } from "./branch.js";
 
 const MIN_SECRET_LENGTH = 8;
-/** Hooks that run before the commit object exists; post-commit is left out so nothing can change HEAD after the commit. */
-const GIT_HOOKS = new Set(["pre-commit", "prepare-commit-msg", "commit-msg"]);
 
 export type GuardResult = { ok: true; paths: string[] } | { ok: false; reason: string; detail: string };
 
-const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-
 /**
- * `stewardFiles` are the worktree-relative paths the steward copied in (overlay env files, its own skills): never staged,
- * and refused if a hook stages one anyway. `maxDiffBytes` caps one file's scanned diff (default `MAX_DIFF_BYTES`); a
+ * `stewardFiles` are the worktree-relative paths the steward copied in (overlay env files, its own skills): a range that
+ * commits one is refused. `maxDiffBytes` caps one file's scanned diff (default `MAX_DIFF_BYTES`); a
  * larger one is refused, never truncated.
  */
 export type GuardInput = { stewardFiles: string[]; secretValues: string[]; maxDiffBytes?: number };
@@ -55,7 +50,7 @@ const scanDiff = async (cwd: string, args: string[], env: Record<string, string>
 };
 
 /**
- * The shared path guard and secret scan, over `git diff <range>`: `--cached` for the index, `<base> <sha>` for a commit.
+ * The path guard and secret scan over `git diff <base> <sha>`.
  * Refuses an empty change, steward-copied files (overlay, skills) and added lines carrying a secret value.
  */
 const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: Record<string, string> = {}, allowEmpty = false): Promise<GuardResult> => {
@@ -75,17 +70,6 @@ const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: R
     if (leaking.length > 0) return { ok: false, reason: "the change contains a secret value", detail: leaking.join("\n") };
   }
   return { ok: true, paths };
-};
-
-/**
- * Stages everything except the steward's own copies and refuses (nothing committed) if the change is empty or leaks a
- * secret. The copies are left out rather than refused: the target repo need not gitignore them.
- */
-export const stageAndGuard = async (input: GuardInput & { worktreePath: string }): Promise<GuardResult> => {
-  await gitOrThrow(["add", "-A"], input.worktreePath);
-  // Unstaging restores a tracked path to HEAD in the index and drops an untracked one; a path that is absent is a no-op.
-  if (input.stewardFiles.length > 0) await gitOrThrow(["reset", "-q", "--", ...input.stewardFiles], input.worktreePath, LITERAL_PATHSPECS);
-  return guardDiff(input.worktreePath, ["--cached"], input);
 };
 
 const NO_REPLACE = { GIT_NO_REPLACE_OBJECTS: "1" };
@@ -120,20 +104,6 @@ export const guardRange = async (input: GuardInput & { worktreePath: string; bas
     if (secrets.some((secret) => message.includes(secret))) return { ok: false, reason: "the commit message contains a secret value", detail: `commit ${sha.slice(0, 7)}` };
   }
   return overall;
-};
-
-/**
- * Re-checks what was actually committed, since the repo's hooks (which the agent can edit) run between the staged
- * guard and the commit: the commit must sit directly on `baseSha` and pass `guardRange`.
- */
-export const guardCommit = async (input: GuardInput & { worktreePath: string; baseSha: string; sha: string }): Promise<GuardResult> => {
-  const parents = (await gitOrThrow(["rev-list", "--parents", "-n", "1", input.sha], input.worktreePath, NO_REPLACE)).split(" ").slice(1);
-  if (parents.length !== 1 || parents[0] !== input.baseSha) {
-    return { ok: false, reason: "the commit is not a single commit on top of the base", detail: `parents: ${parents.join(" ") || "(none)"}` };
-  }
-  const guarded = await guardRange({ ...input, headSha: input.sha });
-  if (!guarded.ok && guarded.reason === "the commit message contains a secret value") return { ...guarded, detail: "commit message" };
-  return guarded;
 };
 
 /**
@@ -176,46 +146,6 @@ export const unpushedWork = async (input: { worktreePath: string; pushedSha: str
     ...(commits.length > 0 ? ["commits not pushed:", ...commits.map((line) => `  ${line}`)] : []),
   ].join("\n");
   return { uncommitted, commits, summary };
-};
-
-/**
- * Writes wrappers for the repo's Husky hooks into `hooksDir` (outside the worktree), so one commit can run them
- * via `-c core.hooksPath` without `husky install` touching the shared mirror config.
- */
-export const installHookWrappers = async (worktreePath: string, hooksDir: string): Promise<string[]> => {
-  // Steward-owned; cleared so a wrapper from an earlier attempt never survives.
-  await rm(hooksDir, { recursive: true, force: true });
-  await mkdir(hooksDir, { recursive: true, mode: 0o700 });
-  const huskyDir = join(worktreePath, ".husky");
-  if (!existsSync(huskyDir)) return [];
-  const installed: string[] = [];
-  for (const name of (await readdir(huskyDir)).sort()) {
-    if (!GIT_HOOKS.has(name) || !(await stat(join(huskyDir, name))).isFile()) continue;
-    const wrapper = join(hooksDir, name);
-    await writeFile(wrapper, `#!/bin/sh\nexec sh ${shellQuote(join(huskyDir, name))} "$@"\n`);
-    await chmod(wrapper, 0o755);
-    installed.push(name);
-  }
-  return installed;
-};
-
-export const commitWithHooks = async (input: {
-  worktreePath: string;
-  hooksDir: string;
-  messagePath: string;
-  message: string;
-  author: { name: string; email: string };
-  env: Record<string, string>;
-}): Promise<{ ok: true; sha: string } | { ok: false; output: string }> => {
-  await writeFile(input.messagePath, `${input.message.trim()}\n`, { mode: 0o600 });
-  const path = `${join(input.worktreePath, "node_modules", ".bin")}:${input.env.PATH ?? process.env.PATH ?? "/usr/bin:/bin"}`;
-  const result = await git(
-    ["-c", `core.hooksPath=${input.hooksDir}`, "-c", `user.name=${input.author.name}`, "-c", `user.email=${input.author.email}`, "commit", "--quiet", "--no-gpg-sign", "-F", input.messagePath],
-    input.worktreePath,
-    { ...input.env, PATH: path },
-  );
-  if (result.exitCode !== 0) return { ok: false, output: [result.stdout, result.stderr].filter((part) => part !== "").join("\n") };
-  return { ok: true, sha: await gitOrThrow(["rev-parse", "HEAD"], input.worktreePath) };
 };
 
 /** Keeps the commit on disk after the worktree is gone, so a failed push can be retried. */
