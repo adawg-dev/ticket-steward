@@ -1,6 +1,6 @@
 # Credential isolation for the agents
 
-Date: 2026-10-28. Status: draft for review.
+Date: 2026-10-28. Status: superseded by `2026-10-28-k3s-steward-design.md` (the steward moves to k3s).
 
 ## Intent
 
