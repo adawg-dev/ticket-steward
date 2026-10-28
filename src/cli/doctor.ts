@@ -216,7 +216,10 @@ const implementChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   return checks;
 };
 
-/** Only with `greptile`: the GitLab token can write notes and resolve threads, the bot user exists, and the fix prompt is there. */
+/** Either verifies GitLab's webhook deliveries; the signing token is preferred. */
+const GITLAB_WEBHOOK_KEYS = ["GITLAB_WEBHOOK_SIGNING_TOKEN", "GITLAB_WEBHOOK_SECRET"];
+
+/** Only with `greptile`: the GitLab token can write notes and resolve threads, the bot user exists, the fix prompt is there, and webhooks can be verified. */
 const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Check[] => {
   const settings = config.greptile;
   if (settings === undefined) return [];
@@ -243,6 +246,15 @@ const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Che
     {
       name: "greptile prompt",
       run: async () => (existsSync(settings.prompt) ? ok(settings.prompt) : flunk(`${settings.prompt} does not exist; copy prompts/fix.md there`)),
+    },
+    {
+      name: "gitlab webhook secret",
+      run: async () => {
+        const present = GITLAB_WEBHOOK_KEYS.filter((key) => missing(secrets, [key]).length === 0);
+        return present.length > 0
+          ? ok(`${present.join(", ")} present`)
+          : warn(`neither ${GITLAB_WEBHOOK_KEYS.join(" nor ")} is set; the loop falls back to ${settings.pollSeconds / 60}-minute polling`);
+      },
     },
   ];
 };

@@ -355,17 +355,33 @@ greptile: {
   botUsername: "greptile-apple",          // the username Greptile comments as on the MR (required)
   prompt: "./prompts/fix.md",             // required; `steward init` writes prompts/fix.md
   maxRounds: 5,                           // fix rounds after the implement push (round 0)
-  pollSeconds: 60,
-  mrTimeoutMinutes: 60,                   // wait for the pipeline to open the MR
+  pollSeconds: 300,                       // fallback poll; GitLab webhooks wake the loop at once
+  mrTimeoutMinutes: 30,                   // wait for the pipeline to open the MR
   reviewTimeoutMinutes: 30,               // wait for Greptile to review the head
-  pipelineTimeoutMinutes: 60,             // wait for the head pipeline to finish
+  pipelineTimeoutMinutes: 30,             // wait for the head pipeline to finish
   ciLogLines: 200,                        // failed-job log lines given to the brain
   mcp: { url: "https://api.greptile.com/mcp" },
 },
 tracker: { labels: { approved: "agent-approved" } },   // applied when the loop passes
 ```
 
-Waits are counted from the first poll of the wait, not from the push.
+Waits are counted from the first poll of the wait, not from the push. Each wait gets its own 30 minutes, and every
+fix round starts its waits over. On kickoff MR pipelines take 7.3 minutes at the median (14.4 at most) and Greptile's
+first review 3.2 (12.3 at most).
+
+**Webhooks.** GitLab webhooks are the loop's primary wake signal; polling every `pollSeconds` (5 minutes) is only the
+fallback. In kickoff, Settings → Webhooks, add `<server.publicUrl>/webhooks/gitlab` with these triggers:
+
+- Merge request events (the MR opens or changes)
+- Comments (Greptile posts, and on a re-review edits, its summary note)
+- Pipeline events (the head pipeline finishes)
+
+Put the hook's signing token (`whsec_...`, GitLab 19.1+) in `GITLAB_WEBHOOK_SIGNING_TOKEN` in `.env`; a plain secret token
+(`X-Gitlab-Token`) in `GITLAB_WEBHOOK_SECRET` also works. An event for the branch or MR of a loop in `awaiting_mr` or
+`awaiting_review` moves that loop's queued poll to now; nothing else is queued, and every validly signed event is answered
+200 (`ignored`, `woken` or `no_loop`) so GitLab never disables the hook. A bad signature is a 401 and a
+`gitlab webhook rejected` warning in the log. Without either secret `steward doctor` warns that the loop falls back to
+5-minute polling.
 
 **Passing.** For the MR's current head SHA: Greptile's summary says `Confidence Score: 5/5`, no Greptile discussion is
 unresolved, and the head pipeline is `success`. 4/5 never passes. A pass applies the `approved` label

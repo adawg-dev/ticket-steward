@@ -452,4 +452,46 @@ describe("loop jobs", () => {
     expect(job?.finishedAt).toBeNull();
     expect(stores.jobs.claimNext()).toBeNull();
   });
+
+  describe("wake", () => {
+    const deferred = (): number => {
+      const id = stores.jobs.enqueue(loopEvent("await"));
+      stores.jobs.claimNext();
+      stores.jobs.defer(id, new Date(Date.now() + 300_000));
+      return id;
+    };
+
+    it("makes a deferred job of the subject due now", () => {
+      const id = deferred();
+      expect(stores.jobs.claimNext()).toBeNull();
+      const now = new Date();
+
+      expect(stores.jobs.wake("loop:3", now)).toBe(true);
+
+      expect(stores.jobs.get(id)?.notBefore).toBe(now.toISOString());
+      expect(stores.jobs.claimNext()?.id).toBe(id);
+    });
+
+    it("is idempotent and never pushes a due job later", () => {
+      const id = deferred();
+      const first = new Date();
+      expect(stores.jobs.wake("loop:3", first)).toBe(true);
+      expect(stores.jobs.wake("loop:3", new Date(first.getTime() + 1_000))).toBe(true);
+      expect(stores.jobs.get(id)?.notBefore).toBe(first.toISOString());
+      expect(stores.jobs.list({ limit: 10 })).toHaveLength(1);
+    });
+
+    it("leaves running and finished jobs alone and creates none", () => {
+      const id = stores.jobs.enqueue(loopEvent("await"));
+      stores.jobs.claimNext();
+      expect(stores.jobs.wake("loop:3", new Date())).toBe(false);
+      expect(stores.jobs.get(id)?.status).toBe("running");
+
+      stores.jobs.finish(id, { status: "succeeded" });
+      expect(stores.jobs.wake("loop:3", new Date())).toBe(false);
+      expect(stores.jobs.get(id)?.status).toBe("succeeded");
+      expect(stores.jobs.wake("loop:4", new Date())).toBe(false);
+      expect(stores.jobs.list({ limit: 10 })).toHaveLength(1);
+    });
+  });
 });

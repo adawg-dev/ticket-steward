@@ -123,12 +123,17 @@ describe("loadConfig", () => {
 });
 
 describe("loadConfig after the MR reviewer was removed", () => {
-  it("drops a leftover review block and GitLab webhook secrets", async () => {
+  it("drops a leftover review block", async () => {
     await writeFile(join(dir, "steward.config.ts"), configSource(`review: { botUsername: "steward-bot", prompt: "./prompts/review.md" },`));
-    await writeFile(join(dir, ".env"), "GITLAB_WEBHOOK_SECRET=gl-secret\nGITLAB_WEBHOOK_SIGNING_TOKEN=gl-signing\n");
-    const { config, secrets } = await loadConfig({ cwd: dir });
+    const { config } = await loadConfig({ cwd: dir });
     expect("review" in config).toBe(false);
-    expect(secrets).toEqual({});
+  });
+
+  it("reads the GitLab webhook secrets the fix loop's wake-ups are verified with", async () => {
+    await writeFile(join(dir, "steward.config.ts"), configSource());
+    await writeFile(join(dir, ".env"), "GITLAB_WEBHOOK_SECRET=gl-secret\nGITLAB_WEBHOOK_SIGNING_TOKEN=gl-signing\n");
+    const { secrets } = await loadConfig({ cwd: dir });
+    expect(secrets).toEqual({ GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_WEBHOOK_SIGNING_TOKEN: "gl-signing" });
   });
 });
 

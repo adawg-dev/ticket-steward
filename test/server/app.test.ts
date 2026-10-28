@@ -336,15 +336,167 @@ describe("buildServer", () => {
     });
   });
 
-  it("has no GitLab webhook route", async () => {
-    const response = await app.inject({
-      method: "POST",
-      url: "/webhooks/gitlab",
-      headers: { "content-type": "application/json", "x-gitlab-event": "Merge Request Hook" },
-      payload: "{}",
+  describe("POST /webhooks/gitlab", () => {
+    const SIGNING_KEY = Buffer.from("0123456789abcdef0123456789abcdef");
+    const SIGNING_TOKEN = `whsec_${SIGNING_KEY.toString("base64")}`;
+    const BRANCH = "fix/API-1-keep";
+    const GREPTILE = {
+      botUsername: "greptile-bot", maxRounds: 5, prompt: "/dev/null", pollSeconds: 300, mrTimeoutMinutes: 30,
+      reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 30, ciLogLines: 200,
+    };
+
+    const project = (id = 42, path = "acme/repo") => ({ id, path_with_namespace: path });
+    const mrEvent = (over: { branch?: string; iid?: number; projectId?: number; path?: string } = {}) =>
+      JSON.stringify({
+        object_kind: "merge_request",
+        project: project(over.projectId, over.path),
+        object_attributes: { iid: over.iid ?? 7, source_branch: over.branch ?? BRANCH, action: "open" },
+      });
+    const noteEvent = (action: string) =>
+      JSON.stringify({
+        object_kind: "note",
+        project: project(),
+        object_attributes: { noteable_type: "MergeRequest", action },
+        merge_request: { iid: 7, source_branch: BRANCH },
+      });
+    const pipelineEvent = () =>
+      JSON.stringify({ object_kind: "pipeline", project: project(), object_attributes: { ref: BRANCH, status: "success" }, merge_request: null });
+
+    const signedHeaders = (body: string, id = "msg_1"): Record<string, string> => {
+      const ts = Math.floor(Date.now() / 1000);
+      const signature = `v1,${createHmac("sha256", SIGNING_KEY).update(`${id}.${ts}.${body}`).digest("base64")}`;
+      return { "webhook-id": id, "webhook-timestamp": String(ts), "webhook-signature": signature };
+    };
+
+    const postGitlab = (event: string, body: string, headers: Record<string, string> = signedHeaders(body)) =>
+      app.inject({
+        method: "POST",
+        url: "/webhooks/gitlab",
+        headers: { "content-type": "application/json", "x-gitlab-event": event, ...headers },
+        payload: body,
+      });
+
+    /** A loop on BRANCH in `state`, with its await job deferred five minutes out. */
+    const waitingLoop = (state: "awaiting_mr" | "awaiting_review" | "fixing", mr: { projectId: number; mrIid: number } | null = null) => {
+      const implementJobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
+      stores.jobs.claimById(implementJobId);
+      stores.jobs.finish(implementJobId, { status: "succeeded" });
+      const loopId = stores.loops.create({
+        issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId, branch: BRANCH, baseSha: "b".repeat(40),
+        headSha: "h".repeat(40), worktreeName: "API-1-1", labelDriven: true, sessionId: null,
+      });
+      stores.loops.update(loopId, { state, ...(mr === null ? {} : mr) });
+      const jobId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "await" });
+      stores.jobs.claimById(jobId);
+      stores.jobs.defer(jobId, new Date(Date.now() + 300_000));
+      return { loopId, jobId };
+    };
+
+    const isDue = (jobId: number): boolean => {
+      const notBefore = stores.jobs.get(jobId)?.notBefore;
+      return notBefore !== null && notBefore !== undefined && Date.parse(notBefore) <= Date.now();
+    };
+
+    beforeEach(async () => {
+      await app.close();
+      app = buildServer({
+        config: { ...makeConfig(), greptile: GREPTILE },
+        secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, GITLAB_WEBHOOK_SIGNING_TOKEN: SIGNING_TOKEN },
+        stores,
+        tracker,
+        workerState: () => WORKER_IDLE,
+      });
     });
-    expect(response.statusCode).toBe(404);
-    expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+
+    it("wakes the waiting loop on a signed merge request event", async () => {
+      const { jobId } = waitingLoop("awaiting_mr");
+
+      const response = await postGitlab("Merge Request Hook", mrEvent());
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ok: true, action: "woken" });
+      expect(isDue(jobId)).toBe(true);
+      expect(stores.jobs.list({ limit: 10 })).toHaveLength(2);
+    });
+
+    it("rejects a bad signature with 401 and wakes nothing", async () => {
+      const { jobId } = waitingLoop("awaiting_mr");
+      const body = mrEvent();
+      const headers = { ...signedHeaders(body), "webhook-signature": "v1,bogus" };
+
+      const response = await postGitlab("Merge Request Hook", body, headers);
+
+      expect(response.statusCode).toBe(401);
+      expect(isDue(jobId)).toBe(false);
+    });
+
+    it("accepts the legacy secret token", async () => {
+      await app.close();
+      app = buildServer({
+        config: { ...makeConfig(), greptile: GREPTILE },
+        secrets: { GITLAB_WEBHOOK_SECRET: "gitlab-secret-value" },
+        stores,
+        tracker,
+        workerState: () => WORKER_IDLE,
+      });
+      const { jobId } = waitingLoop("awaiting_mr");
+
+      const response = await postGitlab("Merge Request Hook", mrEvent(), { "x-gitlab-token": "gitlab-secret-value" });
+
+      expect(response.json()).toEqual({ ok: true, action: "woken" });
+      expect(isDue(jobId)).toBe(true);
+    });
+
+    it("ignores an event for another project", async () => {
+      const { jobId } = waitingLoop("awaiting_mr");
+
+      const response = await postGitlab("Merge Request Hook", mrEvent({ projectId: 99, path: "acme/other" }));
+
+      expect(response.json()).toEqual({ ok: true, action: "ignored" });
+      expect(isDue(jobId)).toBe(false);
+    });
+
+    it("compares by the loop's stored project id once it has one", async () => {
+      const { jobId } = waitingLoop("awaiting_review", { projectId: 42, mrIid: 7 });
+
+      expect((await postGitlab("Merge Request Hook", mrEvent({ projectId: 43 }))).json()).toEqual({ ok: true, action: "no_loop" });
+      expect(isDue(jobId)).toBe(false);
+      expect((await postGitlab("Merge Request Hook", mrEvent({ branch: "renamed", path: "acme/moved" }))).json()).toEqual({ ok: true, action: "woken" });
+      expect(isDue(jobId)).toBe(true);
+    });
+
+    it("wakes the loop when Greptile edits its summary note", async () => {
+      const { jobId } = waitingLoop("awaiting_review", { projectId: 42, mrIid: 7 });
+
+      const response = await postGitlab("Note Hook", noteEvent("update"));
+
+      expect(response.json()).toEqual({ ok: true, action: "woken" });
+      expect(isDue(jobId)).toBe(true);
+    });
+
+    it("wakes the loop on a pipeline event for its branch", async () => {
+      const { jobId } = waitingLoop("awaiting_review", { projectId: 42, mrIid: 7 });
+
+      const response = await postGitlab("Pipeline Hook", pipelineEvent());
+
+      expect(response.json()).toEqual({ ok: true, action: "woken" });
+      expect(isDue(jobId)).toBe(true);
+    });
+
+    it("reports no_loop when no waiting loop matches", async () => {
+      const { jobId } = waitingLoop("fixing");
+
+      const response = await postGitlab("Pipeline Hook", pipelineEvent());
+
+      expect(response.json()).toEqual({ ok: true, action: "no_loop" });
+      expect(isDue(jobId)).toBe(false);
+    });
+
+    it("answers 200 to signed events it does not care about, and never enqueues", async () => {
+      expect((await postGitlab("Push Hook", JSON.stringify({ object_kind: "push" }))).json()).toEqual({ ok: true, action: "ignored" });
+      expect((await postGitlab("Merge Request Hook", "not json")).json()).toEqual({ ok: true, action: "ignored" });
+      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+    });
   });
 
   describe("GET /health", () => {

@@ -158,6 +158,7 @@ export class JobStore {
   private readonly deferUntil;
   private readonly unclaim;
   private readonly reopen;
+  private readonly wakeSubject;
   private readonly selectById;
   private readonly selectLatestForSubject;
   private readonly selectByStatus;
@@ -215,6 +216,11 @@ export class JobStore {
     );
     this.reopen = db.prepare<[number]>(
       "UPDATE jobs SET status = 'queued', not_before = NULL, finished_at = NULL WHERE id = ? AND status != 'running'",
+    );
+    // Only queued jobs; one already due keeps its earlier time. SQLite counts every row the WHERE matched, so a repeat wake is still true.
+    this.wakeSubject = db.prepare<[string, string, string]>(
+      `UPDATE jobs SET not_before = CASE WHEN not_before IS NOT NULL AND not_before > ? THEN ? ELSE not_before END
+       WHERE subject = ? AND status = 'queued'`,
     );
     this.selectById = db.prepare<[number], JobRow>("SELECT * FROM jobs WHERE id = ?");
     this.selectLatestForSubject = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE subject = ? ORDER BY id DESC LIMIT 1");
@@ -332,6 +338,12 @@ export class JobStore {
   /** Re-queues a finished job for the worker; false when the job is running or unknown. */
   requeue(id: number): boolean {
     return this.reopen.run(id).changes === 1;
+  }
+
+  /** Makes the queued job of this subject (a loop's deferred await) due at `now`; false when none is queued. Never creates a job. */
+  wake(subject: string, now: Date): boolean {
+    const at = now.toISOString();
+    return this.wakeSubject.run(at, at, subject).changes > 0;
   }
 
   get(id: number): Job | null {

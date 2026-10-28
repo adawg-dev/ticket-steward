@@ -70,10 +70,12 @@ const GreptileSchema = z.object({
   maxRounds: z.number().int().positive().default(5),
   /** The fix prompt, resolved against the config directory. */
   prompt: z.string(),
-  pollSeconds: z.number().positive().default(60),
-  mrTimeoutMinutes: z.number().positive().default(60),
+  /** The fallback poll between GitLab webhooks, which wake a waiting loop at once. */
+  pollSeconds: z.number().positive().default(300),
+  /** Each wait (MR, review, pipeline) hands back after this long. */
+  mrTimeoutMinutes: z.number().positive().default(30),
   reviewTimeoutMinutes: z.number().positive().default(30),
-  pipelineTimeoutMinutes: z.number().positive().default(60),
+  pipelineTimeoutMinutes: z.number().positive().default(30),
   ciLogLines: z.number().int().positive().default(200),
   mcp: z.object({ url: z.string().min(1).default("https://api.greptile.com/mcp") }).optional(),
 });

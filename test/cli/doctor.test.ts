@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
@@ -189,13 +189,14 @@ describe("steward doctor", () => {
 });
 
 describe("greptile checks", () => {
-  const run = async (gitlab: FakeGitLabMr, prompt: string): Promise<string> => {
+  const run = async (gitlab: FakeGitLabMr, prompt: string, env = ""): Promise<string> => {
     const port = await freeTcpPort();
     const serverPort = await freeTcpPort();
     const configPath = await writeConfig(dir, {
       dataDir: repo.dataDir, overlayDir: repo.overlayDir, promptPath: repo.promptPath, fetchUrl: repo.repo, port, serverPort,
       implement: { prompt: repo.promptPath }, greptile: { prompt },
     });
+    if (env !== "") await appendFile(join(dir, ".env"), env);
     const fetchImpl: typeof fetch = async (input, init) => {
       const body = typeof init?.body === "string" ? init.body : "";
       if (String(input) === LINEAR_GRAPHQL_URL && body.includes("issueLabels")) {
@@ -216,6 +217,12 @@ describe("greptile checks", () => {
     expect(out).toContain("[fail] greptile bot: greptile bot user greptile-bot not found");
     expect(out).toContain(`[fail] greptile prompt: ${join(dir, "missing-fix.md")} does not exist`);
     expect(out).toContain("[fail] linear labels: missing in Linear:");
+    expect(out).toContain("[warn] gitlab webhook secret: neither GITLAB_WEBHOOK_SIGNING_TOKEN nor GITLAB_WEBHOOK_SECRET is set; the loop falls back to 5-minute polling");
+  });
+
+  it("finds the GitLab webhook signing token", async () => {
+    const out = await run(new FakeGitLabMr(), repo.promptPath, "GITLAB_WEBHOOK_SIGNING_TOKEN=whsec_c2lnbmluZw==\n");
+    expect(out).toContain("[ok] gitlab webhook secret: GITLAB_WEBHOOK_SIGNING_TOKEN present");
   });
 
   it("passes when the scope, the bot and the prompt are right", async () => {

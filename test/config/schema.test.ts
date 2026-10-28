@@ -157,10 +157,10 @@ describe("greptile config", () => {
       botUsername: "g",
       maxRounds: 5,
       prompt: "./prompts/fix.md",
-      pollSeconds: 60,
-      mrTimeoutMinutes: 60,
+      pollSeconds: 300,
+      mrTimeoutMinutes: 30,
       reviewTimeoutMinutes: 30,
-      pipelineTimeoutMinutes: 60,
+      pipelineTimeoutMinutes: 30,
       ciLogLines: 200,
     });
   });

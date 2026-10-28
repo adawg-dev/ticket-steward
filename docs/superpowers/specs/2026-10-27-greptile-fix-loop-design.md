@@ -79,7 +79,7 @@ when this ships are not backfilled: their sessions ran in per-attempt directorie
 
 The steward does not open the MR; kickoff's CI does once the branch passes. The await-review job looks it up with
 `GET /projects/:id/merge_requests?source_branch=<branch>&state=opened`. Until it exists, the job reschedules.
-`greptile.mrTimeoutMinutes` (default 60) bounds the wait, counted from the first poll, not from the push, so a job that sat in the queue
+`greptile.mrTimeoutMinutes` (default 30) bounds the wait, counted from the first poll, not from the push, so a job that sat in the queue
 while `serve` was down is not timed out on arrival. When it runs out, the ticket is handed back with "no merge
 request was opened for the branch". That usually means CI failed. The MR iid is stored as soon as it is found.
 
@@ -309,7 +309,7 @@ The steward keeps one record per ticket loop. Table versus columns is the builde
 
 Jobs:
 - **`await_review`** is new. It has no workspace, slot or brain, and it reschedules itself via `not_before`, at
-  `greptile.pollSeconds`, default 60.
+  `greptile.pollSeconds`, default 300 (a fallback; GitLab webhooks wake it sooner, see Webhooks).
 - **`fix`** is new and uses the brain.
 
 Both use `issue_id` = the Linear UUID and `subject = mr:<project>!<iid>`, so the existing claim rules keep them from
@@ -337,8 +337,19 @@ Keep, for the loop:
   and its 429 handling. Rename and re-gate it on `greptile`.
 - The marker pattern for idempotent posts.
 
-The loop polls, so it needs no GitLab webhook. `verifyGitlabWebhook`, the GitLab webhook secrets and the delivery code
-for GitLab go too. Webhook-driven wake-ups can come back later as an optimisation.
+The reviewer's GitLab webhook route and delivery code go too. (`verifyGitlabWebhook` and the GitLab webhook secrets came
+back for the loop's wake-ups; see Webhooks.)
+
+### Webhooks
+
+GitLab webhooks are the loop's primary wake signal and polling is the fallback, every `pollSeconds` (default 300), with
+each wait bounded at 30 minutes (on kickoff MR pipelines take 7.3 min at the median, 14.4 at most; Greptile's first
+review 3.2, 12.3 at most). `POST /webhooks/gitlab` verifies the delivery (signing token in `GITLAB_WEBHOOK_SIGNING_TOKEN`,
+or the legacy secret in `GITLAB_WEBHOOK_SECRET`; 401 otherwise) and reads Merge Request, Note (on an MR, created or
+edited: Greptile edits its summary in place) and Pipeline events. One that names the branch or MR of a loop in
+`awaiting_mr` or `awaiting_review` on the configured project makes that loop's queued await job due now
+(`JobStore.wake`); it never creates a job or touches a running one. Every validly signed event gets a 200 with
+`ignored`, `woken` or `no_loop`, so GitLab never disables the hook.
 
 Also remove the repro *replay* plumbing whose only consumer was the reviewer: the `repros` table, `dataDir/repros/`,
 and `restoreReproFiles`. The reproduction recipe stays in the Enrichment section. Fix `prompts/enrich.md`'s line about
@@ -353,10 +364,10 @@ greptile: {
   botUsername: "greptile-bot",      // GitLab username Greptile posts as
   maxRounds: 5,                     // fix rounds before hand-back
   prompt: "./prompts/fix.md",
-  pollSeconds: 60,
-  mrTimeoutMinutes: 60,
+  pollSeconds: 300,
+  mrTimeoutMinutes: 30,
   reviewTimeoutMinutes: 30,
-  pipelineTimeoutMinutes: 60,
+  pipelineTimeoutMinutes: 30,
   ciLogLines: 200,
   mcp: { url: "https://api.greptile.com/mcp" },  // optional; auth decided by the spike
 },
