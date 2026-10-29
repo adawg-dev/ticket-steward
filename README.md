@@ -5,12 +5,9 @@ a fresh checkout of your monorepo, shows its work live in Linear's agent panel (
 steer or stop it), pushes a branch (the pipeline opens the merge request), then optionally
 answers every comment on the merge request, from people and review bots alike, round by round.
 
-Enrich (the old triage and Enrichment section) was removed on 2026-10-28. The brain never
-holds tracker credentials; the steward validates a structured result and does every write
-itself.
+The brain never holds tracker credentials; the steward validates a structured result and does
+every write itself.
 
-- Design: `docs/superpowers/specs/2026-09-11-ticket-steward-design.md`
-- Implementation plan: `docs/superpowers/plans/2026-09-11-ticket-steward-v1.md`
 - Operations runbook: `docs/ops.md`
 
 ## How it works

@@ -10,3 +10,7 @@ coverage/
 ops/compose.env
 deploy/images/kickoff/
 __pycache__/
+
+# Plans, specs and agent scratch stay local
+docs/superpowers/
+.superpowers/

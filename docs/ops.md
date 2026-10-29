@@ -2,8 +2,7 @@
 
 This is the owner's runbook: how to stand up a steward on a dev VM, what the security
 boundaries are and why, how to rotate every credential it holds, and how to read its
-state when something goes wrong. Section numbers refer to the design spec in
-`docs/superpowers/specs/2026-09-11-ticket-steward-design.md`.
+state when something goes wrong.
 
 Throughout, `/etc/ticket-steward` is the operator directory (holds `steward.config.ts`,
 `.env`, `prompts/`, `skills/`) and `/var/lib/ticket-steward` is `dataDir`. Change both
@@ -810,8 +809,8 @@ person's own login is unaffected.
 The Kubernetes runtime (`runtime.kind: "kubernetes"`): the steward is a dispatcher Deployment, and each run (implement,
 fix, chat) is a Job whose pod has an agent container with no credential, plus keyproxy, tools, egress, Postgres,
 Redis, RabbitMQ and session-sync sidecars. Secrets come from AWS Secrets Manager through the pods' projected
-service-account tokens, and Claude Code sessions live in MinIO in the cluster. The design is
-`docs/superpowers/specs/2026-10-28-k3s-steward-design.md`; the manifests are `deploy/k8s/base` (kustomize).
+service-account tokens, and Claude Code sessions live in MinIO in the cluster. The manifests are
+`deploy/k8s/base` (kustomize).
 
 | Object | Image | Role |
 | --- | --- | --- |
