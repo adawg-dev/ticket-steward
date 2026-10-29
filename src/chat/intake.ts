@@ -249,11 +249,13 @@ export const noteIntake = async (deps: NoteIntakeDeps, event: GitlabWakeEvent, n
     transaction(stores.db, () => reviveTicket(stores, loop.issueId, loop, null));
     return { action: "queued_round", loopId: loop.id };
   }
+  const quietMinutes = deps.settings?.get()["review.quietMinutes"] ?? DEFAULT_SETTINGS["review.quietMinutes"];
   const runId = deps.channels?.active(loop.issueId) ?? null;
   if (runId !== null && deps.channels?.steer(runId, steeringNote(note.authorUsername, note.body)) === true) {
+    // A running loop's own next round answers it; a passed loop (the run is a chat) is opened again for that round.
+    if (loop.state === "passed") queueRound(stores, loop, deps.now?.() ?? new Date(), quietMinutes);
     return { action: "steered", loopId: loop.id };
   }
-  const quietMinutes = deps.settings?.get()["review.quietMinutes"] ?? DEFAULT_SETTINGS["review.quietMinutes"];
   queueRound(stores, loop, deps.now?.() ?? new Date(), quietMinutes);
   return { action: "queued_round", loopId: loop.id };
 };

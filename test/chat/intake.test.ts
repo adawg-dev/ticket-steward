@@ -184,6 +184,19 @@ describe("noteIntake", () => {
     expect(queued()).toEqual([]);
   });
 
+  it("steers a chat running on a passed loop with the note, and opens the loop again so a round answers it", async () => {
+    const { loopId } = loopIn("passed");
+    const chatId = stores.jobs.enqueue({ kind: "linear", run: "chat", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "s", message: "hi" });
+    stores.jobs.claimById(chatId);
+    channels.open(`${chatId}-1`, () => undefined, "issue-1", chatId);
+
+    expect((await intake("And rename the flag")).action).toBe("steered");
+
+    expect(await channels.next(`${chatId}-1`, 0)).toEqual([{ type: "steer", message: expect.stringContaining("And rename the flag") }]);
+    expect(stores.loops.get(loopId)?.state).toBe("awaiting_review");
+    expect(queued()).toEqual([expect.objectContaining({ kind: "await_review", subject: loopSubject(loopId), notBefore: new Date(T0 + QUIET_MS).toISOString() })]);
+  });
+
   it("leaves a queued fix to answer the note in its round", async () => {
     const { loopId } = loopIn("fixing");
     stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "fix" });

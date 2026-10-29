@@ -153,7 +153,7 @@ const implementJob = (opts: { pushed: boolean; name?: string }): number => {
   return jobId;
 };
 
-const createLoop = (state: "awaiting_review" | "handed_back" = "awaiting_review"): number => {
+const createLoop = (state: "awaiting_review" | "handed_back" | "passed" | "unassigned" = "awaiting_review"): number => {
   const jobId = implementJob({ pushed: true });
   const id = stores.loops.create({
     issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: jobId, branch: BRANCH, baseSha, headSha,
@@ -283,6 +283,26 @@ describe("runChat", () => {
     expect(brain.pushes).toEqual([{ ok: true, branch: BRANCH, sha: pushed, commits: 1 }]);
     expect(stores.loops.get(loopId)).toMatchObject({ headSha: pushed, state: "awaiting_review" });
     expect(gitlab.replies[0]?.body).toBe(`Put the retry back.\n\n${CHAT_MARKER}`);
+  });
+
+  it.each(["passed", "handed_back"] as const)("picks a %s loop back up when the chat pushed onto its MR: its restart is queued", async (state) => {
+    const loopId = createLoop(state);
+    const brain = new AgentBrain({ result: { reply: "Done." } }, commitAndPush);
+
+    expect(await runChat(claim(loopId), makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    const queued = stores.jobs.list({ status: "queued", limit: 10 }).map((job) => job.trigger);
+    expect(queued).toEqual([{ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "restart" }]);
+  });
+
+  it("leaves a passed loop alone when the chat pushed nothing, and an unassigned one even when it pushed", async () => {
+    const passed = createLoop("passed");
+    expect(await runChat(claim(passed), makeDeps(new FakeBrain({ result: { reply: "Because." } })))).toEqual({ status: "succeeded" });
+    expect(stores.jobs.list({ status: "queued", limit: 10 })).toEqual([]);
+
+    stores.loops.update(passed, { state: "unassigned" });
+    expect(await runChat(claim(passed), makeDeps(new AgentBrain({ result: { reply: "Done." } }, commitAndPush)))).toEqual({ status: "succeeded" });
+    expect(stores.jobs.list({ status: "queued", limit: 10 })).toEqual([]);
   });
 
   it("without a loop, pushes onto the implement job's branch head and records it there for the next chat", async () => {

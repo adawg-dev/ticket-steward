@@ -20,6 +20,8 @@ import type { Worktree } from "../workspace/worktree.js";
 import { CHAT_MARKER, NO_SESSION_REPLY, validateChatResult, type StoredChat } from "./result.js";
 import { latestSession, type AgentSession } from "./session.js";
 import { linearSessionFor, stoppedResponse, type LinearSession } from "../linear/session.js";
+import { reviveTicket } from "../linear/assignment.js";
+import { transaction } from "../store/index.js";
 
 /** The SDK's errors for a session it cannot load or resume. */
 const SESSION_ERROR = /no conversation found|resume/i;
@@ -276,6 +278,21 @@ const withMedia = (reply: string, media: string[]): string => (media.length === 
  * The finish half, from the executor's report and the work it found: retry, or store and post the reply with the media
  * the agent attached and what was left unpushed.
  */
+/**
+ * The chat pushed onto the loop's MR (the push ledger moved the loop's head): a passed or handed-back loop is picked back
+ * up, its restart step queued once, so the change is reviewed like any other. A running loop's next round sees the push
+ * itself; an unassigned or stopped loop is left as it is.
+ */
+const pickUpPush = (deps: PipelineDeps, session: AgentSession, work: WorkReport): void => {
+  if (work.pushedSha === null || session.loopId === null) return;
+  const { stores } = deps;
+  transaction(stores.db, () => {
+    const loop = stores.loops.get(session.loopId ?? -1);
+    if (loop === null || (loop.state !== "passed" && loop.state !== "handed_back") || stores.agentSessions.isUnassigned(loop.issueId)) return;
+    reviveTicket(stores, loop.issueId, loop, null);
+  });
+};
+
 const finishChat = async (
   ctx: RunContext,
   deps: PipelineDeps,
@@ -298,6 +315,7 @@ const finishChat = async (
     else deps.stores.jobs.recordSession(session.jobId, report.sessionId);
     deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
   }
+  pickUpPush(deps, session, work);
   // A person stopped it from Linear: no reply but where it got to, and the next message resumes the recorded session.
   if (report.stopped) {
     await answer.panel.finish(stoppedResponse(answer.panel.lastThought(), work.pushedSha));
