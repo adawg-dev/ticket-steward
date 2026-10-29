@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 );
 CREATE INDEX IF NOT EXISTS agent_sessions_issue ON agent_sessions (issue_id);
 
+CREATE TABLE IF NOT EXISTS unassigned_tickets (
+  issue_id TEXT PRIMARY KEY,
+  unassigned_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,

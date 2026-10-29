@@ -65,6 +65,15 @@ describe("unassignTicket", () => {
     expect(stores.loops.get(loop.id)?.state).toBe("unassigned");
   });
 
+  it("records the ticket as unassigned though it has no loop yet, and cancels its queued implement", () => {
+    const implementId = stores.jobs.enqueue({ kind: "linear", run: "implement", ...ISSUE, sessionId: "session-1", message: null });
+
+    unassignTicket({ stores }, "issue-1");
+
+    expect(stores.agentSessions.isUnassigned("issue-1")).toBe(true);
+    expect(stores.jobs.get(implementId)).toMatchObject({ status: "failed", error: UNASSIGNED_JOB_ERROR });
+  });
+
   it("holds a stop for a brain job claimed before its run opened", () => {
     const jobId = stores.jobs.enqueue({ kind: "linear", run: "implement", ...ISSUE, sessionId: "session-1", message: null });
     stores.jobs.claimById(jobId);
@@ -91,8 +100,8 @@ describe("reviveTicket", () => {
   it("queues the loop's restart step once, then the reviving chat", () => {
     const loop = loopIn("unassigned");
 
-    const chatId = reviveTicket(stores, loop, linearChat);
-    reviveTicket(stores, loop, null);
+    const chatId = reviveTicket(stores, "issue-1", loop, linearChat);
+    reviveTicket(stores, "issue-1", loop, null);
 
     expect(stores.jobs.get(chatId ?? -1)?.trigger).toEqual(linearChat);
     expect(stores.jobs.queuedForIssue("issue-1").map((job) => job.trigger)).toEqual([{ kind: "loop", ...ISSUE, loopId: loop.id, step: "restart" }, linearChat]);
@@ -101,8 +110,18 @@ describe("reviveTicket", () => {
   it("queues no restart for a loop that is still running", () => {
     const loop = loopIn("awaiting_review");
 
-    expect(reviveTicket(stores, loop, null)).toBeNull();
+    expect(reviveTicket(stores, "issue-1", loop, null)).toBeNull();
     expect(queued()).toEqual([]);
+  });
+
+  it("revives a ticket that has no loop: no restart, the chat, and the ticket no longer unassigned", () => {
+    stores.agentSessions.markUnassigned("issue-1");
+
+    const chatId = reviveTicket(stores, "issue-1", null, linearChat);
+
+    expect(queued()).toEqual([linearChat]);
+    expect(stores.jobs.get(chatId ?? -1)?.trigger).toEqual(linearChat);
+    expect(stores.agentSessions.isUnassigned("issue-1")).toBe(false);
   });
 });
 

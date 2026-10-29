@@ -304,6 +304,42 @@ describe("linearIntake", () => {
     });
   });
 
+  describe("a ticket the steward was removed from before it had a loop", () => {
+    it("ignores a prompt during or after its implement, and a mention revives it with a chat", async () => {
+      const implementId = stores.jobs.enqueue(linearImplement);
+      stores.jobs.claimById(implementId);
+      stores.jobs.recordWorkspace(implementId, "ticket-API-1", "a".repeat(40));
+      stores.jobs.recordSession(implementId, "claude-session-1");
+      await linearIntake(deps(), undelegated());
+      stores.jobs.finish(implementId, { status: "failed", error: "stopped", retryable: false });
+
+      expect((await linearIntake(deps(), prompted())).action).toBe("ignored");
+      expect(queued()).toEqual([]);
+
+      settings = { ...DEFAULT_SETTINGS, "linear.reviveByMention": false };
+      expect((await linearIntake(deps(), mention())).action).toBe("ignored");
+      settings = { ...DEFAULT_SETTINGS };
+      expect((await linearIntake(deps(), mention())).action).toBe("revive");
+      expect(queued()).toEqual([expect.objectContaining({ kind: "linear", run: "chat", sessionId: "session-2" })]);
+      expect(stores.agentSessions.isUnassigned("issue-1")).toBe(false);
+    });
+
+    it("never resumes an implement that asked questions once the steward was removed", async () => {
+      needsInfoImplement();
+      await linearIntake(deps(), undelegated());
+
+      expect((await linearIntake(deps(), prompted({ body: "Use the v2 adapter" }))).action).toBe("ignored");
+      expect(queued()).toEqual([]);
+    });
+
+    it("works on the ticket again once it is delegated again", async () => {
+      await linearIntake(deps(), undelegated());
+
+      expect((await linearIntake(deps(), created())).action).toBe("implement");
+      expect(stores.agentSessions.isUnassigned("issue-1")).toBe(false);
+    });
+  });
+
   it("unassigns when the steward is removed as delegate", async () => {
     loopIn("awaiting_review");
 

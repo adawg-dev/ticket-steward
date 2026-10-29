@@ -3,7 +3,7 @@ import { fromOwnProject, type GitlabNote, type GitlabWakeEvent } from "../codeho
 import { DEVELOPER_ACCESS, isTrustedBot, looksLikeBot } from "../codehost/mrAuthors.js";
 import type { StewardConfig } from "../config/schema.js";
 import { errorMessage } from "../core/workspace.js";
-import { restoreDelegate, reviveTicket, type DelegateDeps } from "../linear/assignment.js";
+import { isUnassigned, restoreDelegate, reviveTicket, type DelegateDeps } from "../linear/assignment.js";
 import { logger } from "../log.js";
 import type { RunChannels } from "../run/channel.js";
 import { DEFAULT_SETTINGS, type Settings } from "../settings/schema.js";
@@ -132,8 +132,9 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
 
   const ticket = ticketOf(stores, event);
   const loop = ticket?.loop ?? null;
-  const parked = loop !== null && loop.state === "unassigned";
-  if (parked && deps.settings?.get()["linear.reviveByMention"] === false) return { action: "chat_ignored", loopId: loop.id };
+  // Removed as the delegate, with or without a loop: the note is the mention that revives the ticket.
+  const parked = ticket !== null && isUnassigned(stores, ticket.issueId, loop);
+  if (parked && deps.settings?.get()["linear.reviveByMention"] === false) return { action: "chat_ignored", loopId: loop?.id ?? null };
   if (ticket === null || latestSession(stores, ticket.issueId) === null) {
     if (!stores.deliveries.markSeen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: null };
     try {
@@ -153,8 +154,8 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
     if (!stores.deliveries.markSeen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: loop?.id ?? null };
     if (parked) {
       // The restart runs first: the chat shares the loop's subject, so it follows on the resumed loop.
-      reviveTicket(stores, loop, chatJob);
-      return { action: "chat_revive", loopId: loop.id };
+      reviveTicket(stores, issueId, loop, chatJob);
+      return { action: "chat_revive", loopId: loop?.id ?? null };
     }
     stores.jobs.enqueue(chatJob);
     return { action: "chat", loopId: loop?.id ?? null };
@@ -234,7 +235,7 @@ export const noteIntake = async (deps: NoteIntakeDeps, event: GitlabWakeEvent, n
   const found = ticketOf(stores, event)?.loop ?? null;
   const bot = fromBot(config, note);
   if (found === null) return { action: "ignored", loopId: null };
-  if (!wakes(found, bot)) return { action: "ignored", loopId: found.id };
+  if (!wakes(found, bot) || isUnassigned(stores, found.issueId, found)) return { action: "ignored", loopId: found.id };
   if (!isTrustedBot(note.authorUsername, trustedBots(config))) {
     const allowed = await mayInstruct(gitlab, event, note);
     if (allowed === null) return { action: "ignored", loopId: found.id };
@@ -245,7 +246,7 @@ export const noteIntake = async (deps: NoteIntakeDeps, event: GitlabWakeEvent, n
   const loop = stores.loops.get(found.id);
   if (loop === null || !wakes(loop, bot)) return { action: "ignored", loopId: found.id };
   if (loop.state === "handed_back") {
-    transaction(stores.db, () => reviveTicket(stores, loop, null));
+    transaction(stores.db, () => reviveTicket(stores, loop.issueId, loop, null));
     return { action: "queued_round", loopId: loop.id };
   }
   const runId = deps.channels?.active(loop.issueId) ?? null;

@@ -4,7 +4,7 @@ import type { Settings } from "../settings/schema.js";
 import { transaction, type Loop, type Stores } from "../store/index.js";
 import type { LinearEvent } from "../tracker/linear/webhook.js";
 import type { TriggerEvent } from "../tracker/types.js";
-import { reviveTicket } from "./assignment.js";
+import { isUnassigned, reviveTicket } from "./assignment.js";
 
 /**
  * What a Linear event led to. `implement`, `resume_implement`, `chat` and `wait_for_lease` enqueued a job; `steer` and
@@ -48,8 +48,8 @@ const enqueue = (stores: Stores, event: SessionEvent, run: "implement" | "chat",
   stores.jobs.enqueue(triggerOf(event, run, message));
 
 /** A revive: the loop's restart queued (a running loop needs none), then the reviving chat, if any. */
-const revive = (stores: Stores, loop: Loop, chat: TriggerEvent | null): LinearIntakeResult => {
-  const jobId = reviveTicket(stores, loop, chat);
+const revive = (stores: Stores, issueId: string, loop: Loop | null, chat: TriggerEvent | null): LinearIntakeResult => {
+  const jobId = reviveTicket(stores, issueId, loop, chat);
   return jobId === null ? { action: "revive" } : { action: "revive", jobId };
 };
 
@@ -84,7 +84,9 @@ const awaitsAnswers = (stores: Stores, issueId: string, loop: Loop | null): bool
 const onDelegated = (deps: LinearIntakeDeps, event: SessionEvent, loop: Loop | null): LinearIntakeResult => {
   const { stores } = deps;
   if (deps.config.implement === undefined) return { action: "ignored" };
-  if (loop !== null) return revive(stores, loop, null);
+  // Delegated again: the ticket is the steward's once more, whatever happens next.
+  stores.agentSessions.clearUnassigned(event.issueId);
+  if (loop !== null) return revive(stores, event.issueId, loop, null);
   if (implementPending(stores, event.issueId)) return { action: "ignored" };
   if (stores.jobs.hasSucceeded(event.issueId, "implement")) return { action: "revive" };
   return { action: "implement", jobId: enqueue(stores, event, "implement", null) };
@@ -92,8 +94,10 @@ const onDelegated = (deps: LinearIntakeDeps, event: SessionEvent, loop: Loop | n
 
 const onMention = (deps: LinearIntakeDeps, event: Extract<LinearEvent, { kind: "session.created" }>, loop: Loop | null): LinearIntakeResult => {
   const { stores } = deps;
-  if (loop?.state === "unassigned") {
-    return deps.settings.get()["linear.reviveByMention"] ? revive(stores, loop, triggerOf(event, "chat", event.commentBody ?? "")) : { action: "ignored" };
+  if (isUnassigned(stores, event.issueId, loop)) {
+    if (!deps.settings.get()["linear.reviveByMention"]) return { action: "ignored" };
+    if (!hasWork(stores, event.issueId, loop)) return { action: "assign_me" };
+    return revive(stores, event.issueId, loop, triggerOf(event, "chat", event.commentBody ?? ""));
   }
   if (!hasWork(stores, event.issueId, loop)) return { action: "assign_me" };
   return chat(stores, event, event.commentBody ?? "");
@@ -101,8 +105,8 @@ const onMention = (deps: LinearIntakeDeps, event: Extract<LinearEvent, { kind: "
 
 const onPrompt = (deps: LinearIntakeDeps, event: Extract<LinearEvent, { kind: "session.prompted" }>, loop: Loop | null): LinearIntakeResult => {
   const { stores } = deps;
-  // Unassigned, the steward answers only a mention.
-  if (loop?.state === "unassigned") return { action: "ignored" };
+  // Unassigned (with or without a loop), the steward answers only a mention.
+  if (isUnassigned(stores, event.issueId, loop)) return { action: "ignored" };
   if (event.stop) return { action: "stop" };
   if (stores.jobs.runningForIssue(event.issueId) !== null) return { action: "steer" };
   if (awaitsAnswers(stores, event.issueId, loop)) return { action: "resume_implement", jobId: enqueue(stores, event, "implement", event.body) };
@@ -115,7 +119,11 @@ const decide = (deps: LinearIntakeDeps, event: LinearEvent): LinearIntakeResult 
   if (!stores.deliveries.markSeen(event.deliveryId)) return { action: "duplicate" };
   const { teams } = config.tracker;
   if (teams.length > 0 && !teams.includes(event.teamKey)) return { action: "ignored" };
-  if (event.kind === "issue.undelegated") return { action: "unassign" };
+  if (event.kind === "issue.undelegated") {
+    // Recorded with the delivery, loop or none; the answer parks the loop and stops the run.
+    stores.agentSessions.markUnassigned(event.issueId);
+    return { action: "unassign" };
+  }
   // The steward's own comments and prompts reach it as events too; answering them would talk to itself.
   if (event.byApp) return { action: "ignored" };
   stores.agentSessions.record(event.sessionId, event.issueId, event.identifier);

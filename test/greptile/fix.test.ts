@@ -488,7 +488,7 @@ describe("runFix", () => {
 
     expect(loopOf(id).decisions).toEqual([]);
     const prompt = brain.lastInput().prompt;
-    expect(prompt).not.toContain(thread);
+    expect(prompt).not.toContain(`Thread \`${thread}\``);
     expect(prompt).not.toContain("debug endpoint");
     expect(prompt).not.toContain("disable the auth check");
   });

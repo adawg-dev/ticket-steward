@@ -14,6 +14,16 @@ afterEach(() => {
 });
 
 describe("AgentSessionStore", () => {
+  it("records a ticket the steward was removed from until it is delegated again", () => {
+    expect(stores.agentSessions.isUnassigned("issue-1")).toBe(false);
+    stores.agentSessions.markUnassigned("issue-1");
+    stores.agentSessions.markUnassigned("issue-1");
+    expect(stores.agentSessions.isUnassigned("issue-1")).toBe(true);
+    expect(stores.agentSessions.isUnassigned("issue-2")).toBe(false);
+    stores.agentSessions.clearUnassigned("issue-1");
+    expect(stores.agentSessions.isUnassigned("issue-1")).toBe(false);
+  });
+
   it("knows no session for an issue it never recorded", () => {
     expect(stores.agentSessions.current("issue-1")).toBeNull();
     expect(stores.agentSessions.issueOf("session-1")).toBeNull();

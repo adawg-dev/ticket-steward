@@ -672,6 +672,20 @@ describe("buildServer", () => {
         await vi.waitFor(() => expect(recording.calls).toEqual([{ kind: "delegate", issueId: "issue-1", appUserId: FAKE_APP_USER_ID }]));
       });
 
+      it("treats a prefixed note on a ticket unassigned before it had a loop as the reviving mention", async () => {
+        const jobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-2", identifier: "API-2", teamKey: "API", action: "implement" });
+        stores.jobs.recordWorkspace(jobId, "3-1", "b".repeat(40));
+        stores.jobs.recordCommit(jobId, "feature/API-2-thing", "c".repeat(40));
+        stores.jobs.markPushed(jobId);
+        stores.jobs.recordSession(jobId, "session-impl");
+        stores.agentSessions.markUnassigned("issue-2");
+
+        expect((await postGitlab("Note Hook", chatNote("/agent push it", { branch: "feature/API-2-thing" }))).json()).toEqual({ ok: true, action: "chat_revive" });
+        expect(jobsOfKind("chat")).toHaveLength(1);
+        expect(stores.agentSessions.isUnassigned("issue-2")).toBe(false);
+        await vi.waitFor(() => expect(recording.calls).toEqual([{ kind: "delegate", issueId: "issue-2", appUserId: FAKE_APP_USER_ID }]));
+      });
+
       it("leaves an unassigned loop alone on a note without the prefix", async () => {
         sessionLoop("unassigned");
 
