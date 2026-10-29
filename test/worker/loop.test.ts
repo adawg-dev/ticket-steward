@@ -16,11 +16,13 @@ import { SlotClient } from "../../src/workspace/slots.js";
 import type { publishImplementOnly, runImplement } from "../../src/implement/pipeline.js";
 import { startWorker, type WorkerDeps, type WorkerHandle } from "../../src/worker/loop.js";
 import type { ResourceSample } from "../../src/worker/resources.js";
+import type { RunSpec } from "../../src/run/protocol.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
+import { podSpecFor, RUNTIME } from "../k8s/helpers.js";
 
 const NOW = new Date("2026-09-11T14:02:30.000Z");
 const SUCCEEDED: JobOutcome = { status: "succeeded" };
@@ -878,6 +880,74 @@ describe("startWorker", () => {
       start({ resources: () => ({ availableMemoryMb: 0, loadPerCpu: 99 }) });
 
       await waitForStatus(heavy, "succeeded");
+    });
+  });
+
+  describe("on the kubernetes runtime", () => {
+    const kubernetesConfig = (): StewardConfig => ({ ...makeConfig(), runtime: { ...RUNTIME, maxConcurrent: 2 } });
+    const specOf = (jobId: number, attempt: number): RunSpec => podSpecFor({ runId: `${jobId}-${attempt}`, jobId });
+
+    it("runs maxConcurrent lanes, without the resource guard", async () => {
+      const held = heldRuns();
+      runImplementMock.mockImplementation(held.impl);
+      const first = stores.jobs.enqueue(createdTrigger);
+      const second = stores.jobs.enqueue(issue2);
+      const handle = start({ config: kubernetesConfig(), resources: () => ({ availableMemoryMb: 0, loadPerCpu: 99 }) });
+
+      await vi.waitFor(() => expect(handle.state().running.map((entry) => entry.jobId).sort()).toEqual([first, second]));
+      held.release(first);
+      held.release(second);
+      await waitForStatus(second, "succeeded");
+    });
+
+    it("leaves a job interrupted by shutdown running, its attempt open, for the next start to reattach", async () => {
+      runImplementMock.mockImplementationOnce(
+        (_ctx, deps) =>
+          new Promise<JobOutcome>((resolve) => {
+            deps.signal?.addEventListener("abort", () => resolve(INTERRUPTED), { once: true });
+          }),
+      );
+      const jobId = stores.jobs.enqueue(createdTrigger);
+      const handle = start({ config: kubernetesConfig() });
+      await vi.waitFor(() => expect(handle.state().running.map((entry) => entry.jobId)).toEqual([jobId]));
+
+      await handle.stop();
+
+      expect(stores.jobs.get(jobId)?.status).toBe("running");
+      expect(stores.attempts.forJob(jobId).map((attempt) => attempt.finishedAt)).toEqual([null]);
+    });
+
+    it("finishes a reattached run first, on the attempt its pod runs as, and leaves other running jobs to requeue", async () => {
+      const adopted = stores.jobs.enqueue(createdTrigger);
+      stores.jobs.claimById(adopted);
+      stores.attempts.start(adopted);
+      const queued = stores.jobs.enqueue(issue2);
+      const contexts: RunContext[] = [];
+      runImplementMock.mockImplementation((ctx) => {
+        contexts.push(ctx);
+        return Promise.resolve(SUCCEEDED);
+      });
+      const released: string[] = [];
+      const spec = specOf(adopted, 1);
+      start({ config: kubernetesConfig(), resume: { specs: [spec], release: (runId) => Promise.resolve(void released.push(runId)) } });
+
+      await waitForStatus(adopted, "succeeded");
+      await waitForStatus(queued, "succeeded");
+      expect(contexts[0]).toMatchObject({ jobId: adopted, attempt: 1, resume: spec });
+      expect(contexts.find((ctx) => ctx.jobId === queued)?.resume).toBeUndefined();
+      expect(stores.attempts.forJob(adopted)).toHaveLength(1);
+      expect(stores.jobs.get(adopted)?.attempts).toBe(1);
+      // Released after the job: a no-op for the executor once it waited on the pod.
+      expect(released).toEqual([spec.runId]);
+    });
+
+    it("releases a reattached run whose job is no longer running on that attempt", async () => {
+      const jobId = stores.jobs.enqueue(createdTrigger);
+      const released: string[] = [];
+      start({ config: kubernetesConfig(), resume: { specs: [specOf(jobId, 1)], release: (runId) => Promise.resolve(void released.push(runId)) } });
+      await waitForStatus(jobId, "succeeded");
+      expect(released).toEqual([`${jobId}-1`]);
+      expect(runImplementMock.mock.calls[0]?.[0].resume).toBeUndefined();
     });
   });
 });

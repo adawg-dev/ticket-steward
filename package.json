@@ -34,6 +34,7 @@
     "@aws-sdk/client-sts": "^3.1158.0",
     "@aws-sdk/types": "^3.975.0",
     "@gitbeaker/rest": "^43.8.0",
+    "@kubernetes/client-node": "^1.4.0",
     "@linear/sdk": "^95.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@octokit/rest": "^22.0.1",

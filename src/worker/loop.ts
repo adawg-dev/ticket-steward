@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
-import { MAX_SLOTS, RESOURCE_GUARD_DEFAULTS, type ResourceGuardConfig } from "../config/schema.js";
+import { kubernetesRuntime, MAX_SLOTS, RESOURCE_GUARD_DEFAULTS, type ResourceGuardConfig } from "../config/schema.js";
 import { runChat } from "../chat/run.js";
 import { retentionProtection } from "../chat/session.js";
 import { acquireRunLock } from "../core/lock.js";
@@ -13,6 +13,7 @@ import { runRestart } from "../greptile/start.js";
 import { handBackStranded } from "../greptile/stranded.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
 import { logger } from "../log.js";
+import type { RunSpec } from "../run/protocol.js";
 import { RETIRED_KIND_ERROR, unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 import { holdReason, sampleResources, type Hold, type ResourceSample } from "./resources.js";
@@ -32,6 +33,11 @@ export interface WorkerOptions {
   runChat?: typeof runChat;
   /** Samples host memory and load for the resource guard. */
   resources?: () => ResourceSample;
+  /**
+   * Kubernetes: run pods the executor reattached to after a restart. Their jobs stay running and are finished first, each
+   * on the attempt its pod runs as; `release` stops a pod whose job ended without waiting on it.
+   */
+  resume?: { specs: RunSpec[]; release: (runId: string) => Promise<void> };
 }
 
 export type WorkerDeps = PipelineDeps & WorkerOptions;
@@ -49,6 +55,11 @@ export interface WorkerHandle {
 interface InFlight {
   job: Job;
   attempt: Attempt;
+}
+
+/** A reattached run pod's job, its attempt and the spec the pod runs. */
+interface Resumed extends InFlight {
+  spec: RunSpec;
 }
 
 /** One worker loop; it owns its slot for its whole life. */
@@ -107,6 +118,9 @@ class Worker {
   private readonly chat: typeof runChat;
   private readonly guard: ResourceGuardConfig;
   private readonly resources: () => ResourceSample;
+  /** Kubernetes: a job interrupted by shutdown stays running, since its run pod goes on and the next start reattaches. */
+  private readonly detachOnStop: boolean;
+  private readonly resumed: Resumed[];
   /** When the last heavy job was claimed (epoch ms), for the guard's start spacing. */
   private lastHeavyStart = Number.NEGATIVE_INFINITY;
   /** The shortage holding heavy starts, so the log notes only when that changes. */
@@ -137,13 +151,18 @@ class Worker {
     this.fix = deps.runFix ?? runFix;
     this.restart = deps.runRestart ?? runRestart;
     this.chat = deps.runChat ?? runChat;
-    this.guard = deps.config.resourceGuard ?? RESOURCE_GUARD_DEFAULTS;
+    const kubernetes = kubernetesRuntime(deps.config);
+    this.detachOnStop = kubernetes !== null;
+    // Run pods are scheduled by the cluster, on their own requests and limits: the host's memory and load say nothing.
+    this.guard = kubernetes !== null ? { ...RESOURCE_GUARD_DEFAULTS, enabled: false } : (deps.config.resourceGuard ?? RESOURCE_GUARD_DEFAULTS);
     this.resources = deps.resources ?? sampleResources;
-    this.lanes = Array.from({ length: deps.config.slots?.count ?? 1 }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
+    const lanes = kubernetes?.maxConcurrent ?? deps.config.slots?.count ?? 1;
+    this.lanes = Array.from({ length: lanes }, (_, index): Lane => ({ slot: index + 1, inFlight: null, wake: null }));
     // Before requeueing: a running job of a removed kind must fail, not go back to the queue.
     const retired = deps.stores.jobs.failRetiredKinds();
-    const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts);
-    logger.info({ requeued, failed, retired, slots: this.lanes.length }, "worker started");
+    this.resumed = this.resumable();
+    const { requeued, failed } = deps.stores.jobs.requeueInterrupted(this.maxAttempts, this.resumed.map(({ job }) => job.id));
+    logger.info({ requeued, failed, retired, resumed: this.resumed.length, slots: this.lanes.length }, "worker started");
     this.sweepTimer = setInterval(() => void this.sweepWhenIdle(), deps.sweepMs ?? DEFAULT_SWEEP_MS).unref();
     this.strandedTimer = setInterval(() => void this.rescueStranded(), deps.strandedMs ?? DEFAULT_STRANDED_MS).unref();
     process.once("SIGTERM", this.onSigterm);
@@ -157,6 +176,22 @@ class Worker {
       .then(() => Promise.all(this.lanes.map((lane) => this.loop(lane).catch((err: unknown) => logger.error({ slot: lane.slot, err: errorMessage(err) }, "worker loop crashed")))))
       .then(() => undefined)
       .catch((err: unknown) => logger.error({ err: errorMessage(err) }, "worker crashed"));
+  }
+
+  /** The reattached runs whose job is still running on the attempt the pod runs as; any other is released. */
+  private resumable(): Resumed[] {
+    const { jobs, attempts } = this.deps.stores;
+    return (this.deps.resume?.specs ?? []).flatMap((spec) => {
+      const job = jobs.get(spec.jobId);
+      const attempt = attempts.forJob(spec.jobId).find((candidate) => `${spec.jobId}-${candidate.number}` === spec.runId);
+      if (job?.status === "running" && attempt !== undefined && attempt.finishedAt === null) return [{ job, attempt, spec }];
+      this.releaseRun(spec.runId);
+      return [];
+    });
+  }
+
+  private releaseRun(runId: string): void {
+    this.deps.resume?.release(runId).catch((err: unknown) => logger.warn({ runId, err: errorMessage(err) }, "a reattached run pod could not be stopped"));
   }
 
   state(): WorkerState {
@@ -199,6 +234,11 @@ class Worker {
 
   private async loop(lane: Lane): Promise<void> {
     while (!this.stopped) {
+      const resumed = this.resumed.shift();
+      if (resumed !== undefined) {
+        await this.process(lane, resumed.job, resumed);
+        continue;
+      }
       let job: Job | null;
       try {
         job = this.claim(lane);
@@ -258,12 +298,14 @@ class Worker {
     });
   }
 
-  private async process(lane: Lane, job: Job): Promise<void> {
+  /** Runs a claimed job on a new attempt, or a reattached run pod's job on the attempt it runs as. */
+  private async process(lane: Lane, job: Job, resumed?: Resumed): Promise<void> {
     const { stores, redactor } = this.deps;
     try {
-      const attempt = stores.attempts.start(job.id);
+      const attempt = resumed?.attempt ?? stores.attempts.start(job.id);
       lane.inFlight = { job, attempt };
-      const outcome = redactOutcome(await this.run(lane, job, runContext(job, attempt)), redactor);
+      const ctx = runContext(job, attempt);
+      const outcome = redactOutcome(await this.run(lane, job, resumed === undefined ? ctx : { ...ctx, resume: resumed.spec }), redactor);
       await this.record(job, attempt, outcome);
       const fields = { jobId: job.id, slot: lane.slot, kind: job.kind, identifier: job.identifier, attempt: attempt.number, status: outcome.status, ...outcomeDetail(outcome) };
       if (outcome.status === "succeeded" || outcome.status === "deferred") logger.info(fields, "job finished");
@@ -273,6 +315,8 @@ class Worker {
       this.failBestEffort(job, errorMessage(err));
     } finally {
       lane.inFlight = null;
+      // A no-op once the job's executor waited on the pod; otherwise the job ended another way and the pod must go.
+      if (resumed !== undefined) this.releaseRun(resumed.spec.runId);
     }
   }
 
@@ -313,6 +357,8 @@ class Worker {
       return;
     }
     if (isInterrupted(outcome)) {
+      // Left running: its run pod goes on, and the next start reattaches to it or requeues the job.
+      if (this.stopped && this.detachOnStop) return;
       // This job only: another slot's job may still be running.
       jobs.requeueInterruptedJob(job.id, this.maxAttempts);
       return;
@@ -393,7 +439,7 @@ class Worker {
 }
 
 export const startWorker = (deps: WorkerDeps): WorkerHandle => {
-  if (deps.config.slots !== undefined && deps.slot === undefined) throw new Error("slots is configured but the worker was given no slot client");
+  if (deps.config.slots !== undefined && deps.slot === undefined && kubernetesRuntime(deps.config) === null) throw new Error("slots is configured but the worker was given no slot client");
   const lock = acquireRunLock(deps.config.dataDir);
   if (lock === null) throw new Error(`another steward process holds ${join(deps.config.dataDir, "run.lock")}`);
   const worker = new Worker(deps, lock);

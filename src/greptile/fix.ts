@@ -290,7 +290,8 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
     checks: stewardChecks(settings.checks, loop.baseSha),
     interactive: false,
   };
-  return { spec, facts, findings };
+  // A reattached run pod already runs this round: what it was started with is what it finishes with.
+  return { spec: ctx.resume ?? spec, facts, findings };
 };
 
 /** The finish half, from the executor's report and the work it found: retry, hand back, or judge the agent's result. */
@@ -363,7 +364,7 @@ const executeFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutco
   const stored = deps.stores.jobs.get(ctx.jobId)?.fixResult ?? null;
   if (stored !== null) return publishStored(fix, stored, observed.mr);
   // A rerun after the agent pushed (the attempt was interrupted later) never runs the brain again over its own push.
-  const earlier = deps.stores.pushes.latest(ctx.jobId);
+  const earlier = ctx.resume === undefined ? deps.stores.pushes.latest(ctx.jobId) : null;
   if (earlier !== null) return publishHandback(deps, reload(fix), "an earlier attempt stopped after the agent pushed", earlier.sha);
   return runRound(fix, observed);
 };

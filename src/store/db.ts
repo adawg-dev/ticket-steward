@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   worktree_name TEXT,
   base_sha TEXT,
   chat_result TEXT,
-  slot INTEGER
+  slot INTEGER,
+  run_id TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_issue_status ON jobs (issue_id, status);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status);
@@ -107,6 +108,14 @@ CREATE TABLE IF NOT EXISTS chat_leases (
   heartbeat_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS run_tokens (
+  run_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, role)
+);
+
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
   seen_at TEXT NOT NULL
@@ -129,6 +138,7 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }
   { table: "jobs", column: "base_sha", definition: "TEXT" },
   { table: "jobs", column: "chat_result", definition: "TEXT" },
   { table: "jobs", column: "slot", definition: "INTEGER" },
+  { table: "jobs", column: "run_id", definition: "TEXT" },
 ];
 
 /** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */

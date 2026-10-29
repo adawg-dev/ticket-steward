@@ -5,6 +5,7 @@ import { JobStore } from "./jobs.js";
 import { LeaseStore } from "./leases.js";
 import { LoopStore } from "./loops.js";
 import { PushStore } from "./pushes.js";
+import { RunTokens } from "./runTokens.js";
 
 export type { Database } from "./db.js";
 export { openDatabase } from "./db.js";
@@ -22,6 +23,7 @@ export { AttemptStore, type Attempt, type AttemptPatch } from "./attempts.js";
 export { DeliveryStore } from "./deliveries.js";
 export { PushStore, type NewPush, type Push } from "./pushes.js";
 export { LEASE_STALE_MS, LeaseStore, type ChatLease } from "./leases.js";
+export { RunTokens, type RunTokenRole } from "./runTokens.js";
 
 export interface Stores {
   db: Database;
@@ -31,6 +33,7 @@ export interface Stores {
   loops: LoopStore;
   pushes: PushStore;
   leases: LeaseStore;
+  runTokens: RunTokens;
 }
 
 export const openStores = (dataDir: string): Stores => {
@@ -43,6 +46,7 @@ export const openStores = (dataDir: string): Stores => {
     loops: new LoopStore(db),
     pushes: new PushStore(db),
     leases: new LeaseStore(db),
+    runTokens: new RunTokens(db),
   };
 };
 

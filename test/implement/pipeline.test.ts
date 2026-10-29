@@ -12,6 +12,7 @@ import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
 import type { RunExecutor } from "../../src/run/executor.js";
+import { localExecutor } from "../../src/run/local.js";
 import { RunSpecSchema, type RunReport, type RunSpec } from "../../src/run/protocol.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { TriggerEvent, TicketBundle } from "../../src/tracker/types.js";
@@ -343,6 +344,42 @@ describe("runImplement", () => {
     expect(brain.calls).toHaveLength(0);
     expect(recorded(ctx.jobId)).toContain("feature/API-1-by-hand");
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
+  });
+
+  it("finishes a reattached run pod's attempt from its own spec, its push counted as this run's", async () => {
+    const ctx = claim();
+    // The pod's run, as it went before the steward restarted: the agent pushed, and the pod has not reported yet.
+    const executed: RunSpec[] = [];
+    const first = agentBrain(implemented, async (workspace, push) => {
+      await commitAndPush(workspace, push);
+      throw new Error("steward stopped");
+    });
+    const recording: RunExecutor = {
+      execute: async (spec) => {
+        executed.push(spec);
+        return localExecutor(depsFor(first)).execute(spec);
+      },
+    };
+    expect((await runImplement(ctx, { ...depsFor(first), executor: recording })).status).toBe("failed");
+    const [spec] = executed;
+    if (spec === undefined) throw new Error("no spec executed");
+
+    const reattached: RunSpec[] = [];
+    const pod: RunExecutor = {
+      execute: (resumed) => {
+        reattached.push(resumed);
+        return Promise.resolve({
+          report: { runId: resumed.runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-1", output: implemented, usage: null },
+          work: { runId: resumed.runId, unpushed: "", pushedSha: null },
+        });
+      },
+    };
+    const outcome = await runImplement({ ...ctx, resume: spec }, { ...depsFor(agentBrain(implemented)), executor: pod });
+
+    expect(reattached).toEqual([spec]);
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome).not.toMatchObject({ warning: expect.stringContaining("earlier attempt") });
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toBeNull();
   });
 
   it("does not run the brain again when an earlier attempt's agent pushed before the attempt stopped", async () => {

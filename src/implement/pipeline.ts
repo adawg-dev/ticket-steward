@@ -132,6 +132,7 @@ export const runIdOf = (ctx: RunContext): string => (ctx.dryRun ? `dry-${process
 export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<{ spec: RunSpec } | { outcome: JobOutcome }> => {
   const configured = settingsOf(deps);
   if (configured === null) return { outcome: notConfigured };
+  if (ctx.resume !== undefined) return { spec: ctx.resume };
   const { settings, remote } = configured;
   const paths = implementPaths(ctx, deps);
 

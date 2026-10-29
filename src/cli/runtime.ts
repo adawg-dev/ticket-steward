@@ -5,8 +5,12 @@ import type { Brain, BrainInput, BrainRun } from "../brain/types.js";
 import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { createCodeHost } from "../codehost/index.js";
 import type { LoadedConfig } from "../config/load.js";
+import { kubernetesRuntime } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
+import type { RunExecutor } from "../run/executor.js";
 import { collectSecretValues, Redactor } from "../core/redact.js";
+import { clusterApis } from "../k8s/cluster.js";
+import { kubernetesExecutor, type KubernetesExecutor } from "../k8s/executor.js";
 import { openStores, type Stores } from "../store/index.js";
 import { createLinearTracker } from "../tracker/linear/index.js";
 import type { Tracker } from "../tracker/types.js";
@@ -21,6 +25,8 @@ export interface Runtime {
   stores: Stores;
   tracker: Tracker;
   deps: PipelineDeps;
+  /** On the Kubernetes runtime: the executor that runs each job as a run pod, which `serve` also reattaches and serves callbacks for. */
+  kubernetes?: KubernetesExecutor;
 }
 
 export const openMirror = (loaded: LoadedConfig): Mirror =>
@@ -40,7 +46,12 @@ const brainRunner = (brain: Brain): Pick<PipelineDeps, "runBrain"> => ({
   runBrain: (_config, input: BrainInput): Promise<BrainRun> => brain.run(input, () => undefined),
 });
 
-export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promise<Runtime> => {
+/** On the Kubernetes runtime only `serve` runs jobs: a run pod reports to its internal run API, which nothing else serves. */
+export const INLINE_ON_KUBERNETES = "on the kubernetes runtime, jobs run in the dispatcher (steward serve); this command cannot run one inline";
+
+const refuseInline: RunExecutor = { execute: () => Promise.reject(new Error(INLINE_ON_KUBERNETES)) };
+
+export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: { serve?: boolean } = {}): Promise<Runtime> => {
   const { config, secrets, configPath } = loaded;
   const stores = openStores(config.dataDir);
   const tracker = openTracker(loaded, ctx);
@@ -61,8 +72,15 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext): Promi
     redactor: await buildRedactor(loaded),
     now: () => new Date(),
     ...(injectedBrain === undefined ? {} : brainRunner(injectedBrain)),
-    // serve gives each worker loop its own slot; inline runs (implement KEY, jobs retry) use slot 1 under run.lock.
-    ...(config.slots === undefined ? {} : { slot: { n: 1, client: new SlotClient(config.slots, ctx.factories?.slotRunner) } }),
   };
-  return { loaded, stores, tracker, deps };
+  const kubernetes = kubernetesRuntime(config);
+  if (kubernetes !== null) {
+    if (opts.serve !== true) return { loaded, stores, tracker, deps: { ...deps, executor: refuseInline } };
+    // Run pods replace slots: each brings its own services on fixed loopback ports.
+    const executor = kubernetesExecutor({ runtime: kubernetes, ...(ctx.factories?.cluster ?? clusterApis(kubernetes.namespace)), stores });
+    return { loaded, stores, tracker, deps: { ...deps, executor }, kubernetes: executor };
+  }
+  // serve gives each worker loop its own slot; inline runs (implement KEY, jobs retry) use slot 1 under run.lock.
+  const slot = config.slots === undefined ? {} : { slot: { n: 1, client: new SlotClient(config.slots, ctx.factories?.slotRunner) } };
+  return { loaded, stores, tracker, deps: { ...deps, ...slot } };
 };

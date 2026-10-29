@@ -117,6 +117,47 @@ const SecretsConfigSchema = z.discriminatedUnion("source", [
   }),
 ]);
 
+/** The run pod's app port: every run has the pod to itself, so the port is fixed. */
+export const RUN_POD_APP_PORT = 3000;
+
+/** A Kubernetes quantity, e.g. `2`, `500m`, `8Gi`. */
+const Quantity = z.string().regex(/^[0-9]+(\.[0-9]+)?(m|k|Ki|M|Mi|G|Gi|T|Ti)?$/);
+
+/**
+ * Where runs execute: in the steward's own process on this host (`local`), or each run as a Kubernetes Job whose agent
+ * container holds no credential (`kubernetes`; the claude-code brain only, `slots` and `resourceGuard` do not apply).
+ */
+const RuntimeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("local") }),
+  z.object({
+    kind: z.literal("kubernetes"),
+    namespace: z.string().min(1),
+    images: z.object({
+      steward: z.string().min(1),
+      agent: z.string().min(1),
+      egress: z.string().min(1),
+      postgres: z.string().min(1),
+      redis: z.string().min(1),
+      rabbitmq: z.string().min(1),
+    }),
+    /** Run pods at once; the worker runs this many lanes. */
+    maxConcurrent: z.number().int().positive(),
+    /** The dispatcher's internal run API as run pods reach it, e.g. `http://steward-internal.ticket-steward.svc:3021`. */
+    callbackUrl: z.url(),
+    minio: z.object({ endpoint: z.url(), bucket: z.string().min(1).default("steward-sessions") }),
+    aws: z.object({ roleArn: z.string().min(1), region: z.string().min(1) }),
+    resources: z.object({ agent: z.object({ cpu: Quantity, memory: Quantity }) }),
+    /** Private ranges run pods may still reach (the NetworkPolicy's exceptions). */
+    egressAllowCidrs: z.array(z.string().min(1)).default([]),
+    /** The run pods' service account; it has no token mounted and no role in the cluster. */
+    serviceAccount: z.string().min(1).default("steward-run"),
+    /** The ConfigMap holding the steward's config dir, and the config file's path where run pods mount it. */
+    config: z
+      .object({ configMap: z.string().min(1).default("steward-config"), path: z.string().startsWith("/").default("/etc/ticket-steward/steward.config.ts") })
+      .prefault({}),
+  }),
+]);
+
 export const StewardConfigSchema = z.object({
   dataDir: z.string(),
   brain: z.discriminatedUnion("kind", [
@@ -178,6 +219,8 @@ export const StewardConfigSchema = z.object({
   chat: ChatSchema.optional(),
   /** Unset reads `.env` from the config dir, as `{ source: "file" }` does. */
   secrets: SecretsConfigSchema.optional(),
+  /** Unset is `{ kind: "local" }`. */
+  runtime: RuntimeSchema.optional(),
 }).superRefine((config, ctx) => {
   if (config.greptile !== undefined) {
     if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["greptile"], message: "greptile requires implement" });
@@ -194,7 +237,13 @@ export const StewardConfigSchema = z.object({
   if (config.slots !== undefined && config.workspace.port !== undefined) {
     ctx.addIssue({ code: "custom", path: ["workspace", "port"], message: "workspace.port was replaced by slots.appPortBase (see docs/ops.md)" });
   }
-  if (config.slots === undefined && config.workspace.port === undefined) {
+  if (config.runtime?.kind === "kubernetes") {
+    if (config.brain.kind !== "claude-code") ctx.addIssue({ code: "custom", path: ["runtime"], message: 'the kubernetes runtime requires brain.kind "claude-code"' });
+    if (config.workspace.overlayTemplateDir === undefined) {
+      ctx.addIssue({ code: "custom", path: ["workspace", "overlayTemplateDir"], message: "the kubernetes runtime requires workspace.overlayTemplateDir" });
+    }
+  }
+  if (config.slots === undefined && config.workspace.port === undefined && config.runtime?.kind !== "kubernetes") {
     ctx.addIssue({ code: "custom", path: ["workspace", "port"], message: "workspace.port is required unless slots is set" });
   }
 });
@@ -212,9 +261,21 @@ export type SecretsConfig = NonNullable<StewardConfig["secrets"]>;
 export type ResourceGuardConfig = z.infer<typeof ResourceGuardSchema>;
 export const RESOURCE_GUARD_DEFAULTS: ResourceGuardConfig = ResourceGuardSchema.parse({});
 export type SlotsConfig = NonNullable<StewardConfig["slots"]>;
+export type RuntimeConfig = NonNullable<StewardConfig["runtime"]>;
+export type KubernetesRuntime = Extract<RuntimeConfig, { kind: "kubernetes" }>;
 
-/** Slot n's app port with `slots`, otherwise `workspace.port`; config load guarantees one of them. */
-export const appPortOf = (config: Pick<StewardConfig, "slots" | "workspace">, n: number): number => {
+/** The configured runtime; unset is local. */
+export const runtimeOf = (config: Pick<StewardConfig, "runtime">): RuntimeConfig => config.runtime ?? { kind: "local" };
+
+/** The Kubernetes runtime block, or null on the local runtime. */
+export const kubernetesRuntime = (config: Pick<StewardConfig, "runtime">): KubernetesRuntime | null => {
+  const runtime = runtimeOf(config);
+  return runtime.kind === "kubernetes" ? runtime : null;
+};
+
+/** The run pod's app port on Kubernetes, else slot n's with `slots`, otherwise `workspace.port`; config load guarantees one of them. */
+export const appPortOf = (config: Pick<StewardConfig, "slots" | "workspace"> & Partial<Pick<StewardConfig, "runtime">>, n: number): number => {
+  if (config.runtime?.kind === "kubernetes") return RUN_POD_APP_PORT;
   if (config.slots !== undefined) return config.slots.appPortBase + n;
   if (config.workspace.port === undefined) throw new Error("workspace.port is required unless slots is set");
   return config.workspace.port;

@@ -52,6 +52,8 @@ export interface Job {
   wakeRequested: boolean;
   /** The slot the job was claimed on (each worker lane's own; 1 for inline runs); `acquireLease` skips a running job's. */
   slot: number | null;
+  /** The run (`<jobId>-<attempt>`) the job's latest attempt executes as a run pod; null on the local runtime. */
+  runId: string | null;
   /**
    * Stored columns holding JSON that cannot be read: a bad result is null, a bad trigger is a bare `cli` trigger built from
    * the row's columns. Such a job must fail, not run.
@@ -87,6 +89,7 @@ interface JobRow {
   not_before: string | null;
   wake_requested: number;
   slot: number | null;
+  run_id: string | null;
 }
 
 const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "loop", "chat"]);
@@ -133,6 +136,7 @@ const toJob = (row: JobRow): Job => {
     notBefore: row.not_before,
     wakeRequested: row.wake_requested === 1,
     slot: row.slot,
+    runId: row.run_id,
     unreadable,
   };
 };
@@ -186,6 +190,7 @@ export class JobStore {
   private readonly storePushed;
   private readonly storeSession;
   private readonly storeWorkspace;
+  private readonly storeRun;
   private readonly selectLatestSession;
   private readonly selectImplementForBranch;
   private readonly selectSessionWorktrees;
@@ -257,6 +262,7 @@ export class JobStore {
     this.storePushed = db.prepare<[string, number]>("UPDATE jobs SET pushed_at = ? WHERE id = ?");
     this.storeSession = db.prepare<[string, number]>("UPDATE jobs SET session_id = ? WHERE id = ?");
     this.storeWorkspace = db.prepare<[string, string, number]>("UPDATE jobs SET worktree_name = ?, base_sha = ? WHERE id = ?");
+    this.storeRun = db.prepare<[string, number]>("UPDATE jobs SET run_id = ? WHERE id = ?");
     this.selectLatestSession = db.prepare<[string], JobRow>(
       `SELECT * FROM jobs WHERE issue_id = ? AND kind = 'implement' AND session_id IS NOT NULL AND worktree_name IS NOT NULL
        ORDER BY id DESC LIMIT 1`,
@@ -374,6 +380,11 @@ export class JobStore {
     this.storeWorkspace.run(worktreeName, baseSha, id);
   }
 
+  /** The run pod the job's current attempt runs as, recorded before the pod is created so a restart can find it. */
+  recordRun(id: number, runId: string): void {
+    this.storeRun.run(runId, id);
+  }
+
   /** The ticket's newest implement job that left a brain session in a recorded worktree. */
   latestImplementSession(issueId: string): Job | null {
     const row = this.selectLatestSession.get(issueId);
@@ -488,7 +499,20 @@ export class JobStore {
     return this.failRetired.run(RETIRED_KIND_ERROR, nowIso()).changes;
   }
 
-  requeueInterrupted(maxAttempts: number): { requeued: number; failed: number } {
+  /** Requeues (or, past `maxAttempts`, fails) every running job except those in `keep`: run pods the steward reattached to. */
+  requeueInterrupted(maxAttempts: number, keep: readonly number[] = []): { requeued: number; failed: number } {
+    if (keep.length > 0) {
+      return this.db.transaction(() => {
+        const kept = new Set(keep);
+        const ids = this.list({ status: "running", limit: Number.MAX_SAFE_INTEGER }).map((job) => job.id).filter((id) => !kept.has(id));
+        let requeued = 0;
+        for (const id of ids) {
+          this.requeueInterruptedJob(id, maxAttempts);
+          if (this.get(id)?.status === "queued") requeued += 1;
+        }
+        return { requeued, failed: ids.length - requeued };
+      })();
+    }
     return this.db.transaction(() => {
       const now = nowIso();
       this.closeRunningAttempts.run(now);

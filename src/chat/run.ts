@@ -121,6 +121,7 @@ const withLeftover = (reply: string, leftover: string): string =>
  * pushed branch head (else the implement job's base). Either a spec to execute, or the job's outcome.
  */
 const prepareChat = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, session: AgentSession): Promise<{ spec: RunSpec } | { outcome: JobOutcome }> => {
+  if (ctx.resume !== undefined) return { spec: ctx.resume };
   const port = jobPort(deps);
   const paths = jobPaths(ctx, deps, { worktreeName: session.worktreeName });
   const worktreePath = join(paths.workRoot, paths.worktreeName);
