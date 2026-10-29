@@ -1,4 +1,4 @@
-import { appendFile, chmod, mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
 import { NETWORK_POLICIES } from "../../src/cli/doctorKubernetes.js";
@@ -136,6 +136,17 @@ describe("steward doctor", () => {
     expect(orbitCalls[0]?.env).not.toHaveProperty("GITLAB_TOKEN");
   });
 
+  it("fails the config while the label trigger is still configured, naming the way work starts now", async () => {
+    const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, fetchUrl: repo.repo, port: await freeTcpPort(), serverPort: await freeTcpPort() });
+    const source = await readFile(configPath, "utf8");
+    await writeFile(configPath, source.replace('teams: ["API"] }', 'teams: ["API"], labels: {} }'));
+    const { ctx, stdout } = makeContext();
+
+    await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toEqual(new ExitSignal(1));
+
+    expect(stdout().split("\n")[0]).toBe("[fail] config: tracker.labels: assign the steward in Linear instead (docs/ops.md)");
+  });
+
   it("warns, without failing, when Orbit is not installed", async () => {
     await writeFile(join(dir, ".env"), `${LINEAR_ENV}LINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
     const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, fetchUrl: repo.repo, port: await freeTcpPort(), serverPort: await freeTcpPort() });
@@ -202,7 +213,9 @@ describe("steward doctor", () => {
     it("fails naming the secrets when Linear refuses the client credentials", async () => {
       const refused = () => Response.json({ error: "invalid_client" }, { status: 401 });
       const line = await doctorLine(LINEAR_ENV, linearFetch(() => new Response("{}", { status: 200 }), [], refused));
-      expect(line).toContain("[fail] linear app: Linear rejected the steward's app credentials: check LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET");
+      expect(line).toBe(
+        "[fail] linear app: Linear rejected the steward's app credentials: check LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET (Secrets Manager DEV_STEWARD_LINEAR_CLIENT_ID and DEV_STEWARD_LINEAR_CLIENT_SECRET) and restart the steward.",
+      );
     });
 
     it("fails when Linear rejects the freshly minted token", async () => {

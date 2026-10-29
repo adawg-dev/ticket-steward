@@ -55,6 +55,8 @@ spec:
           image: ticket-steward/steward
           args: ["--config", "/etc/ticket-steward/steward.config.ts", "serve"]
           env:
+            # No secret is set here: config load reads each one from Secrets Manager through `secrets.map` (the Linear
+            # app's DEV_STEWARD_LINEAR_CLIENT_ID and DEV_STEWARD_LINEAR_CLIENT_SECRET among them; docs/ops.md §1.7, §1.13).
             # The SDK's default chain assumes the role with the projected token; nothing else holds an AWS credential.
             - name: AWS_ROLE_ARN
               valueFrom:

@@ -69,6 +69,10 @@ resource "aws_iam_role" "steward" {
   max_session_duration = 3600
 }
 
+# DEV_* covers the steward's own secrets too, among them the Linear app's DEV_STEWARD_LINEAR_CLIENT_ID and
+# DEV_STEWARD_LINEAR_CLIENT_SECRET (docs/ops.md §1.7). The role never writes a secret. Only if the install check in
+# docs/ops.md §1.7 shows client-credentials tokens cannot act for the app's seat would the authorization-code fallback
+# need a statement allowing "secretsmanager:PutSecretValue" on its one refresh-token secret; that fallback is not built.
 data "aws_iam_policy_document" "dev_secrets" {
   statement {
     effect    = "Allow"

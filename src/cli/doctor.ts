@@ -416,6 +416,20 @@ const orbitChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Check[
   ];
 };
 
+/**
+ * A config that does not load, on one line: each schema issue as `path: message` (a message that already names its key,
+ * such as a removed key's, as it is), anything else as its message.
+ */
+const configError = (err: unknown): string => {
+  if (!(err instanceof z.ZodError)) return errorMessage(err);
+  return err.issues
+    .map((issue) => {
+      const path = issue.path.map(String).join(".");
+      return path === "" || issue.message.startsWith(`${path}:`) ? issue.message : `${path}: ${issue.message}`;
+    })
+    .join("; ");
+};
+
 const runChecks = async (checks: Check[], ctx: CliContext): Promise<boolean> => {
   let failed = false;
   for (const check of checks) {
@@ -451,7 +465,7 @@ export const registerDoctor = (program: Command, ctx: CliContext): void => {
       try {
         loaded = await loadFromProgram(program, ctx, { linear: true });
       } catch (err) {
-        println(ctx, `[fail] config: ${errorMessage(err)}`);
+        println(ctx, `[fail] config: ${configError(err)}`);
         await runChecks([userCheck], ctx);
         return exitWith(ctx, 1);
       }

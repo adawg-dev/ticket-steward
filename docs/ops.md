@@ -186,87 +186,93 @@ Either way, `server.publicUrl` in the config is `https://steward.example.com` an
 steward itself listens on plain HTTP on `127.0.0.1:3020`. Only `/health` and
 `/webhooks/linear` exist, and the webhook is verified, so exposing the port is acceptable.
 
-### 1.7 Linear API key and webhook
+### 1.7 Linear app and webhooks
 
-The steward authenticates to Linear with a personal API key. It reads tickets and changes
-their labels, nothing else; every label change appears as the user who owns the key, so give it
-a user of its own.
+The steward is a Linear **app**: a workspace admin installs it once, it gets its own seat (it shows up as an agent people
+can assign and @mention), and it never acts as a person. It authenticates with the OAuth client-credentials grant: the
+dispatcher mints an access token from the app's client id and secret, holds it in memory only, re-mints it daily and
+after a 401, and revokes it on shutdown. No refresh token or other long-lived Linear secret is stored anywhere, and no
+CLI command, brain or run pod ever holds the token. `LINEAR_API_KEY` and the label trigger (`tracker.labels`) are gone.
 
-1. Create a dedicated Linear user for the steward (for example "Ticket Steward",
-   `steward@example.com`) and add it to every allowlisted team (`tracker.teams`).
-2. Signed in as that user, open Settings → Account → Security & access → Personal API
-   keys and create a key named "ticket-steward". Grant **Read** and **Write** (nothing
-   else; label changes need Write), and restrict it to the allowlisted teams. A key made
-   before 2026-10-28 with **Create comments** and **File uploads** still works; those two
-   are no longer used.
-3. Put it in `.env` as `LINEAR_API_KEY`. The steward sends it as a raw
-   `Authorization: <key>` header, not as a Bearer token.
-4. As a workspace admin, open Settings → API → Webhooks and create a webhook with the URL
-   `https://steward.example.com/webhooks/linear` (`<server.publicUrl>/webhooks/linear`).
-   Select only the **Issues** data-change event, and scope it to the allowlisted teams or
-   to all public teams. The steward acts only on a ticket created with, or first given, the
-   `ready-for-agent` label (§1.7a): a ticket created without it is skipped ("no implement
-   label") and every other delivery is ignored.
-5. Copy the webhook's signing secret into `.env` as `LINEAR_WEBHOOK_SECRET`.
+1. **Create the OAuth app.** As a workspace admin, Settings → API → OAuth applications → New. Name it (for example
+   "Ticket Steward"; this is the name people assign), give it an icon, and set any callback URL (the
+   client-credentials grant never redirects; `<server.publicUrl>/health` will do).
+2. **Webhooks.** In the app, enable webhooks with the URL `<server.publicUrl>/webhooks/linear` and select **Agent
+   session events**, **Permission changes** and **Issues** (the steward uses Issues to see itself removed as a
+   ticket's delegate). Copy the signing secret: it is `LINEAR_WEBHOOK_SECRET`.
+3. **Client credentials.** In the app, enable **Client credentials** tokens. Copy the client id and secret: they are
+   `LINEAR_CLIENT_ID` and `LINEAR_CLIENT_SECRET` in `.env`, or, on AWS, the Secrets Manager entries
+   `DEV_STEWARD_LINEAR_CLIENT_ID` and `DEV_STEWARD_LINEAR_CLIENT_SECRET` (§1.13), read like every other `DEV_*` value.
+4. **Install it for the workspace.** Still as an admin, open the app's authorization URL with `actor=app` and the
+   steward's scopes, and approve it for the whole workspace:
 
-There is no authorization step: the key is read from `.env` when the process starts.
-`steward doctor` (next section) confirms it works and names the user it authenticates as.
+   ```
+   https://linear.app/oauth/authorize?client_id=<client id>&redirect_uri=<callback URL>&response_type=code&scope=read,write,app:assignable,app:mentionable&actor=app
+   ```
 
-**ticket-gateway.** ticket-gateway issues arrive through the same Issues webhook and are
-treated like any other ticket: nothing happens until a person adds `ready-for-agent`.
+   The steward mints its tokens with the same scopes (`read,write,app:assignable,app:mentionable`): `app:assignable`
+   lets people delegate tickets to it and `app:mentionable` lets them @mention it.
+5. **Allowlisted teams.** The app sees the whole workspace, but the steward acts only on tickets of `tracker.teams`
+   (an empty list means every team); anything else is ignored.
+6. **Brain.** The Linear app needs `brain.kind: "claude-code"` (steering and stop need its streaming input); config
+   load fails otherwise.
 
-**Enrich was removed on 2026-10-28.** The steward no longer triages tickets or writes an
-Enrichment section; `ready-for-agent` covers it, and implement still reads the agent brief of
-tickets enriched before then.
+**Verify the install** before relying on it. Run `steward doctor`: the `linear app` line mints a token, reads
+`viewer { id name }` with it and revokes it again (`[ok] linear app: authenticated as Ticket Steward (app user <id>)`).
+Then delegate a throwaway ticket of an allowlisted team to the steward: within 10 seconds its agent panel shows "Picked
+this up; reading the ticket", and the run's progress follows. That proves a client-credentials token can post activities in the app's
+sessions. If doctor passes but the panel stays empty and the log shows Linear refusing `agentActivityCreate`, the
+client-credentials token cannot act for the app's seat. The only acceptable fallback is then the authorization-code
+flow with `actor=app`, its rotating refresh token kept in Secrets Manager (the dispatcher's AWS role gains
+`secretsmanager:PutSecretValue` on that one secret; see `deploy/aws/steward-role.tf.example`). It is not built yet:
+stop there and raise it.
 
-**Linear is labels-only (2026-10-28).** The steward never comments on, rewrites or uploads to a
-Linear ticket; its only Linear writes are label changes. Everything it has to say goes on the
-merge request: the implement summary (once the loop finds the MR), the fix loop's pass,
-hand-back and stop notes, and restart notices. A hand-back before any MR exists (implement
-needs info, failed, or found a branch already there) sets the label only; the reason, the
-agent's questions and any detail stay in the job record, so read them with
-`steward jobs show <id>`. Without a `greptile` block there is no loop, so nothing is posted on
-the MR and the `agent-implemented` label is the signal. A config still carrying the enrich keys
-fails to load with "`<key>` was removed with enrich": delete top-level `prompt`,
-`tracker.gatewayIssues`, `tracker.bugLabels` and `tracker.labels.triage`, and the
-`prompts/enrich.md` file. `implement` (with `tracker.labels` and `GITLAB_PUSH_TOKEN`) is
-now required. Enrich jobs left queued or running in the database are failed with "enrich was
-removed; this job will not run" when the worker starts; finished ones stay in `steward jobs`
-as history. The `needs-triage` label is no longer read and can be deleted in Linear.
+**What starts work.**
 
-### 1.7a Label workflows
+- Delegating a ticket to the steward (assigning it in Linear's agent field) starts an implement run, unless the
+  ticket already has a loop, which is resumed instead (§1.7b). With `linear.moveToStarted` on (the default) the ticket
+  moves to its team's first started state if it is not there or later; when the MR opens it moves to
+  `linear.reviewStateName` ("In Review").
+- An @mention on a ticket the steward has worked on answers in a chat run that resumes its session; on a ticket it
+  never had, the answer is "Assign me to the ticket to start work."
+- A prompt in the agent panel steers the active run (the run gets it between turns), or resumes the session in a chat
+  when nothing runs. Stop ends the run with outcome `stopped`, which is not retried; the next prompt resumes it.
+- Removing the steward as delegate stops the run and parks its loop (§1.7b, "Unassign, revive, reassign").
 
-`tracker.labels` (use `labels: {}` for the default names) is required. The steward acts only on
-a ticket created with, or first given, the `ready-for-agent` label; the decision **whether an
-agent implements a ticket** stays with people. The steward never applies that label, never
-opens a merge request, and its git work stops at pushing one new branch; the kickoff pipeline
-opens the MR.
+**What the panel shows.** The run's thinking as thoughts, its tool calls as actions (edits and commands with their
+result), its plan, its questions (as an elicitation you answer in the panel), and a final response with the summary,
+checks and media; fix rounds and MR replies go into the ticket's current session. Everything posted passes the run
+redactor and placeholder and guard-value stripping; no raw command output or file contents reach Linear, which the
+whole workspace can read. Posting is rate limited per session (`linear.activityIntervalMs`, 2 s): when it falls
+behind, transient actions are dropped first and the final response never is.
 
-Create four labels in Linear at the workspace level, plus `agent-approved` with a `greptile`
-block (names match case-insensitively; override any of them under `tracker.labels`:
-`implement`, `needsInfo`, `readyForHuman`, `implemented`, `approved`). Putting them in one
-Linear label group is fine and keeps a ticket on one stage at a time: the steward swaps a label
-in a single update):
+**Settings.** Behaviour that may change while the steward runs lives in the dispatcher's DB, seeded from the config:
+`steward settings get [key]`, `steward settings set <key> <value>` (through serve's admin API; every change is
+audited). The Linear ones are `linear.reviewStateName`, `linear.moveToStarted`, `linear.reviveByMention` and
+`linear.activityIntervalMs`.
 
-| Label | Applied by | Meaning |
-| --- | --- | --- |
-| `ready-for-agent` | person | Implement this ticket. |
-| `needs-info` | steward | Something only a person can supply is missing; the questions are in `steward jobs show <id>`. |
-| `ready-for-human` | steward | An agent tried and handed back. |
-| `agent-implemented` | steward | An agent pushed a branch for this ticket. |
+**Moving from the label trigger.** A config that still has `tracker.labels` fails to load with "tracker.labels:
+assign the steward in Linear instead (docs/ops.md)" (doctor's `config` line says the same): delete the key, set the
+two client secrets, install the app and replace the old Issues-only workspace webhook with the app's (delete the old
+one; its secret is no longer used). Loops started by labels keep running; their label changes are no-ops. The old
+labels (`ready-for-agent`, `needs-info`, `ready-for-human`, `agent-implemented`, `agent-approved`) are no longer read or
+written and can be deleted. Revoke the old personal API key once the app works.
 
-```
-ready-for-agent ──implement job──▶ agent-implemented  (branch pushed)
-                                   ├──▶ ready-for-human  (tried, failed; nothing pushed)
-                                   └──▶ needs-info       (too vague; nothing changed)
-```
+**Enrich was removed on 2026-10-28.** The steward no longer triages tickets or writes an Enrichment section; implement
+still reads the agent brief of tickets enriched before then. A config still carrying the enrich keys fails to load
+with "`<key>` was removed with enrich": delete top-level `prompt`, `tracker.gatewayIssues`, `tracker.bugLabels` and the
+`prompts/enrich.md` file. Enrich jobs left in the database are failed with "enrich was removed; this job will not run".
 
-A label counts only when it is first added (or present when the ticket is created); removing
-and re-adding it does not re-run a ticket with an implement job that pushed a branch (a
-hand-back does not count, so adding `ready-for-agent` again after fixing the ticket re-runs
-it). Labels change last in every publish, so a failure earlier leaves the trigger label on the
-ticket and the job `publish_failed` (`steward jobs retry <id>` re-publishes without re-running
-the brain or pushing again). `steward implement KEY` never swaps labels.
+**Linear stays quiet outside the panel.** The steward never comments on, rewrites or uploads to a Linear ticket; it
+talks in the agent panel, moves the workflow state, and sets itself back as delegate on a revive. Everything for the
+code goes on the merge request: the implement summary (once the loop finds the MR), every round's replies and note,
+hand-back and stop notes.
+
+### 1.7a Implement
+
+The decision **whether an agent implements a ticket** stays with people: only delegating the ticket to the steward
+starts it. The steward never opens a merge request, and its git work is pushing one new branch and fast-forwarding it;
+the kickoff pipeline opens the MR.
 
 **Push token.** Implementation needs `GITLAB_PUSH_TOKEN` in `.env`: a GitLab **project access
 token** with the **Developer** role and only the **`write_repository`** scope. Never give it
@@ -282,10 +288,7 @@ steward does. GitLab cannot enforce "only branches cut from dev"; the steward's 
 checks do. The list doctor expects to be protected is `implement.protectedBranches`
 (default `["main", "staging", "dev"]`).
 
-**`implement` config.** Absent means `ready-for-agent` is ignored: the webhook parser does not
-treat it as a trigger, so nothing is logged or queued (intake's "implement is not configured"
-skip remains only as a backstop). It requires `tracker.labels` and `GITLAB_PUSH_TOKEN`; config
-load fails otherwise.
+**`implement` config.** Required, with `GITLAB_PUSH_TOKEN`; config load fails otherwise.
 
 ```ts
 implement: {
@@ -341,8 +344,9 @@ are the overlay-file guard, a `write_repository`-only push token and human revie
 **Hand-backs are successes.** An existing ticket branch, no push, unpushed work, an invalid
 result, or the agent reporting `failed` or `needs_info` end the job `succeeded` with
 the warning `handed back: <reason>` (see it, with the detail and the agent's questions, in
-`steward jobs show`). The ticket gets `ready-for-human` or `needs-info` and no comment; they
-are the answer, not an error. Only a push or label-change failure is `publish_failed`.
+`steward jobs show`). The agent panel says so: the agent's questions as an elicitation (answer them in the panel and
+the same session carries on), any other hand-back as an error with its reason. They are the answer, not an error. Only
+a push failure is `publish_failed`.
 
 **`steward implement KEY --dry-run`.** Prints the implement prompt a run on the ticket would
 get, from the ticket as `serve`'s admin API reads it (the CLI never holds a Linear token, so this
@@ -353,27 +357,27 @@ start work.
 One implement job can hold the worker for about 90 minutes (setup, up to 60 of brain,
 checks); other heavy jobs queue behind it unless `slots` gives the worker more lanes.
 
-To smoke-test, label a throwaway ticket `ready-for-agent` and watch for the pushed branch
-and the swap to `agent-implemented` (and, with a `greptile` block, the implement summary note
-on the MR once the pipeline opens it). The first real push is also what proves the
+To smoke-test, delegate a throwaway ticket to the steward and watch its agent panel, the pushed branch and the move
+to the review state once the MR opens (and, with a `greptile` block, the implement summary note on the MR). The first real push is also what proves the
 token's Developer access: doctor's `push token` line only runs `ls-remote`.
 
 Whatever the trigger, the steward never works on a Done or Canceled ticket. The state is
-checked at intake, when a job starts, by the push tool before every push (which it refuses),
-and before every label change; a closed ticket fails the job without retry. This applies to `steward implement` too.
+checked at intake, when a job starts, and by the push tool before every push (which it refuses); a closed ticket fails the job without retry. This applies to `steward implement` too.
 
-### 1.7b Greptile fix loop (optional)
+### 1.7b Review loop on the merge request (optional)
 
-With a `greptile` block the steward does not stop at the push. It waits for the pipeline to open the merge request, waits for
-Greptile's review, resumes the implementing brain session to fix or decline each finding (the agent pushes its fix,
-one or more commits, through the push tool) and repeats until the review passes or it hands the ticket back. It needs `implement`, `codehost.kind: "gitlab"` and
-`brain.kind: "claude-code"`.
+With a `greptile` block the steward does not stop at the push. It waits for the pipeline to open the merge request,
+then treats every comment on it, from people and bots alike, as work: it resumes the implementing brain session to
+answer each one (a change pushed through the push tool and a reply, or a reply alone) and repeats while comments keep
+coming. Greptile is one reviewer among them: with it on, the loop asks for and waits for its review of every push. It
+needs `implement`, `codehost.kind: "gitlab"` and `brain.kind: "claude-code"`.
 
 ```ts
 greptile: {
   botUsername: "greptile-apple",          // the username Greptile comments as on the MR (required)
   prompt: "./prompts/fix.md",             // required; `steward init` writes prompts/fix.md
-  maxRounds: 5,                           // fix rounds after the implement push (round 0)
+  maxRounds: 5,                           // rounds in a row started only by bots or a red pipeline (setting greptile.maxRounds)
+  passScore: 5,                           // Greptile confidence that ends bots' rounds (setting greptile.passScore)
   pollSeconds: 300,                       // fallback poll; GitLab webhooks wake the loop at once
   mrTimeoutMinutes: 30,                   // wait for the pipeline to open the MR
   reviewTimeoutMinutes: 30,               // wait for Greptile to review the head
@@ -381,8 +385,36 @@ greptile: {
   ciLogLines: 200,                        // failed-job log lines given to the brain
   mcp: { url: "https://api.greptile.com/mcp" },
 },
-tracker: { labels: { approved: "agent-approved" } },   // applied when the loop passes
 ```
+
+`steward settings set greptile.enabled false` stops asking Greptile for reviews and waiting for them, without a
+restart; its comments are still work like any bot's.
+
+**Every comment is work.** Any new note on the MR from a person or a bot wakes the loop; the steward's own notes (they
+carry a hidden `ticket-steward:` marker) never do, and people need Developer access. Notes are batched over a quiet
+window (`review.quietMinutes`, 2 minutes) into one round, so a burst of comments is one round. A round's work list is
+every unresolved discussion whose latest note is not the steward's; for each, the agent changes code and replies with
+what changed, or replies only (an answer, a question back, why it disagrees). It never resolves a thread: whoever
+opened it decides. A note that arrives while a run is going is passed into the run as context, and the next round
+answers it in its thread.
+
+**Decisions.** A lasting instruction a person gives in any comment ("keep the v1 endpoint", "don't rename the
+queue"), on the MR or in an `/agent` chat, is recorded on the loop as a decision and shown to every later round and
+chat as something never to undo; the agent declines a comment that asks for what a decision rules out and says why. A
+round keeps only decisions whose author is a person who wrote in that round's discussions, never a bot's advice.
+
+**Rounds and the cap.** A round started only by bot notes or a red pipeline counts against `greptile.maxRounds`; at the
+cap the loop hands back with one note ("stopped after N rounds started by bots; a person's comment starts another").
+A round with a person's comment resets the count: people always get a round.
+
+**CI triage.** A red head pipeline is triaged before it counts as a round (`ci.triage`, on by default). A job that
+failed for an infrastructure reason (runner system failure, stuck or timed out, API or scheduler failure, no matching
+runner and similar) is retried, up to twice per job per commit. A job that looks flaky is retried once per job per
+commit (`ci.retryLimit`): its failing tests also failed on the default branch within `ci.lookbackDays` (14) by the
+MR's test report, or, when the bot's remote Orbit works, the Orbit graph finds the same job failing on the default
+branch or passing on retry on other refs. A retry costs no round and runs no agent; the MR and the agent panel say
+"Retried <job> (looked flaky: <signal>)". Still red after the retry, or no flaky signal: a normal round, and the agent
+is told what triage found.
 
 Waits are counted from the first poll of the wait, not from the push. Per round there are up to 30 minutes for the MR
 to open, then 30 minutes for Greptile's review and the pipeline together (they run in parallel and share one clock);
@@ -405,13 +437,13 @@ poll run at once; nothing else is queued, and every validly signed event is answ
 `gitlab webhook rejected` warning in the log. Without either secret `steward doctor` warns that the loop falls back to
 5-minute polling.
 
-**Passing.** For the MR's current head SHA: Greptile's summary says `Confidence Score: 5/5`, no Greptile discussion is
-unresolved, and the head pipeline is `success`. 4/5 never passes. A pass applies the `approved` label
-(`agent-approved`) and posts the round history as a note on the MR; people still merge.
+**Passing.** For the MR's current head SHA, with a green pipeline: nothing is left on the work list, or (for a round
+only bots started) Greptile's confidence is at least `greptile.passScore`. A pass posts the round history as a note on
+the MR; the loop then waits, and a new comment starts another round. People still merge.
 
-**Token.** `GITLAB_TOKEN` needs the `api` scope (not just `read_api`): the loop reads the MR and pipelines, replies to
-Greptile's threads and resolves them. `steward doctor` checks the scope, that `botUsername` exists, that the `approved`
-label exists in Linear and that the prompt file exists.
+**Token.** `GITLAB_TOKEN` needs the `api` scope (not just `read_api`): the loop reads the MR, pipelines and test reports, replies to
+threads, posts notes and retries jobs. `steward doctor` checks the scope, that `botUsername` exists and that the prompt
+file exists.
 
 **Kickoff side.**
 
@@ -421,14 +453,15 @@ label exists in Linear and that the prompt file exists.
 
 **States.** `awaiting_mr` (waiting for the pipeline to open the MR), `awaiting_review` (waiting for Greptile and the
 pipeline), `fixing` (a fix job is running), then an end state: `passed`, `handed_back` or `stopped` (the ticket was closed
-or the MR was merged or closed; for a merged or closed MR the steward says so in a note on it, and either way labels
-stay as they are).
+or the MR was merged or closed; for a merged or closed MR the steward says so in a note on it), or `unassigned` (see
+below).
 
-**Hand-back reasons.** The ticket becomes `ready-for-human`, and the MR gets a note with the reason, the last Greptile
-score and any detail (an output tail, paths); a loop whose MR never appeared only changes the label. Reasons:
+**Hand-back reasons.** The ticket stays in its review state, the agent panel says why, and the MR gets a note with the
+reason, the last Greptile score and any detail (an output tail, paths); a loop whose MR never appeared says so in the
+panel only. Reasons:
 no MR was opened; a person pushed to the branch; Greptile failed or never reviewed the head; no finished pipeline, or it
 failed or was canceled; the agent did not push its change, left unpushed work, pushed a change but reported no changes,
-or its push could not be confirmed; or the score is still below 5/5 after `maxRounds` fix rounds. The push tool's own
+or its push could not be confirmed; or bots started `greptile.maxRounds` rounds in a row. The push tool's own
 refusals (checks, secret guard, commit subjects) go back to the agent to fix, not to a person. The brain can also hand back itself when it cannot fix a finding. A round with no
 push hands back when Greptile's summary has no `Reviews (N)` counter, since its next review could not be told apart. A
 loop whose await, fix or hand-back job fails for good (out of attempts, or a crash) is handed back with that job's error
@@ -514,17 +547,18 @@ Every line is `[ok]`, `[warn]` or `[fail]`; the exit code is 1 if anything faile
 every `[fail]` before installing the unit. Checks: config parses; `.env` holds the brain,
 webhook and codehost secrets; the running user does not own `~/.ssh` or `~/.kube`;
 `dataDir` and `overlayDir` are 0700; the mirror exists, has `extensions.worktreeConfig`
-and fetches; the overlay has at least one file; the skills dir exists; `LINEAR_API_KEY` is set
-and answers a `viewer { id name }` query (the line names the user every write will appear
-as); `publicUrl/health` answers; the
-codehost MCP server starts and answers `tools/list`; with `tracker.labels`
-set, all five labels exist in Linear; with `implement` configured, `GITLAB_PUSH_TOKEN` can `ls-remote` the repo (a read, so it
+and fetches; the overlay has at least one file; the skills dir exists; `LINEAR_WEBHOOK_SECRET` is set;
+the Linear app's client credentials (`LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`) mint a token that answers a
+`viewer { id name }` query (the line names the app and its user id; doctor revokes the token at once), and a refused
+mint fails naming both secrets and their Secrets Manager names; `publicUrl/health` answers; the
+codehost MCP server starts and answers `tools/list`; with `implement` configured, `GITLAB_PUSH_TOKEN` can `ls-remote` the repo (a read, so it
 cannot prove Developer access; the first real push does) and, for GitLab, `implement.protectedBranches` are protected with
 no Developer-role or project-bot push or merge grant (read with `GITLAB_TOKEN`); Playwright's Chromium is installed;
 `workspace.port` is free, or, with `slots` (§1.10): `/usr/local/sbin/steward-slot` is root-owned and not
 group- or world-writable, `slots.socket` exists, is a socket and answers `check`, every slot's app and
 service ports are free (a slot left up is named), and every `slots.env` key is defined in the overlay. Under Docker
-Compose (§1.11) the ownership check is skipped, and doctor says so.
+Compose (§1.11) the ownership check is skipped, and doctor says so. A config that does not load is one `[fail] config`
+line naming each bad key, such as a leftover `tracker.labels` (§1.7).
 
 ```bash
 sudo cp ops/ticket-steward.service /etc/systemd/system/ticket-steward.service
@@ -538,10 +572,11 @@ curl -s https://steward.example.com/health
 
 ### 1.9 Smoke test
 
-1. Create a throwaway ticket in an allowlisted team without any label. `steward jobs`
-   shows no job for it, and the journal logs the delivery as `skip` ("no implement label").
-2. Add `ready-for-agent`. Within the job's run time a branch is pushed and the label swaps
-   to `agent-implemented` (or the ticket is handed back), as in §1.7a.
+1. Create a throwaway ticket in an allowlisted team. `steward jobs` shows no job for it: nothing starts until the
+   steward is its delegate.
+2. Delegate it to the steward. Within 10 seconds its agent panel says "Picked this up; reading the ticket" and the
+   ticket moves to its team's started state; within the job's run time a branch is pushed (or the panel says why it
+   handed back), as in §1.7a.
 3. `steward jobs` lists the implement job as `succeeded`.
 
 To see what a run on a ticket would be told:
@@ -801,7 +836,7 @@ sign-in fails with an invalid token.
 and `…:steward-run` and allowed `secretsmanager:GetSecretValue` on `DEV_*` in the region. Copy it into your
 Terraform, set `k3s_issuer_url` and `region`, and `terraform apply`; its output `steward_role_arn` is
 `runtime.aws.roleArn` and `awsRoleArn` below. The steward's own tokens are `DEV_` entries like any other (e.g.
-`DEV_STEWARD_LINEAR_API_KEY`, `DEV_STEWARD_GITLAB_TOKEN`), each a string or a one-key JSON object, as kickoff's
+`DEV_STEWARD_LINEAR_CLIENT_ID`, `DEV_STEWARD_LINEAR_CLIENT_SECRET`, `DEV_STEWARD_GITLAB_TOKEN`), each a string or a one-key JSON object, as kickoff's
 `preview.py` reads them. No access key is created anywhere.
 
 **Images.** Build from the repo root and push to a registry the nodes pull from:
@@ -835,7 +870,7 @@ docker build -f deploy/images/minio.Dockerfile -t "$REGISTRY/ticket-steward/mini
 **Config.** In `steward.config.ts`:
 
 ```ts
-secrets: { source: "aws", region: "eu-west-2", map: { LINEAR_API_KEY: "DEV_STEWARD_LINEAR_API_KEY", GITLAB_TOKEN: "DEV_STEWARD_GITLAB_TOKEN", /* … */ } },
+secrets: { source: "aws", region: "eu-west-2", map: { LINEAR_CLIENT_ID: "DEV_STEWARD_LINEAR_CLIENT_ID", LINEAR_CLIENT_SECRET: "DEV_STEWARD_LINEAR_CLIENT_SECRET", GITLAB_TOKEN: "DEV_STEWARD_GITLAB_TOKEN", /* … */ } },
 workspace: { /* … */ overlayTemplateDir: "/etc/ticket-steward/overlay-template" },
 runtime: {
   kind: "kubernetes",
@@ -948,7 +983,7 @@ blast radius should be "someone can read seeded test data", nothing more.
 The other half of the boundary is what the brain does **not** get: the brain child's
 environment is exactly `PATH`, `HOME`, `LANG`, `TERM`, `NODE_ENV=development`,
 `STEWARD_PORT`, `PORT`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0`, `CI=1`
-and its one brain credential. The Linear API key, webhook secret, mirror token and
+and its one brain credential. The Linear app's credentials and token, the webhook secret, mirror token and
 codehost token never enter that environment.
 
 ## 3. Rotating credentials
@@ -962,8 +997,8 @@ sudo systemctl restart ticket-steward
 
 | Credential | How to rotate |
 | --- | --- |
-| `LINEAR_API_KEY` | Signed in as the steward's Linear user, create a new personal API key with the same permissions and team restriction (§1.7), update `.env`, restart. Confirm with `steward doctor` (the `linear api key` line), then revoke the old key. A revoked or invalid key pauses the worker (§5). |
-| `LINEAR_WEBHOOK_SECRET` | Regenerate in the webhook's settings (Settings → API → Webhooks), update `.env`, restart. Deliveries signed with the old secret are rejected with 401 and Linear retries them (1 min, 1 h, 6 h), so do both steps within a minute. |
+| `LINEAR_CLIENT_SECRET` | In the steward's OAuth app (Settings → API → OAuth applications), rotate the client secret, update `.env` (or `DEV_STEWARD_LINEAR_CLIENT_SECRET` in Secrets Manager), restart. Confirm with `steward doctor` (the `linear app` line). Tokens minted with the old secret stop working; a dispatcher still running on it re-mints, is refused and pauses the worker (§5) until it restarts. The client id does not change. |
+| `LINEAR_WEBHOOK_SECRET` | Regenerate in the OAuth app's webhook settings, update `.env`, restart. Deliveries signed with the old secret are rejected with 401 and Linear retries them (1 min, 1 h, 6 h), so do both steps within a minute. |
 | `MIRROR_TOKEN` | Create the new read-only deploy token, update `.env`, restart. `Mirror.fetch()` re-sets the remote URL from the token on every fetch, so the next job picks it up; no `mirror init` needed. Confirm with `steward mirror fetch`, then revoke the old token. |
 | `GITLAB_PUSH_TOKEN` | Create a new token, update `.env`, restart; `steward doctor` confirms it reaches the repo; revoke the old one. |
 | `GITLAB_TOKEN` / `GITHUB_TOKEN` | Create the new token, update `.env`, restart. Confirm with `steward doctor` (the codehost MCP check). Revoke the old one. |
@@ -985,7 +1020,7 @@ steward jobs show 42
 
 1. **The job row.** `status` is one of `queued`, `running`, `succeeded`, `failed`,
    `publish_failed`, `skipped`. `attempts` counts claims. `trigger` says whether the job
-   came from `issue.created`, `issue.labeled`, `cli` or a fix loop. `error` is the last failure reason; `interrupted` means the process died mid-run
+   came from Linear (`linear`: a delegation, mention or prompt), an MR note (`chat`), `cli` or a fix loop (`loop`). `error` is the last failure reason; `interrupted` means the process died mid-run
    and the job was requeued or failed on restart. `implementResult` (implement jobs) and
    `fixResult` (fix jobs) hold the validated result or hand-back; a stored implement result
    makes `steward jobs retry <id>` publish-only. Jobs of kind `enrich` are history from
@@ -1019,28 +1054,29 @@ steward jobs gc           # run retention now: worktrees, artifacts, transcripts
 Failed jobs keep their worktree under `dataDir/work/<id>-<attempt>` when
 `workspace.keepOnFailure` is true; retention keeps the newest `retention.keptWorktrees`.
 
-## 5. Linear API key rejected
+## 5. Linear credentials rejected
 
-When Linear answers 401 (or an authentication error) to any call, the `LINEAR_API_KEY`
-is invalid or was revoked. The steward does not retry the call: the error reads "Linear
-rejected LINEAR_API_KEY (401): the key is invalid or revoked", and the first occurrence is
-logged at `error` level ("Linear API key rejected; the worker stops claiming jobs until the
-steward restarts"). From then on, until the process restarts:
+Every Linear call uses the app's in-memory token. On a 401 (or an authentication error) the steward mints a new token
+and retries once. When Linear refuses the mint itself (the client id or secret is wrong, rotated or the app was
+uninstalled), or refuses the fresh token too, retrying cannot help: the error reads "Linear rejected the steward's app
+credentials: check LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET (Secrets Manager DEV_STEWARD_LINEAR_CLIENT_ID and
+DEV_STEWARD_LINEAR_CLIENT_SECRET) and restart the steward.", and the first occurrence is logged at `error` level
+("Linear rejected the app's credentials; the worker stops claiming jobs until the steward restarts"). From then on,
+until the process restarts:
 
-- the worker stops claiming jobs; the job that hit the 401 goes back to the queue with
-  the attempt refunded (so it is never failed for the key), and new webhook deliveries
-  keep queueing;
-- `GET /health` returns 503 with `apiKeyRejected: true`;
-- `steward doctor` reports `[fail]` on the `linear api key` line;
-- the systemd unit stays up, since the process is healthy, so the signal is `/health`,
-  the journal and `doctor`, not a restart loop.
+- the worker stops claiming jobs; the job that hit it goes back to the queue with the attempt refunded (so it is
+  never failed for the credentials), and new webhook deliveries keep queueing;
+- `GET /health` returns 503 with `credentialsRejected: true`;
+- `steward doctor` reports `[fail]` on the `linear app` line;
+- the service stays up, since the process is healthy, so the signal is `/health`, the log and `doctor`, not a
+  restart loop.
 
-To recover, create a new key (§1.7, §3), put it in `.env` and restart:
+To recover, fix the client credentials (§1.7, §3) and restart:
 
 ```bash
 sudo -u steward -H bash -lc 'cd /etc/ticket-steward && steward doctor'
 sudo systemctl restart ticket-steward
-curl -s https://steward.example.com/health     # apiKeyRejected: false
+curl -s https://steward.example.com/health     # credentialsRejected: false
 ```
 
 The queued jobs are picked up after the restart.

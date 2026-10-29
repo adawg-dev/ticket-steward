@@ -19,7 +19,8 @@ export default defineConfig({
   },
   retention: { keptWorktrees: 3, days: 30 },
   server: { port: 3020, publicUrl: "https://steward.example.com" },
-  // Required: label-driven implementation (ready-for-agent). Requires GITLAB_PUSH_TOKEN in .env: a project access token, Developer role, write_repository only.
+  // Required: implementation, started by delegating a ticket to the steward's Linear app (docs/ops.md §1.7, LINEAR_CLIENT_ID and
+  // LINEAR_CLIENT_SECRET, on AWS DEV_STEWARD_LINEAR_CLIENT_ID and DEV_STEWARD_LINEAR_CLIENT_SECRET). Requires GITLAB_PUSH_TOKEN in .env: a project access token, Developer role, write_repository only.
   // steward init writes prompts/implement.md; otherwise copy <ticket-steward>/prompts/implement.md to /etc/ticket-steward/prompts/implement.md.
   // prompts/repo.md beside this file (examples/kickoff/prompts/repo.md) is kickoff's own section of the implement, fix and chat prompts.
   implement: {
@@ -27,9 +28,10 @@ export default defineConfig({
     checks: ["pnpm turbo check-types lint --filter='...[{{baseSha}}]'"],
     commitAuthor: { name: "Ticket Steward", email: "steward@concentrate.ai" },
   },
-  // Greptile fix loop after the implement push (docs/ops.md §1.7b). Needs GITLAB_TOKEN with the api scope and
+  // Review loop after the implement push: every MR comment is answered, Greptile's among them (docs/ops.md §1.7b). Needs GITLAB_TOKEN with the api scope and
   // /etc/ticket-steward/prompts/fix.md (copy <ticket-steward>/prompts/fix.md). Kickoff's .greptile/config.json needs autoReview: ["open", "push"].
-  // A kickoff webhook to <publicUrl>/webhooks/gitlab (GITLAB_WEBHOOK_SIGNING_TOKEN) wakes the loop; it polls every 5 minutes otherwise.
+  // A kickoff webhook to <publicUrl>/webhooks/gitlab (GITLAB_WEBHOOK_SIGNING_TOKEN) with Comments, MR and Pipeline events wakes the loop;
+  // it polls every 5 minutes otherwise. Rounds, Greptile and CI triage are runtime settings (`steward settings get`).
   // greptile: { botUsername: "greptile-apple", prompt: "./prompts/fix.md" },
   // Parallel jobs, each on fresh local Postgres+TimescaleDB, Redis and RabbitMQ containers (docs/ops.md §1.10).
   // Without this block, put `port: 4100` back in workspace and jobs run one at a time against the overlay's services.
