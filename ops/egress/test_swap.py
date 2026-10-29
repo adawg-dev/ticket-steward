@@ -15,11 +15,12 @@ STRIPE_PH = "STEWARD_PH_STRIPE_SECRET_KEY_0123456789abcdef"
 STRIPE_REAL = "sk_test_1"
 TWILIO_PH = "STEWARD_PH_TWILIO_AUTH_TOKEN_fedcba9876543210"
 TWILIO_REAL = "real"
+EVERYWHERE = frozenset({"headers", "query", "body"})
 
 
 def rules() -> list[Rule]:
     return [
-        Rule(placeholder=STRIPE_PH, value=STRIPE_REAL, hosts=["api.stripe.com", "*.stripe.com"]),
+        Rule(placeholder=STRIPE_PH, value=STRIPE_REAL, hosts=["api.stripe.com", "*.stripe.com"], swap_in=EVERYWHERE),
         Rule(placeholder=TWILIO_PH, value=TWILIO_REAL, hosts=["api.twilio.com"]),
     ]
 
@@ -57,7 +58,7 @@ class RequestSwap(unittest.TestCase):
         sub = request_flow("https://files.stripe.com/x", headers={"authorization": f"Bearer {STRIPE_PH}"})
         self.swap.request(sub)
         self.assertEqual(sub.request.headers["authorization"], f"Bearer {STRIPE_REAL}")
-        for host in ("stripe.com.evil.example", "evilstripe.com"):
+        for host in ("stripe.com.evil.example", "evilstripe.com", "a.b.stripe.com", "stripe.com"):
             with self.subTest(host=host), self.assertLogs("steward.egress", "WARNING"):
                 flow = request_flow(f"https://{host}/x", headers={"authorization": f"Bearer {STRIPE_PH}"})
                 self.swap.request(flow)
@@ -100,15 +101,45 @@ class RequestSwap(unittest.TestCase):
         self.assertEqual(flow.request.headers["authorization"], f"Bearer {STRIPE_PH}")
 
     def test_only_the_rules_for_that_host_are_swapped(self) -> None:
-        flow = request_flow("https://api.stripe.com/", headers={"x-a": STRIPE_PH, "x-b": TWILIO_PH})
+        flow = request_flow("https://api.stripe.com/", headers={"x-api-key": STRIPE_PH, "x-auth-token": TWILIO_PH})
         with self.assertLogs("steward.egress", "WARNING") as logs:
             self.swap.request(flow)
         self.assertEqual(logs.output, ["WARNING:steward.egress:placeholder for TWILIO_AUTH_TOKEN sent to api.stripe.com, not swapped"])
-        self.assertEqual(flow.request.headers["x-a"], STRIPE_REAL)
-        self.assertEqual(flow.request.headers["x-b"], TWILIO_PH)
+        self.assertEqual(flow.request.headers["x-api-key"], STRIPE_REAL)
+        self.assertEqual(flow.request.headers["x-auth-token"], TWILIO_PH)
+
+    def test_by_default_only_credential_headers_carry_the_real_value(self) -> None:
+        swap = Swap([Rule(placeholder=TWILIO_PH, value=TWILIO_REAL, hosts=["api.twilio.com"])])
+        flow = request_flow(
+            f"https://api.twilio.com/x?k={TWILIO_PH}",
+            json.dumps({"note": TWILIO_PH}).encode(),
+            {"authorization": f"Bearer {TWILIO_PH}", "x-api-key": TWILIO_PH, "x-note": TWILIO_PH, "content-type": "application/json"},
+        )
+        with self.assertLogs("steward.egress", "WARNING") as logs:
+            swap.request(flow)
+        self.assertEqual(flow.request.headers["authorization"], f"Bearer {TWILIO_REAL}")
+        self.assertEqual(flow.request.headers["x-api-key"], TWILIO_REAL)
+        self.assertEqual(flow.request.headers["x-note"], TWILIO_PH)
+        self.assertEqual(flow.request.path, f"/x?k={TWILIO_PH}")
+        self.assertEqual(json.loads(flow.request.content or b""), {"note": TWILIO_PH})
+        self.assertEqual(
+            logs.output,
+            [
+                f"WARNING:steward.egress:placeholder for TWILIO_AUTH_TOKEN in {place} to api.twilio.com, not swapped: its rule swaps headers only"
+                for place in ("the x-note header", "the query string", "the body")
+            ],
+        )
+
+    def test_a_rule_that_opts_in_to_the_query_does_not_swap_the_body(self) -> None:
+        swap = Swap([Rule(placeholder=TWILIO_PH, value=TWILIO_REAL, hosts=["api.twilio.com"], swap_in=frozenset({"headers", "query"}))])
+        flow = request_flow(f"https://api.twilio.com/x?k={TWILIO_PH}", TWILIO_PH.encode(), {"content-type": "text/plain"})
+        with self.assertLogs("steward.egress", "WARNING"):
+            swap.request(flow)
+        self.assertEqual(flow.request.path, f"/x?k={TWILIO_REAL}")
+        self.assertEqual(flow.request.content, TWILIO_PH.encode())
 
     def test_the_value_is_encoded_for_the_part_it_lands_in(self) -> None:
-        swap = Swap([Rule(placeholder=STRIPE_PH, value='a b&c"\\', hosts=["api.stripe.com"])])
+        swap = Swap([Rule(placeholder=STRIPE_PH, value='a b&c"\\', hosts=["api.stripe.com"], swap_in=EVERYWHERE)])
         form = request_flow(
             f"https://api.stripe.com/x?k={STRIPE_PH}", f"key={STRIPE_PH}&n=1".encode(), {"content-type": "application/x-www-form-urlencoded"}
         )
@@ -157,6 +188,31 @@ class ResponseScrub(unittest.TestCase):
         flow = respond(request_flow("https://api.stripe.com/"), f"{escaped} k%2Fy%2Bz%221 k%2Fy%2Bz%221".encode())
         swap.response(flow)
         self.assertEqual(flow.response.content, f"{STRIPE_PH} {STRIPE_PH} {STRIPE_PH}".encode())
+
+    def test_base64_and_other_json_escapes_of_the_value_are_scrubbed(self) -> None:
+        value = "AKIA/abc+def/ghi=jkl"
+        swap = Swap([Rule(placeholder=STRIPE_PH, value=value, hosts=["api.stripe.com"])])
+        reflected = [
+            base64.b64encode(f"AC1:{value}".encode()).decode(),
+            base64.b64encode(f"x{value}y".encode()).decode(),
+            base64.urlsafe_b64encode(f"ab{value}".encode()).decode(),
+            json.dumps(value)[1:-1].replace("/", "\\/"),
+            "".join(f"\\u{ord(char):04x}" for char in value),
+            "".join(f"\\u{ord(char):04X}" for char in value),
+        ]
+        flow = respond(request_flow("https://api.stripe.com/"), " ".join(reflected).encode())
+        swap.response(flow)
+        content = (flow.response.content or b"").decode()
+        for form in reflected:
+            with self.subTest(form=form):
+                self.assertNotIn(form, content)
+        self.assertEqual(content.count(STRIPE_PH), len(reflected))
+
+    def test_trailers_are_scrubbed(self) -> None:
+        flow = respond(request_flow("https://api.stripe.com/"), b"{}")
+        flow.response.trailers = http.Headers(x_echo=STRIPE_REAL)
+        self.swap.response(flow)
+        self.assertEqual(flow.response.trailers["x-echo"], STRIPE_PH)
 
     def test_a_compressed_response_is_scrubbed(self) -> None:
         flow = respond(request_flow("https://api.stripe.com/"), b"")
@@ -219,7 +275,7 @@ class Streaming(unittest.TestCase):
 
 class WebSockets(unittest.TestCase):
     def test_client_messages_are_swapped_for_an_allowlisted_host_and_server_messages_scrubbed(self) -> None:
-        swap = Swap([Rule(placeholder=STRIPE_PH, value=STRIPE_REAL, hosts=["example.com"])])
+        swap = Swap([Rule(placeholder=STRIPE_PH, value=STRIPE_REAL, hosts=["example.com"], swap_in=EVERYWHERE)])
         flow = tflow.twebsocketflow()
         assert flow.websocket is not None
         flow.websocket.messages[-1].content = f"auth {STRIPE_PH}".encode()
@@ -230,6 +286,16 @@ class WebSockets(unittest.TestCase):
         flow.websocket.messages[-1].content = f"bad {STRIPE_REAL}".encode()
         swap.websocket_message(flow)
         self.assertEqual(flow.websocket.messages[-1].content, f"bad {STRIPE_PH}".encode())
+
+    def test_a_client_message_is_not_swapped_unless_the_rule_swaps_bodies(self) -> None:
+        swap = Swap([Rule(placeholder=STRIPE_PH, value=STRIPE_REAL, hosts=["example.com"])])
+        flow = tflow.twebsocketflow()
+        assert flow.websocket is not None
+        flow.websocket.messages[-1].content = f"auth {STRIPE_PH}".encode()
+        flow.websocket.messages[-1].from_client = True
+        with self.assertLogs("steward.egress", "WARNING"):
+            swap.websocket_message(flow)
+        self.assertEqual(flow.websocket.messages[-1].content, f"auth {STRIPE_PH}".encode())
 
     def test_a_client_message_to_another_host_is_logged_and_unchanged(self) -> None:
         swap = Swap([Rule(placeholder=STRIPE_PH, value=STRIPE_REAL, hosts=["api.stripe.com"])])
@@ -263,11 +329,20 @@ class RulesFile(unittest.TestCase):
     def test_a_malformed_rules_file_is_refused_without_echoing_its_values(self) -> None:
         for content in ("{", "{}", json.dumps([{"placeholder": "x", "value": STRIPE_REAL, "hosts": ["a"]}]),
                         json.dumps([{"placeholder": STRIPE_PH, "value": "", "hosts": ["a"]}]),
-                        json.dumps([{"placeholder": STRIPE_PH, "value": STRIPE_REAL, "hosts": []}])):
+                        json.dumps([{"placeholder": STRIPE_PH, "value": STRIPE_REAL, "hosts": []}]),
+                        json.dumps([{"placeholder": STRIPE_PH, "value": STRIPE_REAL, "hosts": ["*.com"]}]),
+                        json.dumps([{"placeholder": STRIPE_PH, "value": STRIPE_REAL, "hosts": ["api.*.com"]}]),
+                        json.dumps([{"placeholder": STRIPE_PH, "value": STRIPE_REAL, "hosts": ["a.example"], "swapIn": ["body"]}]),
+                        json.dumps([{"placeholder": STRIPE_PH, "value": STRIPE_REAL, "hosts": ["a.example"], "swapIn": ["headers", "cookies"]}])):
             with self.subTest(content=content):
                 with self.assertRaises(exceptions.OptionsError) as raised:
                     load_rules(self.write(content))
                 self.assertNotIn(STRIPE_REAL, str(raised.exception))
+
+    def test_a_rule_without_swap_in_swaps_headers_only(self) -> None:
+        rules = load_rules(self.write(json.dumps([{"placeholder": STRIPE_PH, "value": STRIPE_REAL, "hosts": ["api.stripe.com"]},
+                                                   {"placeholder": TWILIO_PH, "value": TWILIO_REAL, "hosts": ["api.twilio.com"], "swapIn": ["headers", "body"]}])))
+        self.assertEqual([rule.swap_in for rule in rules], [frozenset({"headers"}), frozenset({"headers", "body"})])
 
     def test_a_missing_rules_file_is_refused(self) -> None:
         with self.assertRaises(exceptions.OptionsError):

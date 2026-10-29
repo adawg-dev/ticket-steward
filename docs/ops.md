@@ -841,6 +841,14 @@ runtime: {
 },
 ```
 
+The overlay template's env files take `{{secret:<id>@<host>,<host>}}` for an outbound API key: the agent's file gets a
+placeholder, and the egress sidecar swaps the real value into credential headers (`Authorization`, `x-api-key` and
+the like) on requests to those hosts only. A host is an exact name or `*.<domain>` with at least two labels, matching
+one label more (`*.stripe.com` matches `files.stripe.com`, not `a.b.stripe.com`); prefer exact names, and doctor warns
+about a wildcard on a domain anyone can have a subdomain of (`*.s3.amazonaws.com`, `*.vercel.app`). Append `;query`
+or `;body` (`{{secret:DEV_X@api.x.example;query}}`) only for an API that takes its key there: an API may store or
+echo what a request carries in a form the response scrubbing misses. `{{local}}` is a throwaway value per run.
+
 The config dir goes into the ConfigMap `steward-config` as one gzipped tar under the key `config.tgz`: ConfigMap keys
 are flat and the dir is not (the overlay template's `apps/<app>/.env`, prompts), and `--from-file=<dir>` would skip
 every subdirectory. The dispatcher and every run pod start with a `config-unpack` init container that unpacks it into
@@ -887,7 +895,7 @@ Route the public webhook URL to the Service `steward` port 3020 with your ingres
   it and whose JWKS has keys;
 - `aws role`: `runtime.aws.roleArn` can be assumed with that token;
 - `dev secrets`: every id in `secrets.map` and the overlay template is present and not empty (ids only are printed);
-- `overlay template`: no `{{signed:…}}` entry or other issue;
+- `overlay template`: no `{{signed:…}}` entry or other issue; warns about a wildcard host on a multi-tenant domain;
 - `minio sts`: the dispatcher signs in to MinIO with its `minio`-audience token and lists `sessions/`;
 - `network policies`: the five policies of `networkpolicy.yaml` exist;
 - `probe pod` (with `--probe-pod`): a throwaway pod like a run pod's agent container (the `steward-run` account, the

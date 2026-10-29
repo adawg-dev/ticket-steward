@@ -46,7 +46,7 @@ describe("renderOverlay", () => {
     expect(rendered.files[0]?.path).toBe("apps/api/.env");
     const placeholder = /^STRIPE_SECRET_KEY=(.*)$/m.exec(rendered.files[0]?.content ?? "")?.[1];
     expect(placeholder).toMatch(/^STEWARD_PH_STRIPE_SECRET_KEY_[0-9a-f]{16}$/);
-    expect(rendered.rules).toEqual([{ placeholder, value: "sk_test_1", hosts: ["api.stripe.com"] }]);
+    expect(rendered.rules).toEqual([{ placeholder, value: "sk_test_1", hosts: ["api.stripe.com"], swapIn: ["headers"] }]);
     expect(rendered.guardValues).toEqual(expect.arrayContaining(["sk_test_1", placeholder]));
   });
 
@@ -152,6 +152,45 @@ describe("renderOverlay", () => {
   });
 });
 
+describe("hosts and places", () => {
+  it("swaps into headers only unless the entry opts in to the query string or the body", async () => {
+    const templateDir = await template({ ".env": "A={{secret:DEV_A@a.example}}\nB={{secret:DEV_B@b.example;query}}\nC={{secret:DEV_C@c.example ; body ; query}}\n" });
+
+    const rendered = await renderOverlay({ templateDir, fetcher: fetcher({ DEV_A: "real-a", DEV_B: "real-b", DEV_C: "real-c" }) });
+
+    expect(rendered.rules.map((rule) => [rule.value, rule.hosts, rule.swapIn])).toEqual([
+      ["real-a", ["a.example"], ["headers"]],
+      ["real-b", ["b.example"], ["headers", "query"]],
+      ["real-c", ["c.example"], ["headers", "query", "body"]],
+    ]);
+  });
+
+  it("refuses an unknown place and a wildcard over fewer than two labels", async () => {
+    const templateDir = await template({ ".env": "A={{secret:DEV_A@a.example;cookies}}\nB={{secret:DEV_B@*.com}}\nC={{secret:DEV_C@*}}\nD={{secret:DEV_D@api.*.example}}\n" });
+
+    expect(await overlayTemplateIssues(templateDir)).toEqual([
+      '.env:1: {{secret:DEV_A@a.example;cookies}} names an unknown place "cookies"; only ;query and ;body may follow the hosts',
+      '.env:2: {{secret:DEV_B@*.com}} names an invalid host "*.com"; use a host name or *.<domain> with at least two labels',
+      '.env:3: {{secret:DEV_C@*}} names an invalid host "*"; use a host name or *.<domain> with at least two labels',
+      '.env:4: {{secret:DEV_D@api.*.example}} names an invalid host "api.*.example"; use a host name or *.<domain> with at least two labels',
+    ]);
+  });
+
+  it("warns about a wildcard on a domain anyone can have a subdomain of, not about its exact hosts", async () => {
+    const templateDir = await template({
+      ".env": "A={{secret:DEV_A@*.s3.amazonaws.com,*.stripe.com}}\nB={{secret:DEV_B@bucket.s3.amazonaws.com}}\nC={{secret:DEV_C@*.vercel.app}}\n",
+    });
+
+    const summary = await overlayTemplateSummary(templateDir);
+
+    expect(summary.issues).toEqual([]);
+    expect(summary.warnings).toEqual([
+      ".env:1: DEV_A goes to *.s3.amazonaws.com, a domain anyone can have a subdomain of; name the exact host",
+      ".env:3: DEV_C goes to *.vercel.app, a domain anyone can have a subdomain of; name the exact host",
+    ]);
+  });
+});
+
 describe("overlayTemplateIssues", () => {
   it("names every signed entry and secret without hosts, reading no secret", async () => {
     const templateDir = await template({ ".env": "A={{signed:DEV_X}}\nB={{secret:DEV_Y@a.example}}\n", "apps/web/.env": "C={{secret:DEV_Z}}\n" });
@@ -174,6 +213,7 @@ describe("overlayTemplateSummary", () => {
       files: 2,
       secretIds: ["DEV_X", "DEV_Y"],
       issues: ["apps/web/.env:2: DEV_SIGN is used to sign requests; the egress proxy cannot stand in for it"],
+      warnings: [],
     });
   });
 });

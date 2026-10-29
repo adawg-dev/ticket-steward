@@ -222,6 +222,14 @@ describe("kubernetesChecks", () => {
         message: "apps/api/.env:1: DEV_AWS_SECRET is used to sign requests; the egress proxy cannot stand in for it",
       });
     });
+
+    it("warns about a wildcard host on a multi-tenant domain", async () => {
+      await writeFile(join(templateDir, "apps", "api", ".env"), "UPLOAD_KEY={{secret:DEV_UPLOAD_KEY@*.blob.core.windows.net}}\n");
+      expect(await run(kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }), "overlay template")).toEqual({
+        level: "warn",
+        message: "apps/api/.env:1: DEV_UPLOAD_KEY goes to *.blob.core.windows.net, a domain anyone can have a subdomain of; name the exact host",
+      });
+    });
   });
 
   describe("minio sts", () => {

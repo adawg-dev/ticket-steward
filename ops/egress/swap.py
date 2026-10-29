@@ -2,10 +2,14 @@
 mitmproxy addon for the run pod's egress sidecar.
 
 The agent's env files hold placeholders (`STEWARD_PH_<NAME>_<16 hex>`) in place of outbound API keys. On a request to
-one of a rule's allowlisted hosts the placeholder becomes the real value in the headers (Basic auth decoded and
-re-encoded), the query string and the body. To any other host it goes out unchanged and is logged. Every response, from
-every host, has the real values turned back into their placeholders, so an API echoing a key ("invalid key sk_test_…")
-never shows the agent the real value. Log lines name the placeholder's NAME and the host, never a value.
+one of a rule's allowlisted hosts the placeholder becomes the real value in credential headers (`Authorization`,
+`x-api-key` and the like: a name with auth, key, token, secret or credential in it; Basic auth decoded and re-encoded),
+and in the query string or the body only where the rule's `swapIn` opts in: an API can store or reflect what a request
+carries in forms the response scrubbing below cannot all know. To any other host, or anywhere else on the request, it
+goes out unchanged and is logged. Every response, from every host, has the real values (as is, JSON-escaped,
+percent-encoded and base64-encoded) turned back into their placeholders, in headers, body and trailers, so an API
+echoing a key ("invalid key sk_test_…") never shows the agent the real value. Log lines name the placeholder's NAME and
+the host, never a value.
 
 The rules are Task 8's `EgressRule[]` JSON (`steward render-overlay --rules-out`), read from the `steward_rules` option.
 """
@@ -17,7 +21,6 @@ import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from urllib.parse import quote, quote_plus
 
 from mitmproxy import exceptions, http
@@ -25,6 +28,19 @@ from mitmproxy import exceptions, http
 logger = logging.getLogger("steward.egress")
 
 PLACEHOLDER = re.compile(r"^STEWARD_PH_([A-Za-z0-9_]+)_[0-9a-f]{16}$")
+# An exact host, or `*.` and a domain of at least two labels, as render-overlay allows.
+HOST_PATTERN = re.compile(r"^(?:\*\.[A-Za-z0-9-]+\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)$")
+CREDENTIAL_HEADER = re.compile(r"auth|key|token|secret|credential", re.IGNORECASE)
+PLACES = frozenset({"headers", "query", "body"})
+
+
+def host_matches(host: str, pattern: str) -> bool:
+    """`pattern` is a host name, or `*.<domain>` matching exactly one label more than `<domain>`."""
+    host, pattern = host.lower().rstrip("."), pattern.lower()
+    if not pattern.startswith("*."):
+        return host == pattern
+    label, dot, rest = host.partition(".")
+    return bool(label) and bool(dot) and rest == pattern[2:]
 
 
 @dataclass(frozen=True)
@@ -32,6 +48,7 @@ class Rule:
     placeholder: str
     value: str
     hosts: list[str]
+    swap_in: frozenset[str] = frozenset({"headers"})
 
     @property
     def name(self) -> str:
@@ -39,8 +56,7 @@ class Rule:
         return match.group(1) if match else self.placeholder
 
     def allows(self, host: str) -> bool:
-        host = host.lower().rstrip(".")
-        return any(fnmatchcase(host, pattern.lower()) for pattern in self.hosts)
+        return any(host_matches(host, pattern) for pattern in self.hosts)
 
 
 def load_rules(path: str) -> list[Rule]:
@@ -57,19 +73,48 @@ def load_rules(path: str) -> list[Rule]:
         placeholder = entry.get("placeholder") if isinstance(entry, dict) else None
         value = entry.get("value") if isinstance(entry, dict) else None
         hosts = entry.get("hosts") if isinstance(entry, dict) else None
+        swap_in = entry.get("swapIn", ["headers"]) if isinstance(entry, dict) else None
         if not isinstance(placeholder, str) or not PLACEHOLDER.match(placeholder):
             raise exceptions.OptionsError(f"egress rule {index} has no valid placeholder")
         if not isinstance(value, str) or value == "":
             raise exceptions.OptionsError(f"egress rule {index} ({placeholder}) has no value")
         if not isinstance(hosts, list) or not hosts or not all(isinstance(host, str) and host for host in hosts):
             raise exceptions.OptionsError(f"egress rule {index} ({placeholder}) has no hosts")
-        rules.append(Rule(placeholder=placeholder, value=value, hosts=hosts))
+        if not all(HOST_PATTERN.match(host) for host in hosts):
+            raise exceptions.OptionsError(f"egress rule {index} ({placeholder}) has a host that is neither a name nor *.<domain>")
+        if not isinstance(swap_in, list) or "headers" not in swap_in or not all(place in PLACES for place in swap_in):
+            raise exceptions.OptionsError(f"egress rule {index} ({placeholder}) has an invalid swapIn")
+        rules.append(Rule(placeholder=placeholder, value=value, hosts=hosts, swap_in=frozenset(swap_in)))
     return rules
 
 
-def encodings(value: str) -> set[str]:
-    """The forms a value takes in a body or URL: as is, JSON-escaped and percent-encoded."""
-    return {value, json.dumps(value)[1:-1], quote(value, safe=""), quote_plus(value)}
+def base64_fragments(value: bytes) -> set[bytes]:
+    """
+    The value's base64 at each of the three byte alignments it can have inside a longer encoded string (Basic auth's
+    `user:value`, a base64 content API), standard and URL-safe, without the characters its neighbours share.
+    """
+    fragments: set[bytes] = set()
+    for offset in range(3):
+        encoded = base64.b64encode(b"\0" * offset + value)
+        start = -(-8 * offset // 6)
+        end = 8 * (offset + len(value)) // 6
+        fragment = encoded[start:end]
+        if len(fragment) >= 8:
+            fragments |= {fragment, fragment.replace(b"+", b"-").replace(b"/", b"_")}
+    return fragments
+
+
+def encodings(value: str) -> set[bytes]:
+    """
+    The forms a value takes in a response: as is, JSON-escaped (also with `\\/` and with every character as `\\uXXXX`),
+    percent-encoded and base64-encoded.
+    """
+    escaped = json.dumps(value)[1:-1]
+    unicode_escaped = "".join(f"\\u{ord(char):04x}" for char in value) if value.isascii() else None
+    forms = {value, escaped, escaped.replace("/", "\\/"), json.dumps(value, ensure_ascii=False)[1:-1], quote(value, safe=""), quote_plus(value)}
+    if unicode_escaped is not None:
+        forms |= {unicode_escaped, unicode_escaped.upper().replace("\\U", "\\u")}
+    return {form.encode() for form in forms} | base64_fragments(value.encode())
 
 
 class StreamScrubber:
@@ -127,7 +172,7 @@ class Swap:
 
     def set_rules(self, rules: list[Rule]) -> None:
         self.rules = rules
-        self.scrub_bytes = {form.encode(): rule.placeholder.encode() for rule in rules for form in encodings(rule.value)}
+        self.scrub_bytes = {form: rule.placeholder.encode() for rule in rules for form in encodings(rule.value)}
         needles = sorted(self.scrub_bytes, key=len, reverse=True)
         self.scrub_pattern = re.compile(b"|".join(re.escape(needle) for needle in needles)) if needles else None
 
@@ -150,6 +195,7 @@ class Swap:
         swap = [rule for rule in self.rules if rule.allows(host)]
         self.log_refused(host, [rule for rule in self.rules if rule not in swap], self.request_text(flow.request))
         if swap:
+            self.log_misplaced(flow.request, swap)
             self.swap_request(flow.request, swap)
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
@@ -165,7 +211,11 @@ class Swap:
 
     def response(self, flow: http.HTTPFlow) -> None:
         response = flow.response
-        if response is None or self.scrub_pattern is None or response.stream:
+        if response is None or self.scrub_pattern is None:
+            return
+        if response.trailers is not None:
+            self.scrub_headers(response.trailers)
+        if response.stream:
             return
         self.scrub_headers(response.headers)
         try:
@@ -187,9 +237,13 @@ class Swap:
             message.content = self.scrub(message.content)
             return
         host = flow.request.host
-        swap = [rule for rule in self.rules if rule.allows(host)]
+        allowed = [rule for rule in self.rules if rule.allows(host)]
+        swap = [rule for rule in allowed if "body" in rule.swap_in]
         text = message.content.decode("utf-8", "replace")
-        self.log_refused(host, [rule for rule in self.rules if rule not in swap], [text])
+        self.log_refused(host, [rule for rule in self.rules if rule not in allowed], [text])
+        for rule in allowed:
+            if rule not in swap and rule.placeholder in text:
+                logger.warning(f"placeholder for {rule.name} in a websocket message to {host}, not swapped: its rule does not swap bodies")
         for rule in swap:
             message.content = message.content.replace(rule.placeholder.encode(), rule.value.encode())
 
@@ -199,6 +253,20 @@ class Swap:
         for rule in refused:
             if any(rule.placeholder in text for text in texts):
                 logger.warning(f"placeholder for {rule.name} sent to {host}, not swapped")
+
+    def log_misplaced(self, request: http.Request, rules: list[Rule]) -> None:
+        """Logs a placeholder for an allowlisted host in a part of the request its rule does not swap."""
+        query = request.path.partition("?")[2]
+        body = (request.get_content(strict=False) or b"").decode("utf-8", "replace")
+        for rule in rules:
+            places = [name.decode("latin-1") for name, value in request.headers.fields if not CREDENTIAL_HEADER.search(name.decode("latin-1")) and rule.placeholder in value.decode("latin-1")]
+            places = [f"the {name} header" for name in places]
+            if "query" not in rule.swap_in and rule.placeholder in query:
+                places.append("the query string")
+            if "body" not in rule.swap_in and rule.placeholder in body:
+                places.append("the body")
+            for place in places:
+                logger.warning(f"placeholder for {rule.name} in {place} to {request.host}, not swapped: its rule swaps {', '.join(sorted(rule.swap_in))} only")
 
     def request_text(self, request: http.Request) -> list[str]:
         """Everything a placeholder can ride in: the URL, header values (Basic auth decoded) and the decoded body."""
@@ -218,7 +286,10 @@ class Swap:
         fields = []
         for name, value in request.headers.fields:
             text = value.decode("latin-1")
-            basic = swap_basic(text, rules) if name.lower() == b"authorization" else None
+            if not CREDENTIAL_HEADER.search(name.decode("latin-1")):
+                fields.append((name, value))
+                continue
+            basic = swap_basic(text, rules) if name.lower() in (b"authorization", b"proxy-authorization") else None
             fields.append((name, raw(basic if basic is not None else text).encode("latin-1")))
         if tuple(fields) != request.headers.fields:
             request.headers.fields = tuple(fields)
@@ -227,9 +298,14 @@ class Swap:
         if sep:
             swapped_query = query
             for rule in rules:
-                swapped_query = swapped_query.replace(rule.placeholder, quote(rule.value, safe=""))
+                if "query" in rule.swap_in:
+                    swapped_query = swapped_query.replace(rule.placeholder, quote(rule.value, safe=""))
             if swapped_query != query:
                 request.path = f"{path}?{swapped_query}"
+
+        rules = [rule for rule in rules if "body" in rule.swap_in]
+        if not rules:
+            return
 
         try:
             body = request.content

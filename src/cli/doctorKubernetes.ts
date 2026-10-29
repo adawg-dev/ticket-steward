@@ -13,7 +13,7 @@ import { doctorApis } from "../k8s/cluster.js";
 import { RUN_LABELS } from "../k8s/runJob.js";
 import { overlayTemplateSummary } from "../overlay/template.js";
 import { MINIO_TOKEN_FILE, minioCredentials, s3ObjectStore, type ObjectStore } from "../sessions/store.js";
-import { flunk, ok, type Check, type CheckResult } from "./check.js";
+import { flunk, ok, warn, type Check, type CheckResult } from "./check.js";
 import { errorMessage, type CliContext } from "./context.js";
 
 /** The NetworkPolicies of `deploy/k8s/base/networkpolicy.yaml`; doctor expects each in the namespace. */
@@ -183,6 +183,7 @@ const templateCheck = ({ config }: LoadedConfig): Check => ({
     if (!existsSync(templateDir)) return flunk(`${templateDir} does not exist`);
     const summary = await overlayTemplateSummary(templateDir);
     if (summary.issues.length > 0) return flunk(summary.issues.join("; "));
+    if (summary.warnings.length > 0) return warn(summary.warnings.join("; "));
     return ok(`${templateDir}: ${summary.files} file(s), ${summary.secretIds.length} outbound secret(s)`);
   },
 });
