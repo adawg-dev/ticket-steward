@@ -4,7 +4,7 @@ import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
 import { noteIntake, type NoteAction } from "../chat/intake.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
-import { parseGitlabEvent, verifyGitlabWebhook, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
+import { fromOwnProject, parseGitlabEvent, verifyGitlabWebhook, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
 import { errorMessage } from "../core/workspace.js";
 import { linearIntake } from "../linear/intake.js";
 import { answerLinearIntake, type IntakeAnswerDeps } from "../linear/session.js";
@@ -172,7 +172,8 @@ const sameChange = (loop: Loop, event: GitlabWakeEvent): boolean =>
 
 const wakeLoop = (deps: ServerDeps, event: GitlabWakeEvent, project: string): { action: GitlabAction; loopId: number | null } => {
   const waiting = deps.stores.loops.active().filter((loop) => WAITING_STATES.includes(loop.state));
-  if (!isOurProject(event, project, waiting)) return { action: "ignored", loopId: null };
+  // A fork's MR may share a steward branch's name; it is never the steward's change.
+  if (!fromOwnProject(event) || !isOurProject(event, project, waiting)) return { action: "ignored", loopId: null };
   const loop = waiting.find((candidate) => sameProject(candidate, event, project) && sameChange(candidate, event));
   if (loop === undefined) return { action: "no_loop", loopId: null };
   // MR notes are being batched: their await is due once the quiet window ends, and the round reads the pipeline then.

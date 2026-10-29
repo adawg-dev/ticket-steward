@@ -46,6 +46,7 @@ export class FakeGitLabMr implements GitLabMrApi {
   readonly uploads: Array<{ project: number | string; filename: string; bytes: number }> = [];
   private failingUploads = 0;
   private nextId = 1;
+  private readonly userIds = new Map<string, number>();
   private failingNotes = 0;
   private failingReplies = 0;
 
@@ -53,17 +54,39 @@ export class FakeGitLabMr implements GitLabMrApi {
     this.mr = mr;
   }
 
-  addDiscussion(author: string, body: string, opts: { resolvable?: boolean; resolved?: boolean; system?: boolean; createdAt?: string } = {}): string {
+  /** A stable GitLab user id per username, so `grant` and the notes' authors agree. */
+  idOf(username: string): number {
+    const known = this.userIds.get(username.toLowerCase());
+    if (known !== undefined) return known;
+    const id = 1000 + this.userIds.size;
+    this.userIds.set(username.toLowerCase(), id);
+    return id;
+  }
+
+  /** Makes `username` a project member at `level` (30 is Developer). */
+  grant(username: string, level: number): void {
+    this.members.set(this.idOf(username), level);
+  }
+
+  addDiscussion(author: string, body: string, opts: { resolvable?: boolean; resolved?: boolean; system?: boolean; createdAt?: string; bot?: boolean } = {}): string {
     const id = `d${this.nextId++}`;
     const createdAt = opts.createdAt ?? "2026-10-27T10:00:00Z";
     this.discussions.push({
       id,
       notes: [{
-        id: this.nextId++, body, author, system: opts.system ?? false, resolvable: opts.resolvable ?? true, resolved: opts.resolved ?? false,
-        type: null, createdAt, updatedAt: createdAt, position: null,
+        id: this.nextId++, body, author, authorId: this.idOf(author), authorBot: opts.bot ?? false, system: opts.system ?? false,
+        resolvable: opts.resolvable ?? true, resolved: opts.resolved ?? false, type: null, createdAt, updatedAt: createdAt, position: null,
       }],
     });
     return id;
+  }
+
+  /** A reply by `author` in the discussion, as a person or bot answering in its thread. */
+  addReply(discussionId: string, author: string, body: string, opts: { bot?: boolean } = {}): void {
+    this.discussions.find((item) => item.id === discussionId)?.notes.push({
+      id: this.nextId++, body, author, authorId: this.idOf(author), authorBot: opts.bot ?? false, system: false, resolvable: true, resolved: false,
+      type: null, createdAt: "2026-10-27T10:00:00Z", updatedAt: "2026-10-27T10:00:00Z", position: null,
+    });
   }
 
   /** The next createNote throws, as GitLab being down would. */
@@ -116,7 +139,7 @@ export class FakeGitLabMr implements GitLabMrApi {
     }
     this.replies.push({ discussionId, body });
     this.discussions.find((item) => item.id === discussionId)?.notes.push({
-      id: this.nextId++, body, author: BOT, system: false, resolvable: true, resolved: false,
+      id: this.nextId++, body, author: BOT, authorId: this.idOf(BOT), authorBot: false, system: false, resolvable: true, resolved: false,
       type: null, createdAt: "2026-10-27T10:00:00Z", updatedAt: "2026-10-27T10:00:00Z", position: null,
     });
   }

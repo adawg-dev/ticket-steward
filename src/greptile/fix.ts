@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import type { GitLabMrApi, MergeRequestInfo, MrDiscussion } from "../codehost/gitlabMr.js";
 import { attachedMedia, type MediaUploads } from "../codehost/media.js";
+import { readAuthorKinds } from "../codehost/mrAuthors.js";
 import type { GreptileConfig } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
@@ -264,8 +265,9 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
       ciTriage = triage.real.length > 0 ? triage.notes : [];
     }
     const steward = (await gitlab.currentUser()).username;
-    work = workList(discussions, steward, [greptile.botUsername]);
-    people = peopleOn(discussions, work, steward, [greptile.botUsername]);
+    const kindOf = await readAuthorKinds(gitlab, mr.projectId, discussions, { steward, trustedBots: [greptile.botUsername] });
+    work = workList(discussions, kindOf);
+    people = peopleOn(discussions, work, kindOf);
     await deps.mirror.fetch();
   } catch (err) {
     return { outcome: { status: "failed", error: errorMessage(err), retryable: true } };

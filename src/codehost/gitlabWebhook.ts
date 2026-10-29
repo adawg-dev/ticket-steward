@@ -61,16 +61,21 @@ export interface GitlabWakeEvent {
   projectPath: string;
   branch: string;
   mrIid: number | null;
+  /**
+   * The MR's source project: another project's for a fork's MR, whose branch names say nothing about the steward's
+   * branches. Absent when the payload does not carry it (and on a pipeline outside an MR).
+   */
+  sourceProjectId?: number | null;
   /** A note event's note, when the payload has the fields chat needs. */
   note?: GitlabNote;
 }
 
 const Project = z.object({ id: z.number(), path_with_namespace: z.string() });
-const MergeRequestRef = z.object({ iid: z.number(), source_branch: z.string() });
+const MergeRequestRef = z.object({ iid: z.number(), source_branch: z.string(), source_project_id: z.number().nullish() });
 
 const MergeRequestHook = z.object({
   project: Project,
-  object_attributes: z.object({ iid: z.number(), source_branch: z.string() }),
+  object_attributes: MergeRequestRef,
 });
 
 // Fires for created and edited notes alike: Greptile edits its summary note in place on a re-review.
@@ -114,20 +119,30 @@ const PipelineHook = z.object({
 });
 
 /** The wake-relevant fields of a GitLab event (by its `X-Gitlab-Event` header), or null for any other event or shape. */
+/** Whether the event's MR comes from its own project: a fork's MR (or one whose source is unknown to be ours) never is. */
+export const fromOwnProject = (event: GitlabWakeEvent): boolean =>
+  event.sourceProjectId === undefined || event.sourceProjectId === null || event.sourceProjectId === event.projectId;
+
 export const parseGitlabEvent = (event: string | undefined, body: unknown): GitlabWakeEvent | null => {
   switch (event) {
     case "Merge Request Hook": {
       const parsed = MergeRequestHook.safeParse(body);
       if (!parsed.success) return null;
       const { project, object_attributes: mr } = parsed.data;
-      return { kind: "merge_request", projectId: project.id, projectPath: project.path_with_namespace, branch: mr.source_branch, mrIid: mr.iid };
+      return {
+        kind: "merge_request", projectId: project.id, projectPath: project.path_with_namespace, branch: mr.source_branch, mrIid: mr.iid,
+        sourceProjectId: mr.source_project_id ?? null,
+      };
     }
     case "Note Hook": {
       const parsed = NoteHook.safeParse(body);
       if (!parsed.success) return null;
       const { project, merge_request: mr } = parsed.data;
       const note = noteOf(body);
-      const event: GitlabWakeEvent = { kind: "note", projectId: project.id, projectPath: project.path_with_namespace, branch: mr.source_branch, mrIid: mr.iid };
+      const event: GitlabWakeEvent = {
+        kind: "note", projectId: project.id, projectPath: project.path_with_namespace, branch: mr.source_branch, mrIid: mr.iid,
+        sourceProjectId: mr.source_project_id ?? null,
+      };
       return note === undefined ? event : { ...event, note };
     }
     case "Pipeline Hook": {
@@ -136,7 +151,10 @@ export const parseGitlabEvent = (event: string | undefined, body: unknown): Gitl
       const { project, object_attributes: pipeline, merge_request: mr } = parsed.data;
       // An MR pipeline's ref is refs/merge-requests/<iid>/head; its MR names the branch.
       const branch = mr?.source_branch ?? pipeline.ref;
-      return { kind: "pipeline", projectId: project.id, projectPath: project.path_with_namespace, branch, mrIid: mr?.iid ?? null };
+      return {
+        kind: "pipeline", projectId: project.id, projectPath: project.path_with_namespace, branch, mrIid: mr?.iid ?? null,
+        sourceProjectId: mr?.source_project_id ?? null,
+      };
     }
     default:
       return null;

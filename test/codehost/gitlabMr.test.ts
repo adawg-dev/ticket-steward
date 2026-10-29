@@ -63,20 +63,20 @@ describe("GitLabMrClient", () => {
 
   it("follows discussion pages and maps note type, timestamps and position", async () => {
     const note = {
-      id: 1, body: "b", author: { username: "steward-bot" }, system: false, resolvable: true, resolved: false,
+      id: 1, body: "b", author: { id: 3, username: "steward-bot" }, system: false, resolvable: true, resolved: false,
       type: "DiffNote", created_at: "2026-10-27T10:00:00Z", updated_at: "2026-10-27T11:00:00Z",
       position: { new_path: "src/x.ts", old_path: "src/y.ts", new_line: 12, old_line: null },
     };
-    const plain = { id: 2, body: "c", author: { username: "u" }, system: true, type: null, created_at: "t1", updated_at: "t2" };
+    const plain = { id: 2, body: "c", author: { id: 4, username: "u", bot: true }, system: true, type: null, created_at: "t1", updated_at: "t2" };
     const { calls, fetchImpl } = recorder([reply(200, [{ id: "d1", notes: [note] }], { "x-next-page": "2" }), reply(200, [{ id: "d2", notes: [plain] }], { "x-next-page": "" })]);
     const discussions = await client(fetchImpl).listDiscussions(42, 7);
     expect(discussions.map((d) => d.id)).toEqual(["d1", "d2"]);
     expect(discussions[0]?.notes[0]).toEqual({
-      id: 1, body: "b", author: "steward-bot", system: false, resolvable: true, resolved: false, type: "DiffNote",
+      id: 1, body: "b", author: "steward-bot", authorId: 3, authorBot: false, system: false, resolvable: true, resolved: false, type: "DiffNote",
       createdAt: "2026-10-27T10:00:00Z", updatedAt: "2026-10-27T11:00:00Z",
       position: { newPath: "src/x.ts", oldPath: "src/y.ts", newLine: 12, oldLine: null },
     });
-    expect(discussions[1]?.notes[0]).toMatchObject({ type: null, position: null, resolvable: false, resolved: false });
+    expect(discussions[1]?.notes[0]).toMatchObject({ authorId: 4, authorBot: true, type: null, position: null, resolvable: false, resolved: false });
     expect(calls.map((c) => c.url)).toEqual([
       "https://g/api/v4/projects/42/merge_requests/7/discussions?per_page=100&page=1",
       "https://g/api/v4/projects/42/merge_requests/7/discussions?per_page=100&page=2",

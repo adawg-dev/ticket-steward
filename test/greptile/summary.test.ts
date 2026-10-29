@@ -18,7 +18,7 @@ const mr = (description: string): MergeRequestInfo => ({
   sourceBranch: "b", targetBranch: "main", updatedAt: "2026-01-01T00:00:00Z", headPipeline: null,
 });
 const note = (over: Partial<MrNote>): MrNote => ({
-  id: 1, body: "", author: "greptile-bot", system: false, resolvable: false, resolved: false,
+  id: 1, body: "", author: "greptile-bot", authorId: 9, authorBot: false, system: false, resolvable: false, resolved: false,
   type: null, createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z", position: null, ...over,
 });
 

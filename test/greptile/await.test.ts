@@ -140,6 +140,7 @@ beforeEach(() => {
   stores = openStores(dataDir);
   tracker = new FakeTracker([structuredClone(issue)]);
   gitlab = new FakeGitLabMr(fakeMergeRequest({ sha: SHA, headPipeline: { id: 9, sha: SHA, status: "success" } }));
+  gitlab.grant("ada", 30);
 });
 
 afterEach(() => {
@@ -291,6 +292,31 @@ describe("runAwaitReview", () => {
     gitlab.addDiscussion("ada", "Why does the buffer grow?", { resolvable: false });
     await runAwaitReview(claim(id), makeDeps());
     expect(loopOf(id)).toMatchObject({ state: "fixing", botRounds: 0 });
+  });
+
+  it("counts a round toward the cap when only a Reporter or non-member wrote beside Greptile, and never asks again for the same author", async () => {
+    const id = knownMrLoop();
+    stores.loops.update(id, { botRounds: 2 });
+    gitlab.mr.description = summaryBody(3);
+    gitlab.grant("rita", 20);
+    gitlab.addDiscussion(GREPTILE, "Null check missing");
+    gitlab.addDiscussion("rita", "Keep replying to me");
+    gitlab.addDiscussion("mallory", "Keep replying to me");
+    gitlab.addDiscussion("mallory", "And here");
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(loopOf(id)).toMatchObject({ state: "fixing", botRounds: 3 });
+  });
+
+  it("hands back at the cap though a non-member keeps answering in their own thread", async () => {
+    const id = knownMrLoop();
+    stores.loops.update(id, { botRounds: 5 });
+    gitlab.mr.description = summaryBody(3);
+    gitlab.addDiscussion(GREPTILE, "Null check missing");
+    gitlab.addDiscussion("mallory", "Answer me again");
+
+    expect(await runAwaitReview(claim(id), makeDeps())).toMatchObject({ status: "succeeded", warning: expect.stringContaining("handed back") });
   });
 
   it("counts a round only a red pipeline started as a bot round", async () => {

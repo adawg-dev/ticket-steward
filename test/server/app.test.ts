@@ -610,7 +610,7 @@ describe("buildServer", () => {
         expect(gitlab.replies).toEqual([]);
       });
 
-      it("never answers bots, Greptile, system notes or the steward's own marked notes", async () => {
+      it("never answers bots, Greptile, system notes or the steward's own notes", async () => {
         sessionLoop();
         const ignored = [
           chatNote("/agent hi", { bot: true }),
@@ -618,8 +618,8 @@ describe("buildServer", () => {
           chatNote("/agent hi", { username: "group_9_bot" }),
           chatNote("/agent hi", { username: "Greptile-Bot" }),
           chatNote("/agent hi", { system: true }),
-          chatNote("/agent the agent says hi\n\n<!-- ticket-steward:chat -->"),
-          chatNote("/agent loop note\n\n<!-- ticket-steward:loop id=1 passed -->"),
+          chatNote("/agent the agent says hi\n\n<!-- ticket-steward:chat -->", { username: "steward-bot" }),
+          chatNote("/agent loop note\n\n<!-- ticket-steward:loop id=1 passed -->", { username: "steward-bot" }),
         ];
         for (const body of ignored) expect((await postGitlab("Note Hook", body)).json()).toEqual({ ok: true, action: "chat_ignored" });
         expect(jobsOfKind("chat")).toEqual([]);

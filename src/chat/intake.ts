@@ -1,5 +1,6 @@
-import { BOT_USER, type GitLabMrApi } from "../codehost/gitlabMr.js";
-import type { GitlabNote, GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
+import type { GitLabMrApi } from "../codehost/gitlabMr.js";
+import { fromOwnProject, type GitlabNote, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
+import { DEVELOPER_ACCESS, isTrustedBot, looksLikeBot } from "../codehost/mrAuthors.js";
 import type { StewardConfig } from "../config/schema.js";
 import { errorMessage } from "../core/workspace.js";
 import { restoreDelegate, reviveTicket, type DelegateDeps } from "../linear/assignment.js";
@@ -22,12 +23,6 @@ export interface ChatIntakeDeps extends DelegateDeps {
   settings?: { get(): Settings };
 }
 
-/** GitLab's Developer role: the lowest that may start a chat. */
-const DEVELOPER = 30;
-
-/** Every steward note carries a hidden `ticket-steward:` marker (chat replies, loop notes); none of them is a request. */
-const STEWARD_MARKER = "<!-- ticket-steward:";
-
 /**
  * The message after `prefix` when the note's first line starts with it (case-insensitive, after trimming, as a whole
  * word), else null. The message keeps the rest of the first line and every later line.
@@ -43,19 +38,38 @@ export const addressedMessage = (body: string, prefix: string): string | null =>
 /** The delivery key of a note: a note id is seen once, whether GitLab sends it again or the note is edited. */
 export const noteDeliveryKey = (noteId: number): string => `gitlab-note:${noteId}`;
 
-/** A bot wrote it: by GitLab's flag, a project/group bot name, or the configured Greptile user. */
+/** Bots the steward listens to whatever their membership: the configured Greptile user. */
+const trustedBots = (config: StewardConfig): string[] => (config.greptile === undefined ? [] : [config.greptile.botUsername]);
+
+/** Looks like a bot (GitLab's flag, a project/group bot name, a trusted name): it never starts a chat. */
 const fromBot = (config: StewardConfig, note: GitlabNote): boolean =>
-  note.authorIsBot ||
-  BOT_USER.test(note.authorUsername) ||
-  (config.greptile !== undefined && note.authorUsername.toLowerCase() === config.greptile.botUsername.toLowerCase());
+  looksLikeBot({ username: note.authorUsername, bot: note.authorIsBot }, trustedBots(config));
 
-/** The steward posted it (every steward note carries a marker), or GitLab did (a system note). */
-const fromSteward = (note: GitlabNote): boolean => note.system || note.body.includes(STEWARD_MARKER) || note.body.includes(CHAT_MARKER);
+/** The steward's GitLab username, read once per client. */
+const stewardNames = new WeakMap<GitLabMrApi, string>();
 
-/** System notes, bots, Greptile and anything the steward posted never start a chat. */
-const fromMachine = (config: StewardConfig, note: GitlabNote): boolean => fromSteward(note) || fromBot(config, note);
+/**
+ * GitLab wrote it (a system note) or the steward's own account did. A hidden steward marker on anyone else's note
+ * counts for nothing. Null when the steward's account could not be read.
+ */
+const fromSteward = async (gitlab: GitLabMrApi, note: GitlabNote): Promise<boolean | null> => {
+  if (note.system) return true;
+  let steward = stewardNames.get(gitlab);
+  if (steward === undefined) {
+    try {
+      steward = (await gitlab.currentUser()).username;
+    } catch (err) {
+      logger.warn({ noteId: note.id, err: errorMessage(err) }, "note: the steward's GitLab account could not be read");
+      return null;
+    }
+    stewardNames.set(gitlab, steward);
+  }
+  return note.authorUsername.toLowerCase() === steward.toLowerCase();
+};
 
-const isOurProject = (event: GitlabWakeEvent, project: string): boolean => event.projectPath === project || String(event.projectId) === project;
+/** The configured project, and the MR's own branch: a fork's MR never reaches a steward branch's ticket. */
+const isOurProject = (event: GitlabWakeEvent, project: string): boolean =>
+  (event.projectPath === project || String(event.projectId) === project) && fromOwnProject(event);
 
 interface Ticket {
   issueId: string;
@@ -64,10 +78,14 @@ interface Ticket {
   loop: Loop | null;
 }
 
-/** The ticket whose steward branch is the MR's source branch: its loop's, else its implement job's. */
+/**
+ * The ticket whose steward branch is the MR's source branch: its loop's, else its implement job's. A loop that knows its
+ * MR claims only that MR's notes: another MR from a branch of the same name is not the ticket's.
+ */
 const ticketOf = (stores: Stores, event: GitlabWakeEvent): Ticket | null => {
   const loop = stores.loops.latestForBranch(event.branch);
   if (loop !== null && (loop.projectId === null || loop.projectId === event.projectId)) {
+    if (loop.mrIid !== null && event.mrIid !== null && loop.mrIid !== event.mrIid) return null;
     return { issueId: loop.issueId, identifier: loop.identifier, teamKey: loop.teamKey, loop };
   }
   const job = stores.jobs.latestImplementForBranch(event.branch);
@@ -96,8 +114,11 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
   const message = addressedMessage(note.body, chat.prefix);
   if (message === null || !isOurProject(event, config.codehost.project)) return null;
   const mrIid = event.mrIid;
-  // A bare prefix asks nothing; resuming the agent on an empty message would only spend a run.
-  if (fromMachine(config, note) || message.trim() === "") return { action: "chat_ignored", loopId: null };
+  // A bare prefix asks nothing; resuming the agent on an empty message would only spend a run. Bots never start a chat.
+  if (fromBot(config, note) || message.trim() === "") return { action: "chat_ignored", loopId: null };
+  const steward = await fromSteward(gitlab, note);
+  if (steward === null) return { action: "chat_failed", loopId: null };
+  if (steward) return { action: "chat_ignored", loopId: null };
   if (stores.deliveries.seen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: null };
 
   let level: number | null;
@@ -107,7 +128,7 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
     logger.warn({ noteId: note.id, err: errorMessage(err) }, "chat: member access could not be read");
     return { action: "chat_failed", loopId: null };
   }
-  if (level === null || level < DEVELOPER) return { action: "chat_denied", loopId: null };
+  if (level === null || level < DEVELOPER_ACCESS) return { action: "chat_denied", loopId: null };
 
   const ticket = ticketOf(stores, event);
   const loop = ticket?.loop ?? null;
@@ -161,11 +182,11 @@ const wakes = (loop: Loop, bot: boolean): boolean => WAKEABLE_STATES.includes(lo
 export const steeringNote = (author: string, body: string): string =>
   `New comment from ${author} on the MR (answer it in the next round, not now):\n${body}`;
 
-/** Whether the note's author may give the steward work: a Developer or higher. Null when GitLab could not say. */
+/** Whether the note's author may give the steward work: a Developer or higher, bots included. Null when GitLab could not say. */
 const mayInstruct = async (gitlab: GitLabMrApi, event: GitlabWakeEvent, note: GitlabNote): Promise<boolean | null> => {
   try {
     const level = await gitlab.memberAccessLevel(event.projectId, note.authorId);
-    return level !== null && level >= DEVELOPER;
+    return level !== null && level >= DEVELOPER_ACCESS;
   } catch (err) {
     logger.warn({ noteId: note.id, err: errorMessage(err) }, "note: member access could not be read");
     return null;
@@ -197,7 +218,8 @@ const queueRound = (stores: Stores, loop: Loop, now: Date, quietMinutes: number)
 
 /**
  * Any note on a steward MR. A `chat.prefix` note keeps the chat path (`chatIntake`). Otherwise the steward's own notes and
- * system notes are ignored, and a person below Developer is denied; a bot needs no role. A note on a running or passed
+ * system notes are ignored, and an author below Developer is denied, bots included: only the configured Greptile user
+ * needs no role. A note on a running or passed
  * loop is passed into the ticket's open run when there is one (the next round answers it), and otherwise wakes the loop
  * after a quiet window (`queueRound`). A person's note on a handed-back loop restarts it on the MR head. Unassigned and
  * stopped loops are left alone: only a `chat.prefix` mention revives them.
@@ -207,12 +229,13 @@ export const noteIntake = async (deps: NoteIntakeDeps, event: GitlabWakeEvent, n
   const chat = await chatIntake(deps, { ...event, note });
   if (chat !== null) return chat;
   if (gitlab === undefined || config.codehost.kind !== "gitlab" || event.mrIid === null) return { action: "ignored", loopId: null };
-  if (!isOurProject(event, config.codehost.project) || fromSteward(note)) return { action: "ignored", loopId: null };
+  if (!isOurProject(event, config.codehost.project)) return { action: "ignored", loopId: null };
+  if ((await fromSteward(gitlab, note)) !== false) return { action: "ignored", loopId: null };
   const found = ticketOf(stores, event)?.loop ?? null;
   const bot = fromBot(config, note);
   if (found === null) return { action: "ignored", loopId: null };
   if (!wakes(found, bot)) return { action: "ignored", loopId: found.id };
-  if (!bot) {
+  if (!isTrustedBot(note.authorUsername, trustedBots(config))) {
     const allowed = await mayInstruct(gitlab, event, note);
     if (allowed === null) return { action: "ignored", loopId: found.id };
     if (!allowed) return { action: "denied", loopId: found.id };

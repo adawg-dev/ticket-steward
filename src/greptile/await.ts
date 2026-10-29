@@ -1,4 +1,5 @@
-import type { MergeRequestInfo, MrDiscussion } from "../codehost/gitlabMr.js";
+import type { MergeRequestInfo, MrDiscussion, MrNote } from "../codehost/gitlabMr.js";
+import { readAuthorKinds, type AuthorKind } from "../codehost/mrAuthors.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
@@ -17,8 +18,8 @@ interface Observed {
   ticketClosed: boolean;
   mr: MergeRequestInfo | null;
   discussions: MrDiscussion[];
-  /** The steward's GitLab account, whose notes answer a discussion; null while there is no MR. */
-  steward: string | null;
+  /** Classifies the discussions' notes by author (the steward, a bot, a Developer, an outsider); null while there is no MR. */
+  kindOf: ((note: MrNote) => AuthorKind) | null;
 }
 
 const fail = (error: string): JobOutcome => ({ status: "failed", error, retryable: false });
@@ -34,7 +35,7 @@ const reload = (deps: PipelineDeps, id: number): Loop => {
  * account. Finding the MR
  * ends the MR wait, so the review and pipeline waits start their own clock at `now`.
  */
-const observe = async (deps: PipelineDeps, loop: Loop, project: string, now: Date): Promise<Observed> => {
+const observe = async (deps: PipelineDeps, loop: Loop, project: string, trustedBots: readonly string[], now: Date): Promise<Observed> => {
   const gitlab = deps.gitlab;
   if (gitlab === undefined) throw new Error("no GitLab client");
   const ticket = await deps.tracker.fetchTicket(loop.issueId);
@@ -51,8 +52,8 @@ const observe = async (deps: PipelineDeps, loop: Loop, project: string, now: Dat
     mr = await gitlab.getMergeRequest(loop.projectId, loop.mrIid);
   }
   const discussions = mr === null ? [] : await gitlab.listDiscussions(mr.projectId, mr.iid);
-  const steward = mr === null ? null : (await gitlab.currentUser()).username;
-  return { ticketClosed, mr, discussions, steward };
+  const kindOf = mr === null ? null : await readAuthorKinds(gitlab, mr.projectId, discussions, { steward: (await gitlab.currentUser()).username, trustedBots });
+  return { ticketClosed, mr, discussions, kindOf };
 };
 
 /**
@@ -135,7 +136,7 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   const now = deps.now();
   let observed: Observed;
   try {
-    observed = await observe(deps, stored, config.codehost.project, now);
+    observed = await observe(deps, stored, config.codehost.project, [greptile.botUsername], now);
     if (observed.mr?.state === "opened") await postImplementSummary(deps, reload(deps, loopId), observed.discussions);
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
@@ -147,7 +148,7 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   if (!ACTIVE_LOOP_STATES.includes(loop.state)) return { status: "succeeded", warning: `loop ${loopId} is already ${loop.state}` };
   const { mr } = observed;
   const settings = deps.settings?.get() ?? seedSettings(config);
-  const work = observed.steward === null ? [] : workList(observed.discussions, observed.steward, [greptile.botUsername]);
+  const work = observed.kindOf === null ? [] : workList(observed.discussions, observed.kindOf);
   const input: RoundInput = {
     loop,
     config: greptile,

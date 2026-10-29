@@ -10,8 +10,9 @@ export interface MergeRequestInfo {
   webUrl: string; sourceBranch: string; targetBranch: string; updatedAt: string; headPipeline: PipelineRef | null;
 }
 export interface NotePosition { newPath: string | null; oldPath: string | null; newLine: number | null; oldLine: number | null }
+/** `authorId` is the author's GitLab user id; `authorBot` is GitLab's `bot` flag on the author, false when the API omits it. */
 export interface MrNote {
-  id: number; body: string; author: string; system: boolean; resolvable: boolean; resolved: boolean;
+  id: number; body: string; author: string; authorId: number; authorBot: boolean; system: boolean; resolvable: boolean; resolved: boolean;
   type: string | null; createdAt: string; updatedAt: string; position: NotePosition | null;
 }
 export interface MrDiscussion { id: string; notes: MrNote[] }
@@ -74,7 +75,7 @@ const MergeRequestSchema = z.object({
 const NoteSchema = z.object({
   id: z.number(),
   body: z.string(),
-  author: z.object({ username: z.string() }),
+  author: z.object({ id: z.number(), username: z.string(), bot: z.boolean().nullish() }),
   system: z.boolean(),
   resolvable: z.boolean().nullish(),
   resolved: z.boolean().nullish(),
@@ -171,6 +172,8 @@ export class GitLabMrClient implements GitLabMrApi {
         id: note.id,
         body: note.body,
         author: note.author.username,
+        authorId: note.author.id,
+        authorBot: note.author.bot === true,
         system: note.system,
         resolvable: note.resolvable ?? false,
         resolved: note.resolved ?? false,

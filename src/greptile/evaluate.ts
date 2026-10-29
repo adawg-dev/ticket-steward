@@ -1,4 +1,5 @@
-import { BOT_USER, type MergeRequestInfo, type MrDiscussion, type NotePosition } from "../codehost/gitlabMr.js";
+import type { MergeRequestInfo, MrDiscussion, MrNote, NotePosition } from "../codehost/gitlabMr.js";
+import type { AuthorKind } from "../codehost/mrAuthors.js";
 import type { GreptileConfig } from "../config/schema.js";
 import type { Settings } from "../settings/schema.js";
 import type { Loop } from "../store/loops.js";
@@ -46,55 +47,44 @@ export interface RoundInput {
   ciTriaged: boolean;
 }
 
-/** Every steward note carries a hidden `ticket-steward:` marker (loop notes, chat replies). */
-const STEWARD_MARKER = "<!-- ticket-steward:";
-
-/** Whether a username is a bot's: GitLab's project and group bots, and the configured review bots. */
-const botTest = (botUsernames: readonly string[]): ((username: string) => boolean) => {
-  const bots = new Set(botUsernames.map((name) => name.toLowerCase()));
-  return (username) => BOT_USER.test(username) || bots.has(username.toLowerCase());
-};
-
 /**
- * The people who wrote in the round's discussions (any note of a thread on the work list), lowercased: neither the
- * steward nor a bot. Only their lasting instructions become decisions.
+ * The people who wrote in the round's discussions (any note of a thread on the work list), lowercased: Developers or
+ * higher who are neither the steward nor a bot. Only their lasting instructions become decisions.
  */
-export const peopleOn = (discussions: MrDiscussion[], items: readonly WorkItem[], stewardUsername: string, botUsernames: readonly string[] = []): Set<string> => {
-  const steward = stewardUsername.toLowerCase();
-  const isBot = botTest(botUsernames);
+export const peopleOn = (discussions: MrDiscussion[], items: readonly WorkItem[], kindOf: (note: MrNote) => AuthorKind): Set<string> => {
   const onList = new Set(items.map((item) => item.discussionId));
   const people = new Set<string>();
   for (const discussion of discussions) {
     if (!onList.has(discussion.id)) continue;
     for (const note of discussion.notes) {
-      const author = note.author.toLowerCase();
-      if (!note.system && author !== steward && !note.body.includes(STEWARD_MARKER) && !isBot(note.author)) people.add(author);
+      if (!note.system && kindOf(note) === "person") people.add(note.author.toLowerCase());
     }
   }
   return people;
 };
 
 /**
- * The round's work list: every unresolved discussion whose latest note is not the steward's (by its account or its
- * marker), from people and bots alike. System notes are skipped, and so is a Greptile summary, which the prompt shows
- * whole and which nobody answers in its thread.
+ * The round's work list: every unresolved discussion whose latest note is not the steward's, from people and bots alike.
+ * An outsider's notes (below Developer, or a bot nobody listed or made a member) are left out of a thread entirely: they
+ * neither make it work nor reach the agent. The steward's marker counts only on the steward's own notes. System notes
+ * are skipped, and so is a Greptile summary, which the prompt shows whole and which nobody answers in its thread.
  */
-export const workList = (discussions: MrDiscussion[], stewardUsername: string, botUsernames: readonly string[] = []): WorkItem[] => {
-  const steward = stewardUsername.toLowerCase();
-  const isBot = botTest(botUsernames);
+export const workList = (discussions: MrDiscussion[], kindOf: (note: MrNote) => AuthorKind): WorkItem[] => {
   const out: WorkItem[] = [];
   for (const discussion of discussions) {
-    const notes = discussion.notes.filter((note) => !note.system);
-    const first = notes[0];
+    const all = discussion.notes.filter((note) => !note.system);
+    const notes = all.filter((note) => kindOf(note) !== "outsider");
+    const first = all[0];
     const latest = notes.at(-1);
     if (first === undefined || latest === undefined) continue;
-    if (notes.some((note) => note.resolvable && note.resolved)) continue;
-    if (latest.author.toLowerCase() === steward || latest.body.includes(STEWARD_MARKER)) continue;
+    if (all.some((note) => note.resolvable && note.resolved)) continue;
+    const kind = kindOf(latest);
+    if (kind === "steward") continue;
     if (parseSummary(latest.body, latest.updatedAt, "note") !== null) continue;
     out.push({
       discussionId: discussion.id,
       author: latest.author,
-      isBot: isBot(latest.author),
+      isBot: kind === "bot",
       body: notes.length === 1 ? latest.body : notes.map((note) => `**${note.author}:** ${note.body}`).join("\n\n"),
       position: first.position,
     });
