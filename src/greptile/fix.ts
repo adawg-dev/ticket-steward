@@ -4,7 +4,7 @@ import { INTERRUPTED_ERROR } from "../brain/index.js";
 import type { GitLabMrApi, MergeRequestInfo, MrDiscussion } from "../codehost/gitlabMr.js";
 import { attachedMedia, type MediaUploads } from "../codehost/media.js";
 import { readAuthorKinds } from "../codehost/mrAuthors.js";
-import type { GreptileConfig } from "../config/schema.js";
+import { reviewConfigOf, type ReviewConfig } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
 import { readRepoPartial } from "../core/prompt.js";
@@ -16,7 +16,7 @@ import { PERSON_COMMITS_MARKER, setupTailOf, STOPPED_JOB_ERROR } from "../run/ex
 import { linearSessionFor, NO_SESSION, stoppedResponse, type LinearSession } from "../linear/session.js";
 import { logger } from "../log.js";
 import { localExecutor } from "../run/local.js";
-import { seedSettings } from "../settings/schema.js";
+import { loopSettings, seedSettings } from "../settings/schema.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
@@ -39,7 +39,9 @@ interface Fix {
   ctx: RunContext;
   deps: PipelineDeps;
   gitlab: GitLabMrApi;
-  greptile: GreptileConfig;
+  review: ReviewConfig;
+  /** Greptile's bot user; null with no `greptile` configured. */
+  greptileBot: string | null;
   settings: NonNullable<PipelineDeps["config"]["implement"]>;
   loop: Loop;
   paths: JobPaths;
@@ -242,11 +244,11 @@ interface PreparedRound {
  * spec to execute, or the job's outcome.
  */
 const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound | { outcome: JobOutcome }> => {
-  const { ctx, deps, gitlab, greptile, settings, loop, paths } = fix;
+  const { ctx, deps, gitlab, review, greptileBot, settings, loop, paths } = fix;
   const { mr, discussions } = observed;
-  const runtime = deps.settings?.get() ?? seedSettings(deps.config);
-  const greptileOn = runtime["greptile.enabled"];
-  const summary = greptileOn ? findSummary(mr, discussions, greptile.botUsername) : null;
+  const runtime = loopSettings(deps.config, deps.settings?.get() ?? seedSettings(deps.config));
+  const greptileOn = runtime["greptile.enabled"] && greptileBot !== null;
+  const summary = greptileOn ? findSummary(mr, discussions, greptileBot) : null;
   if (greptileOn && summary === null) return { outcome: await publishHandback(deps, loop, `Greptile has no summary for ${mr.sha.slice(0, 7)}`) };
   const pipeline = mr.headPipeline !== null && mr.headPipeline.sha === mr.sha ? mr.headPipeline : null;
   const facts: RoundFacts = { score: summary?.score ?? null, reviewCount: summary?.reviewCount ?? null, pipeline: pipeline?.status ?? null };
@@ -259,7 +261,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
   try {
     if (pipeline?.status === "failed") {
       const failed = await gitlab.failedJobs(mr.projectId, pipeline.id);
-      ciFailures = await ciFailuresOf(gitlab, mr.projectId, failed, greptile.ciLogLines, deps.redactor);
+      ciFailures = await ciFailuresOf(gitlab, mr.projectId, failed, review.ciLogLines, deps.redactor);
       // The await already retried what it could; triage again for what it found, retrying nothing here.
       const orbit = (await deps.orbit?.()) ?? null;
       const target = { project: mr.projectId, pipelineId: pipeline.id, sha: mr.sha, defaultBranch: mr.targetBranch, branch: loop.branch };
@@ -267,7 +269,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
       ciTriage = triage.real.length > 0 ? triage.notes : [];
     }
     const steward = (await gitlab.currentUser()).username;
-    const kindOf = await readAuthorKinds(gitlab, mr.projectId, discussions, { steward, trustedBots: [greptile.botUsername] });
+    const kindOf = await readAuthorKinds(gitlab, mr.projectId, discussions, { steward, trustedBots: greptileBot === null ? [] : [greptileBot] });
     work = workList(discussions, kindOf);
     people = peopleOn(discussions, work, kindOf);
     await deps.mirror.fetch();
@@ -279,7 +281,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
   const commits = personCommits(loop);
   let prompt: string;
   try {
-    prompt = renderFixPrompt(await readFile(greptile.prompt, "utf8"), {
+    prompt = renderFixPrompt(await readFile(review.prompt, "utf8"), {
       identifier: loop.identifier,
       round: loop.round + 1,
       score: summary?.score ?? null,
@@ -389,10 +391,10 @@ const runRound = async (fix: Fix, observed: Observed, panel: { session: LinearSe
 const executeFix = async (ctx: RunContext, deps: PipelineDeps, panel: { session: LinearSession }): Promise<JobOutcome> => {
   if (ctx.trigger.kind !== "loop") return fail("fix needs a loop trigger");
   const configured = settingsOf(deps);
-  const greptile = deps.config.greptile;
+  const review = reviewConfigOf(deps.config);
   const gitlab = deps.gitlab;
-  if (configured === null || greptile === undefined || gitlab === undefined) {
-    return fail("the Greptile loop needs greptile and implement configured, GITLAB_TOKEN and GITLAB_PUSH_TOKEN");
+  if (configured === null || review === null || gitlab === undefined) {
+    return fail("the review loop needs reviewLoop and implement configured, GITLAB_TOKEN and GITLAB_PUSH_TOKEN");
   }
   const loop = deps.stores.loops.get(ctx.trigger.loopId);
   if (loop === null) return fail(`loop ${ctx.trigger.loopId} not found`);
@@ -400,7 +402,7 @@ const executeFix = async (ctx: RunContext, deps: PipelineDeps, panel: { session:
   if (loop.state !== "fixing") return { status: "succeeded", warning: `loop ${loop.id} is ${loop.state}, not fixing` };
   if (loop.projectId === null || loop.mrIid === null) return fail(`loop ${loop.id} has no merge request`);
   const fix: Fix = {
-    ctx, deps, gitlab, greptile, settings: configured.settings, loop,
+    ctx, deps, gitlab, review, greptileBot: deps.config.greptile?.botUsername ?? null, settings: configured.settings, loop,
     paths: jobPaths(ctx, deps, { worktreeName: loop.worktreeName }),
   };
 

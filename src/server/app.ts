@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Secrets } from "../config/load.js";
-import type { StewardConfig } from "../config/schema.js";
+import { reviewConfigOf, type StewardConfig } from "../config/schema.js";
 import { noteIntake, type NoteAction } from "../chat/intake.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import { fromOwnProject, parseGitlabEvent, verifyGitlabWebhook, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
@@ -192,11 +192,11 @@ const wakeLoop = (deps: ServerDeps, event: GitlabWakeEvent, project: string): { 
 
 /** A note is the note intake's (chat, or a round after the quiet window); an MR or pipeline event may wake a waiting loop. */
 const gitlabIntake = async (deps: ServerDeps, event: GitlabWakeEvent | null): Promise<{ action: GitlabAction; loopId: number | null }> => {
-  const { codehost, greptile } = deps.config;
+  const { codehost } = deps.config;
   if (event === null) return { action: "ignored", loopId: null };
   // A note without its author and body could be the steward's own; it never wakes anything.
   if (event.kind === "note") return event.note === undefined ? { action: "ignored", loopId: null } : noteIntake(deps, event, event.note);
-  if (greptile === undefined || codehost.kind !== "gitlab") return { action: "ignored", loopId: null };
+  if (reviewConfigOf(deps.config) === null || codehost.kind !== "gitlab") return { action: "ignored", loopId: null };
   return wakeLoop(deps, event, codehost.project);
 };
 

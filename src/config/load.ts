@@ -65,7 +65,8 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string; secr
         : { skillsDir: resolveFromConfigDir(configDir, parsed.workspace.skillsDir) }),
     },
     ...(parsed.implement === undefined ? {} : { implement: { ...parsed.implement, prompt: resolveFromConfigDir(configDir, parsed.implement.prompt) } }),
-    ...(parsed.greptile === undefined ? {} : { greptile: { ...parsed.greptile, prompt: resolveFromConfigDir(configDir, parsed.greptile.prompt) } }),
+    ...(parsed.reviewLoop === undefined ? {} : { reviewLoop: { ...parsed.reviewLoop, prompt: resolveFromConfigDir(configDir, parsed.reviewLoop.prompt) } }),
+    ...(parsed.greptile?.prompt === undefined ? {} : { greptile: { ...parsed.greptile, prompt: resolveFromConfigDir(configDir, parsed.greptile.prompt) } }),
   };
   if (config.workspace.overlayTemplateDir !== undefined) await checkOverlayTemplate(config.workspace.overlayTemplateDir);
   if (opts.withoutSecrets === true) return { config, secrets: {}, configPath, configDir };

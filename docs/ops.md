@@ -360,7 +360,7 @@ One implement job can hold the worker for about 90 minutes (setup, up to 60 of b
 checks); other heavy jobs queue behind it unless `slots` gives the worker more lanes.
 
 To smoke-test, delegate a throwaway ticket to the steward and watch its agent panel, the pushed branch and the move
-to the review state once the MR opens (and, with a `greptile` block, the implement summary note on the MR). The first real push is also what proves the
+to the review state once the MR opens (and, with a `reviewLoop` block, the implement summary note on the MR). The first real push is also what proves the
 token's Developer access: doctor's `push token` line only runs `ls-remote`.
 
 Whatever the trigger, the steward never works on a Done or Canceled ticket. The state is
@@ -368,32 +368,41 @@ checked at intake, when a job starts, and by the push tool before every push (wh
 
 ### 1.7b Review loop on the merge request (optional)
 
-With a `greptile` block the steward does not stop at the push. It waits for the pipeline to open the merge request,
+With a `reviewLoop` block the steward does not stop at the push. It waits for the pipeline to open the merge request,
 then treats every comment on it, from people and bots alike, as work: it resumes the implementing brain session to
 answer each one (a change pushed through the push tool and a reply, or a reply alone) and repeats while comments keep
-coming. Greptile is one reviewer among them: with it on, the loop asks for and waits for its review of every push. It
-needs `implement`, `codehost.kind: "gitlab"` and `brain.kind: "claude-code"`.
+coming. Greptile is one reviewer among them, and optional: with a `greptile` block and the setting on, the loop asks
+for and waits for its review of every push. It needs `implement`, `codehost.kind: "gitlab"` and `brain.kind: "claude-code"`.
 
 ```ts
-greptile: {
-  botUsername: "greptile-apple",          // the username Greptile comments as on the MR (required)
+reviewLoop: {
   prompt: "./prompts/fix.md",             // required; `steward init` writes prompts/fix.md
   maxRounds: 5,                           // rounds in a row started only by bots or a red pipeline (setting greptile.maxRounds)
-  passScore: 5,                           // Greptile confidence that ends bots' rounds (setting greptile.passScore)
   pollSeconds: 300,                       // fallback poll; GitLab webhooks wake the loop at once
   mrTimeoutMinutes: 30,                   // wait for the pipeline to open the MR
   reviewTimeoutMinutes: 30,               // wait for Greptile to review the head
   pipelineTimeoutMinutes: 30,             // wait for the head pipeline to finish
   ciLogLines: 200,                        // failed-job log lines given to the brain
+},
+greptile: {                               // optional: Greptile as one of the reviewers
+  botUsername: "greptile-apple",          // the username Greptile comments as on the MR (required)
+  passScore: 5,                           // Greptile confidence that ends bots' rounds (setting greptile.passScore)
   mcp: { url: "https://api.greptile.com/mcp" },
 },
 ```
 
+An older config that keeps the loop's keys (`prompt`, `maxRounds`, the timeouts, `pollSeconds`, `ciLogLines`) in
+`greptile` and has no `reviewLoop` still runs the loop with them. Without a `greptile` block, Greptile is off whatever
+the `greptile.enabled` setting says.
+
 `steward settings set greptile.enabled false` stops asking Greptile for reviews and waiting for them, without a
 restart; its comments are still work like any bot's.
 
-**Every comment is work.** Any new note on the MR from a person or a bot wakes the loop; the steward's own notes (they
-carry a hidden `ticket-steward:` marker) never do, and people need Developer access. Notes are batched over a quiet
+**Every comment is work.** Any new note on the MR from a person or a bot wakes the loop; the steward's own notes
+(written by its GitLab account; a `ticket-steward:` marker on anyone else's note counts for nothing) never do. People
+and bots alike need Developer access; only the configured Greptile user needs none. A Reporter's, a non-member's or
+an unlisted bot's notes are not work at all: they wake nothing, are left out of a round's threads and never become
+decisions. A note on a fork's MR, or on another MR from a branch of the same name, never reaches the loop. Notes are batched over a quiet
 window (`review.quietMinutes`, 2 minutes) into one round, so a burst of comments is one round. A round's work list is
 every unresolved discussion whose latest note is not the steward's; for each, the agent changes code and replies with
 what changed, or replies only (an answer, a question back, why it disagrees). It never resolves a thread: whoever

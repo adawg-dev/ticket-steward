@@ -47,7 +47,7 @@ interface Target {
   write: () => Promise<void>;
 }
 
-/** Written when absent and never a reason to refuse: the fix prompt only matters once `greptile` is configured. */
+/** Written when absent and never a reason to refuse: the fix prompt only matters once `reviewLoop` is configured. */
 const optionalTargets = (dir: string): Target[] => [
   { path: join(dir, "prompts", "fix.md"), write: (): Promise<void> => copyFile(fixPromptPath, join(dir, "prompts", "fix.md")) },
 ];

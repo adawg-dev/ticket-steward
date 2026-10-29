@@ -1,6 +1,6 @@
 import type { MergeRequestInfo, MrDiscussion, MrNote, NotePosition } from "../codehost/gitlabMr.js";
 import type { AuthorKind } from "../codehost/mrAuthors.js";
-import type { GreptileConfig } from "../config/schema.js";
+import type { ReviewConfig } from "../config/schema.js";
 import type { Settings } from "../settings/schema.js";
 import type { Loop } from "../store/loops.js";
 import { parseSummary, shaMatches, type GreptileSummary } from "./summary.js";
@@ -32,12 +32,12 @@ export type RoundDecision =
 export interface RoundInput {
   loop: Loop;
   /** The loop's timeouts. */
-  config: GreptileConfig;
+  config: ReviewConfig;
   settings: Settings;
   now: Date;
   ticketClosed: boolean;
   mr: MergeRequestInfo | null;
-  /** Greptile's newest summary; null when it has posted none. Ignored while the `greptile.enabled` setting is off. */
+  /** Greptile's newest summary; null when it has posted none. Ignored while the `greptile.enabled` setting is off (as it is with no `greptile` configured). */
   greptile: GreptileSummary | null;
   workList: WorkItem[];
   startedBy: StartedBy;

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { StewardConfig } from "../config/schema.js";
+import { reviewConfigOf, type StewardConfig } from "../config/schema.js";
 
 /**
  * Behaviour that can change while the steward runs: stored in the dispatcher DB, seeded from the config file, read on each
@@ -64,11 +64,16 @@ export const SETTING_KEYS: readonly SettingKey[] = SettingsSchema.keyof().option
 export const isSettingKey = (key: string): key is SettingKey => SETTING_KEYS.some((known) => known === key);
 
 /** The defaults with what the config file says over them. */
-export const seedSettings = (config: Pick<StewardConfig, "greptile">): Settings => {
+export const seedSettings = (config: Pick<StewardConfig, "greptile" | "reviewLoop">): Settings => {
   const greptile = config.greptile;
+  const review = reviewConfigOf(config);
   return SettingsSchema.parse({
     ...DEFAULT_SETTINGS,
-    ...(greptile === undefined ? {} : { "greptile.maxRounds": greptile.maxRounds }),
+    ...(review === null ? {} : { "greptile.maxRounds": review.maxRounds }),
     ...(greptile?.passScore === undefined ? {} : { "greptile.passScore": greptile.passScore }),
   });
 };
+
+/** The settings a loop step acts on: with no `greptile` configured, Greptile is off whatever the setting says. */
+export const loopSettings = (config: Pick<StewardConfig, "greptile">, settings: Settings): Settings =>
+  config.greptile === undefined ? { ...settings, "greptile.enabled": false } : settings;

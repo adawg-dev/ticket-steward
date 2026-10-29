@@ -11,7 +11,7 @@ import { listProtectedBranches, protectionProblems } from "../codehost/gitlabPro
 import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { LoadedConfig } from "../config/load.js";
-import { appPortOf, kubernetesRuntime, type SlotsConfig, type StewardConfig } from "../config/schema.js";
+import { appPortOf, kubernetesRuntime, reviewConfigOf, type SlotsConfig, type StewardConfig } from "../config/schema.js";
 import { execOrbit, orbitEnv } from "../orbit/run.js";
 import { orbitRemote, runOrbitTool } from "../orbit/server.js";
 import { createLinearToken, type LinearToken } from "../tracker/linear/index.js";
@@ -205,12 +205,16 @@ const GITLAB_WEBHOOK_KEYS = ["GITLAB_WEBHOOK_SIGNING_TOKEN", "GITLAB_WEBHOOK_SEC
 
 const pollingEvery = (seconds: number): string => (seconds % 60 === 0 ? `${seconds / 60}-minute polling` : `polling every ${seconds} seconds`);
 
-/** Only with `greptile`: the GitLab token can write notes and resolve threads, the bot user exists, the fix prompt is there, and webhooks can be verified. */
+/**
+ * Only with a review loop (`reviewLoop`, or an older `greptile` carrying its keys): the GitLab token can write notes and
+ * resolve threads, the fix prompt is there, webhooks can be verified, and with `greptile` its bot user exists.
+ */
 const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Check[] => {
-  const settings = config.greptile;
-  if (settings === undefined) return [];
+  const review = reviewConfigOf(config);
+  if (review === null) return [];
   const gitlab = ctx.factories?.gitlab ?? createGitLabMr(config, secrets);
   const unavailable = (): CheckResult => warn("GITLAB_TOKEN is missing; cannot reach GitLab");
+  const botUsername = config.greptile?.botUsername;
   return [
     {
       name: "gitlab token scope",
@@ -220,18 +224,20 @@ const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Che
         return scopes.includes("api") ? ok("GITLAB_TOKEN has the api scope") : flunk(`gitlab token lacks api scope (has ${scopes.join(", ") || "none"}); the loop replies to and resolves threads`);
       },
     },
-    {
-      name: "greptile bot",
-      run: async () => {
-        if (gitlab === undefined) return unavailable();
-        return (await gitlab.userExists(settings.botUsername))
-          ? ok(`${settings.botUsername} exists`)
-          : flunk(`greptile bot user ${settings.botUsername} not found; check greptile.botUsername`);
-      },
-    },
+    ...(botUsername === undefined
+      ? []
+      : [{
+          name: "greptile bot",
+          run: async (): Promise<CheckResult> => {
+            if (gitlab === undefined) return unavailable();
+            return (await gitlab.userExists(botUsername))
+              ? ok(`${botUsername} exists`)
+              : flunk(`greptile bot user ${botUsername} not found; check greptile.botUsername`);
+          },
+        }]),
     {
       name: "greptile prompt",
-      run: async () => (existsSync(settings.prompt) ? ok(settings.prompt) : flunk(`${settings.prompt} does not exist; copy prompts/fix.md there`)),
+      run: async () => (existsSync(review.prompt) ? ok(review.prompt) : flunk(`${review.prompt} does not exist; copy prompts/fix.md there`)),
     },
     {
       name: "gitlab webhook secret",
@@ -239,7 +245,7 @@ const greptileChecks = ({ config, secrets }: LoadedConfig, ctx: CliContext): Che
         const present = GITLAB_WEBHOOK_KEYS.filter((key) => missing(secrets, [key]).length === 0);
         return present.length > 0
           ? ok(`${present.join(", ")} present`)
-          : warn(`neither ${GITLAB_WEBHOOK_KEYS.join(" nor ")} is set; the loop falls back to ${pollingEvery(settings.pollSeconds)}`);
+          : warn(`neither ${GITLAB_WEBHOOK_KEYS.join(" nor ")} is set; the loop falls back to ${pollingEvery(review.pollSeconds)}`);
       },
     },
   ];

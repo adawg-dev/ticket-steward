@@ -62,13 +62,10 @@ const ImplementSchema = z.object({
   protectedBranches: z.array(z.string().min(1)).default(["main", "staging", "dev"]),
 });
 
-const GreptileSchema = z.object({
-  /** The username Greptile comments as on the MR. */
-  botUsername: z.string().min(1),
-  /** Fix rounds after the implement push (round 0). */
+/** The review loop that follows the implement's MR: every comment is work, Greptile one reviewer among others. */
+const ReviewSchema = z.object({
+  /** Fix rounds after the implement push (round 0); seeds the `greptile.maxRounds` setting (bot-started rounds). */
   maxRounds: z.number().int().positive().default(5),
-  /** Seeds the `greptile.passScore` setting: at this confidence on the head, bot-started rounds end. Unset is 5. */
-  passScore: z.number().int().min(1).max(5).optional(),
   /** The fix prompt, resolved against the config directory. */
   prompt: z.string(),
   /** The fallback poll between GitLab webhooks, which wake a waiting loop at once. */
@@ -78,7 +75,25 @@ const GreptileSchema = z.object({
   reviewTimeoutMinutes: z.number().positive().default(30),
   pipelineTimeoutMinutes: z.number().positive().default(30),
   ciLogLines: z.number().int().positive().default(200),
+});
+
+/**
+ * Greptile, one reviewer of the loop: its bot user and pass score. The loop's own keys (`prompt`, `maxRounds`, the
+ * timeouts, `pollSeconds`, `ciLogLines`) belong in `reviewLoop`; here they are still read when `reviewLoop` is unset.
+ */
+const GreptileSchema = z.object({
+  /** The username Greptile comments as on the MR. */
+  botUsername: z.string().min(1),
+  /** Seeds the `greptile.passScore` setting: at this confidence on the head, bot-started rounds end. Unset is 5. */
+  passScore: z.number().int().min(1).max(5).optional(),
   mcp: z.object({ url: z.string().min(1).default("https://api.greptile.com/mcp") }).optional(),
+  maxRounds: z.number().int().positive().optional(),
+  prompt: z.string().optional(),
+  pollSeconds: z.number().positive().optional(),
+  mrTimeoutMinutes: z.number().positive().optional(),
+  reviewTimeoutMinutes: z.number().positive().optional(),
+  pipelineTimeoutMinutes: z.number().positive().optional(),
+  ciLogLines: z.number().int().positive().optional(),
 });
 
 /** Holds heavy jobs (everything but await_review) while the host is short on memory or CPU, and spaces their starts. */
@@ -225,15 +240,24 @@ export const StewardConfigSchema = z.object({
   resourceGuard: ResourceGuardSchema.optional(),
   /** Talking to a ticket's agent session again; unset means no comment-driven chat (sessions are still kept for 180 days). */
   chat: ChatSchema.optional(),
+  /**
+   * The review loop after the implement's MR; unset, `greptile`'s loop keys stand in (or no loop runs). Not `review`: that
+   * key was the removed MR reviewer's, and a config may still carry it (it is stripped).
+   */
+  reviewLoop: ReviewSchema.optional(),
   /** Unset reads `.env` from the config dir, as `{ source: "file" }` does. */
   secrets: SecretsConfigSchema.optional(),
   /** Unset is `{ kind: "local" }`. */
   runtime: RuntimeSchema.optional(),
 }).superRefine((config, ctx) => {
-  if (config.greptile !== undefined) {
-    if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["greptile"], message: "greptile requires implement" });
-    if (config.codehost.kind !== "gitlab") ctx.addIssue({ code: "custom", path: ["greptile"], message: 'greptile requires codehost.kind "gitlab"' });
-    if (config.brain.kind !== "claude-code") ctx.addIssue({ code: "custom", path: ["greptile"], message: 'greptile requires brain.kind "claude-code"' });
+  for (const key of ["reviewLoop", "greptile"] as const) {
+    if (config[key] === undefined) continue;
+    if (config.implement === undefined) ctx.addIssue({ code: "custom", path: [key], message: `${key} requires implement` });
+    if (config.codehost.kind !== "gitlab") ctx.addIssue({ code: "custom", path: [key], message: `${key} requires codehost.kind "gitlab"` });
+    if (config.brain.kind !== "claude-code") ctx.addIssue({ code: "custom", path: [key], message: `${key} requires brain.kind "claude-code"` });
+  }
+  if (config.greptile !== undefined && config.reviewLoop === undefined && config.greptile.prompt === undefined) {
+    ctx.addIssue({ code: "custom", path: ["reviewLoop"], message: "greptile is a reviewer of the review loop: set reviewLoop (with its prompt)" });
   }
   if (config.chat !== undefined && config.brain.kind !== "claude-code") {
     ctx.addIssue({ code: "custom", path: ["chat"], message: 'chat requires brain.kind "claude-code"' });
@@ -268,6 +292,19 @@ export type BrainConfig = StewardConfig["brain"];
 export type CodeHostConfig = StewardConfig["codehost"];
 export type ImplementConfig = NonNullable<StewardConfig["implement"]>;
 export type GreptileConfig = NonNullable<StewardConfig["greptile"]>;
+export type ReviewConfig = z.infer<typeof ReviewSchema>;
+
+/**
+ * The review loop's settings: `reviewLoop`, else the loop keys an older config still keeps in `greptile` (with the
+ * same defaults); null when neither configures a loop.
+ */
+export const reviewConfigOf = (config: Pick<StewardConfig, "reviewLoop" | "greptile">): ReviewConfig | null => {
+  if (config.reviewLoop !== undefined) return config.reviewLoop;
+  const greptile = config.greptile;
+  if (greptile?.prompt === undefined) return null;
+  const { maxRounds, prompt, pollSeconds, mrTimeoutMinutes, reviewTimeoutMinutes, pipelineTimeoutMinutes, ciLogLines } = greptile;
+  return ReviewSchema.parse({ maxRounds, prompt, pollSeconds, mrTimeoutMinutes, reviewTimeoutMinutes, pipelineTimeoutMinutes, ciLogLines });
+};
 export type ChatConfig = NonNullable<StewardConfig["chat"]>;
 export type SecretsConfig = NonNullable<StewardConfig["secrets"]>;
 export type ResourceGuardConfig = z.infer<typeof ResourceGuardSchema>;

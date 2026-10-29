@@ -5,15 +5,15 @@ import { evaluateRound, peopleOn, startedBy, workList, type RoundInput, type Wor
 import type { GreptileSummary } from "../../src/greptile/summary.js";
 import { DEFAULT_SETTINGS } from "../../src/settings/schema.js";
 import type { Loop } from "../../src/store/loops.js";
-import type { GreptileConfig } from "../../src/config/schema.js";
+import type { ReviewConfig } from "../../src/config/schema.js";
 import { fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
 
 const SHA = "c".repeat(40);
 const NOW = new Date("2026-10-27T12:00:00Z");
 const minutesAgo = (m: number): string => new Date(NOW.getTime() - m * 60_000).toISOString();
 
-const config: GreptileConfig = {
-  botUsername: "greptile-bot", maxRounds: 5, prompt: "p", pollSeconds: 60, mrTimeoutMinutes: 60,
+const config: ReviewConfig = {
+  maxRounds: 5, prompt: "p", pollSeconds: 60, mrTimeoutMinutes: 60,
   reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 60, ciLogLines: 200,
 };
 const loop = (over: Partial<Loop> = {}): Loop => ({

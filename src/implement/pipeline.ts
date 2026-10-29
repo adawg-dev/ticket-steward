@@ -3,7 +3,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/types.js";
 import { attachedMedia } from "../codehost/media.js";
-import type { ImplementConfig } from "../config/schema.js";
+import { reviewConfigOf, type ImplementConfig } from "../config/schema.js";
 import { renderTicketMarkdown } from "../core/context.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
@@ -67,8 +67,8 @@ export const lsRemoteSite = async (paths: Pick<JobPaths, "jobDir">, remote: Remo
   return { cwd, remote: { url: remote.url, env: { ...remote.env, GIT_CEILING_DIRECTORIES: paths.jobDir } } };
 };
 
-/** With `greptile`, a label-triggered implement starts a fix loop once it pushes. */
-const startsLoop = (ctx: RunContext, deps: PipelineDeps): boolean => deps.config.greptile !== undefined && isLinearImplement(ctx.trigger);
+/** With a review loop configured, an implement from Linear starts it once it pushes. */
+const startsLoop = (ctx: RunContext, deps: PipelineDeps): boolean => reviewConfigOf(deps.config) !== null && isLinearImplement(ctx.trigger);
 
 /** The person's answer a Linear implement carries: the reply to an earlier implement's questions. */
 const replyOf = (ctx: RunContext): string | null => (ctx.trigger.kind === "linear" && ctx.trigger.run === "implement" ? ctx.trigger.message : null);

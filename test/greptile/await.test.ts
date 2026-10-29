@@ -279,6 +279,19 @@ describe("runAwaitReview", () => {
     expect(gitlab.notes.filter((note) => !note.includes("implement-summary"))).toEqual([]);
   });
 
+  it("runs with no greptile configured: green and nothing to answer passes, a person's comment is a round", async () => {
+    const config: StewardConfig = { ...makeConfig(), greptile: undefined, reviewLoop: { prompt: join(dataDir, "fix.md"), maxRounds: 5, pollSeconds: 60, mrTimeoutMinutes: 60, reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 60, ciLogLines: 200 } };
+    const id = knownMrLoop();
+
+    expect(await runAwaitReview(claim(id), { ...makeDeps(), config })).toEqual({ status: "succeeded" });
+    expect(loopOf(id).state).toBe("passed");
+
+    stores.loops.update(id, { state: "awaiting_review", waitStartedAt: NOW.toISOString() });
+    gitlab.addDiscussion("ada", "Why does the buffer grow?", { resolvable: false });
+    expect(await runAwaitReview(claim(id), { ...makeDeps(), config })).toEqual({ status: "succeeded" });
+    expect(loopOf(id)).toMatchObject({ state: "fixing", botRounds: 0 });
+  });
+
   it("counts a fix round only bots started toward the cap, and resets the count for a person's", async () => {
     const id = knownMrLoop();
     stores.loops.update(id, { botRounds: 2 });

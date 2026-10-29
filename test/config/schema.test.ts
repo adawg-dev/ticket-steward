@@ -1,4 +1,4 @@
-import { BrainSchema, RESOURCE_GUARD_DEFAULTS, StewardConfigSchema, appPortOf, defineConfig } from "../../src/config/schema.js";
+import { BrainSchema, RESOURCE_GUARD_DEFAULTS, StewardConfigSchema, appPortOf, defineConfig, reviewConfigOf } from "../../src/config/schema.js";
 import type { StewardConfigInput } from "../../src/config/schema.js";
 
 const minimalInput: StewardConfigInput = {
@@ -139,18 +139,26 @@ describe("greptile config", () => {
   const implement = { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } };
   const greptile = { botUsername: "g", prompt: "./prompts/fix.md" };
   const valid = { ...minimalInput, implement, brain: { kind: "claude-code", model: "m", maxTurns: 1, timeoutMinutes: 1 }, codehost: { kind: "gitlab", baseUrl: "https://gitlab.example.com", project: "g/p" }, greptile };
-  it("parses with every default", () => {
+  const loopDefaults = { maxRounds: 5, prompt: "./prompts/fix.md", pollSeconds: 300, mrTimeoutMinutes: 30, reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 30, ciLogLines: 200 };
+
+  it("reads the loop's keys an older config keeps in greptile, with the loop's defaults", () => {
     const parsed = StewardConfigSchema.parse(valid);
-    expect(parsed.greptile).toEqual({
-      botUsername: "g",
-      maxRounds: 5,
-      prompt: "./prompts/fix.md",
-      pollSeconds: 300,
-      mrTimeoutMinutes: 30,
-      reviewTimeoutMinutes: 30,
-      pipelineTimeoutMinutes: 30,
-      ciLogLines: 200,
-    });
+    expect(parsed.greptile).toEqual({ botUsername: "g", prompt: "./prompts/fix.md" });
+    expect(reviewConfigOf(parsed)).toEqual(loopDefaults);
+  });
+
+  it("runs the review loop with no greptile at all, and prefers reviewLoop to greptile's keys", () => {
+    const loopOnly = StewardConfigSchema.parse({ ...valid, greptile: undefined, reviewLoop: { prompt: "./prompts/fix.md" } });
+    expect(loopOnly.greptile).toBeUndefined();
+    expect(reviewConfigOf(loopOnly)).toEqual(loopDefaults);
+    const both = StewardConfigSchema.parse({ ...valid, greptile: { botUsername: "g", prompt: "./old.md" }, reviewLoop: { prompt: "./new.md", maxRounds: 3 } });
+    expect(reviewConfigOf(both)).toEqual({ ...loopDefaults, prompt: "./new.md", maxRounds: 3 });
+    expect(reviewConfigOf(StewardConfigSchema.parse({ ...valid, greptile: undefined }))).toBeNull();
+  });
+
+  it("needs the loop's prompt somewhere when Greptile is configured", () => {
+    expect(messages({ ...valid, greptile: { botUsername: "g" } })).toContain("greptile is a reviewer of the review loop: set reviewLoop (with its prompt)");
+    expect(StewardConfigSchema.safeParse({ ...valid, greptile: { botUsername: "g" }, reviewLoop: { prompt: "./p.md" } }).success).toBe(true);
   });
 
   it("defaults the mcp url", () => {

@@ -1,4 +1,5 @@
 import type { MergeRequestInfo } from "../codehost/gitlabMr.js";
+import { reviewConfigOf } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
@@ -16,14 +17,14 @@ export interface LoopStart {
 export const isLinearImplement = (trigger: TriggerEvent): boolean => trigger.kind === "linear" && trigger.run === "implement";
 
 /**
- * Starts the Greptile fix loop for a pushed implement job from Linear: creates the loop at round 0 and enqueues its
+ * Starts the review loop for a pushed implement job from Linear: creates the loop at round 0 and enqueues its
  * first await. Returns the existing loop's id when the job already has one, and null when no loop applies.
  */
 export const startLoop = (deps: Pick<PipelineDeps, "config" | "stores">, job: Job, start: LoopStart): number | null => {
   const { stores } = deps;
   const existing = stores.loops.forImplementJob(job.id);
   if (existing !== null) return existing.id;
-  if (deps.config.greptile === undefined || !isLinearImplement(job.trigger) || job.pushedAt === null) return null;
+  if (reviewConfigOf(deps.config) === null || !isLinearImplement(job.trigger) || job.pushedAt === null) return null;
   const { branch, commitSha } = job;
   if (branch === null || commitSha === null) return null;
   return transaction(stores.db, () => {
@@ -84,8 +85,8 @@ const stopWithoutMr = async (deps: RestartDeps, loop: Loop): Promise<JobOutcome>
 export const runRestart = async (ctx: RunContext, deps: RestartDeps): Promise<JobOutcome> => {
   const { config, gitlab } = deps;
   if (ctx.trigger.kind !== "loop") return fail("restart needs a loop trigger");
-  if (config.greptile === undefined || gitlab === undefined || config.codehost.kind !== "gitlab") {
-    return fail("the Greptile loop needs greptile configured, a GitLab code host and GITLAB_TOKEN");
+  if (reviewConfigOf(config) === null || gitlab === undefined || config.codehost.kind !== "gitlab") {
+    return fail("the review loop needs reviewLoop configured, a GitLab code host and GITLAB_TOKEN");
   }
   const loopId = ctx.trigger.loopId;
   const loop = deps.stores.loops.get(loopId);

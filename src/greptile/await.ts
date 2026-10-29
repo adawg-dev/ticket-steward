@@ -8,7 +8,8 @@ import { logger } from "../log.js";
 import { buildImplementSummary } from "../implement/publish.js";
 import { ACTIVE_LOOP_STATES, transaction, type Loop } from "../store/index.js";
 import { linearSessionFor, mergeRequestOpened } from "../linear/session.js";
-import { seedSettings, type Settings } from "../settings/schema.js";
+import { loopSettings, seedSettings, type Settings } from "../settings/schema.js";
+import { reviewConfigOf } from "../config/schema.js";
 import { evaluateRound, startedBy, workList, type RoundInput } from "./evaluate.js";
 import { LOOP_MARKER, noteOnce, publishHandback, publishPassed, publishStop } from "./publish.js";
 import { findSummary } from "./summary.js";
@@ -126,10 +127,12 @@ const retryFailures = async (
 export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   const { config, stores } = deps;
   if (ctx.trigger.kind !== "loop") return fail("await_review needs a loop trigger");
-  const greptile = config.greptile;
-  if (greptile === undefined || deps.gitlab === undefined || config.codehost.kind !== "gitlab") {
-    return fail("the Greptile loop needs greptile configured, a GitLab code host and GITLAB_TOKEN");
+  const review = reviewConfigOf(config);
+  if (review === null || deps.gitlab === undefined || config.codehost.kind !== "gitlab") {
+    return fail("the review loop needs reviewLoop configured, a GitLab code host and GITLAB_TOKEN");
   }
+  const greptileBot = config.greptile?.botUsername ?? null;
+  const trustedBots = greptileBot === null ? [] : [greptileBot];
   const loopId = ctx.trigger.loopId;
   const stored = stores.loops.get(loopId);
   if (stored === null) return fail(`loop ${loopId} not found`);
@@ -138,7 +141,7 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   const now = deps.now();
   let observed: Observed;
   try {
-    observed = await observe(deps, stored, config.codehost.project, [greptile.botUsername], now);
+    observed = await observe(deps, stored, config.codehost.project, trustedBots, now);
     if (observed.mr?.state === "opened") await postImplementSummary(deps, reload(deps, loopId), observed.discussions);
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
@@ -149,16 +152,16 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   // Parked (the steward was unassigned) while this poll read GitLab: nothing more for it to do.
   if (!ACTIVE_LOOP_STATES.includes(loop.state)) return { status: "succeeded", warning: `loop ${loopId} is already ${loop.state}` };
   const { mr } = observed;
-  const settings = deps.settings?.get() ?? seedSettings(config);
+  const settings = loopSettings(config, deps.settings?.get() ?? seedSettings(config));
   const work = observed.kindOf === null ? [] : workList(observed.discussions, observed.kindOf);
   const input: RoundInput = {
     loop,
-    config: greptile,
+    config: review,
     settings,
     now,
     ticketClosed: observed.ticketClosed,
     mr,
-    greptile: mr === null ? null : findSummary(mr, observed.discussions, greptile.botUsername),
+    greptile: mr === null || greptileBot === null ? null : findSummary(mr, observed.discussions, greptileBot),
     workList: work,
     startedBy: startedBy(work),
     greptileStatus: null,
@@ -167,14 +170,14 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   let decision = evaluateRound(input);
   // A red pipeline whose failures were all retried waits for its rerun: no round, and the bot-round cap is not reached.
   if (decision.kind === "triage" && mr !== null) {
-    const retried = await retryFailures(deps, loop, mr, decision.pipelineId, settings, now, greptile.pollSeconds);
+    const retried = await retryFailures(deps, loop, mr, decision.pipelineId, settings, now, review.pollSeconds);
     if (retried !== null) return retried;
     decision = evaluateRound({ ...input, ciTriaged: true });
   }
 
   switch (decision.kind) {
     case "wait":
-      return { status: "deferred", until: nextPoll(now, greptile.pollSeconds, decision.deadline) };
+      return { status: "deferred", until: nextPoll(now, review.pollSeconds, decision.deadline) };
     case "passed": {
       const head = mr?.sha ?? loop.headSha;
       const last = loop.history.at(-1);
