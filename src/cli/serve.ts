@@ -1,12 +1,16 @@
 import type { Command } from "commander";
 import type { FastifyInstance } from "fastify";
+import { HEARTBEAT_MS } from "../chat/lease.js";
 import { kubernetesRuntime } from "../config/schema.js";
 import { settingsOf } from "../implement/pipeline.js";
+import type { KubernetesChat } from "../k8s/chat.js";
+import { logger } from "../log.js";
 import { storeLedger } from "../push/ledger.js";
 import { remoteHeadOf } from "../push/service.js";
-import { ADMIN_HOST, ADMIN_PORT, buildAdminServer, writeAdminToken } from "../server/admin.js";
+import { ADMIN_HOST, ADMIN_PORT, buildAdminServer, heldChatRuns, writeAdminToken } from "../server/admin.js";
 import { buildServer } from "../server/app.js";
 import { buildInternalServer, INTERNAL_PORT } from "../server/internal.js";
+import type { Stores } from "../store/index.js";
 import { startWorker, type WorkerDeps } from "../worker/index.js";
 import { errorMessage, exitWith, fail, loadFromProgram, println, type CliContext } from "./context.js";
 import { buildRuntime, type Runtime } from "./runtime.js";
@@ -35,6 +39,31 @@ const internalServer = (runtime: Runtime, kubernetes: NonNullable<Runtime["kuber
   });
 };
 
+/**
+ * Stops the chat runs no live lease holds, now and every `HEARTBEAT_MS`: a chat whose CLI died (or that the restart cut
+ * off) would otherwise keep its run pod and tokens, and once its lease is stale a job on the ticket may start beside it.
+ * Returns the function that stops the timer.
+ */
+export const reapChats = async (chat: KubernetesChat, stores: Pick<Stores, "leases">, everyMs = HEARTBEAT_MS): Promise<() => void> => {
+  let reaping = false;
+  const reap = async (): Promise<void> => {
+    if (reaping) return;
+    reaping = true;
+    try {
+      const held = heldChatRuns(stores);
+      await chat.reap((runId) => held.has(runId));
+    } finally {
+      reaping = false;
+    }
+  };
+  await reap();
+  const timer = setInterval(() => {
+    reap().catch((err: unknown) => logger.warn({ err: errorMessage(err) }, "steward chat: the runs no lease holds could not be reaped"));
+  }, everyMs);
+  timer.unref();
+  return () => clearInterval(timer);
+};
+
 export const registerServe = (program: Command, ctx: CliContext): void => {
   program
     .command("serve")
@@ -46,13 +75,17 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       const internal = kubernetes === undefined ? null : internalServer(runtime, kubernetes);
       let admin: FastifyInstance | null = null;
       let workerDeps: WorkerDeps = runtime.deps;
+      let stopReaping = (): void => undefined;
       const k8s = kubernetesRuntime(config);
       if (kubernetes !== undefined && internal !== null && k8s !== null) {
         try {
           // Before the worker claims anything: a live run pod is waited on again, never started a second time.
           await kubernetes.reattach();
+          // Also before the worker: a chat run left by the last start, its lease gone, no longer holds the ticket's session.
+          if (runtime.chat !== undefined) stopReaping = await reapChats(runtime.chat, runtime.stores);
           await internal.listen({ port: INTERNAL_PORT, host: INTERNAL_HOST });
         } catch (err) {
+          stopReaping();
           return fail(ctx, `could not reattach to the run pods: ${errorMessage(err)}`);
         }
         try {
@@ -62,6 +95,7 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
           admin = buildAdminServer({ token, stores, resolveTicket: (key) => tracker.resolveIssueId(key), ...(chat === undefined ? {} : { chat }) });
           await admin.listen({ port: ADMIN_PORT, host: ADMIN_HOST });
         } catch (err) {
+          stopReaping();
           await internal.close();
           return fail(ctx, `could not start the admin API: ${errorMessage(err)}`);
         }
@@ -71,6 +105,7 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       try {
         worker = startWorker(workerDeps);
       } catch (err) {
+        stopReaping();
         await internal?.close();
         await admin?.close();
         return fail(ctx, errorMessage(err));
@@ -84,6 +119,7 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
 
       const shutdown = async (): Promise<void> => {
         println(ctx, "shutting down: waiting for in-flight jobs");
+        stopReaping();
         await worker.stop();
         await app.close();
         await internal?.close();

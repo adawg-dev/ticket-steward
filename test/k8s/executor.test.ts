@@ -37,8 +37,10 @@ class FakeCluster {
       return Promise.resolve({});
     },
     listNamespacedJob: ({ labelSelector }) => {
-      const [key = "", value = ""] = (labelSelector ?? "").split("=");
-      return Promise.resolve({ items: [...this.jobs.values()].filter((job) => job.metadata?.labels?.[key] === value) });
+      // `key=value`, or a bare `key`: every Job that carries the label.
+      const [key = "", value] = (labelSelector ?? "").split("=");
+      const labelled = (job: V1Job): boolean => (value === undefined ? job.metadata?.labels?.[key] !== undefined : job.metadata?.labels?.[key] === value);
+      return Promise.resolve({ items: [...this.jobs.values()].filter(labelled) });
     },
   };
 
@@ -293,5 +295,45 @@ describe("kubernetesExecutor", () => {
     expect(stores.jobs.get(jobId)?.status).toBe("queued");
     // That pod is left to finish its session upload.
     expect(cluster.jobs.has(jobNameOf(earlier.runId))).toBe(true);
+  });
+
+  it("stopOrphans after a restart stops the chat runs no lease holds and revokes their tokens, leaving the rest", async () => {
+    const chat = (runId: string): RunSpec => podSpecFor({ runId, jobId: 0, kind: "chat", interactive: true, push: null });
+    // The restart cut these chats off: their pods run on, and their tokens are still valid.
+    const orphan = chat("chat-1");
+    const held = chat("chat-2");
+    const ended = chat("chat-3");
+    for (const spec of [orphan, held, ended]) cluster.leave(spec);
+    cluster.end(ended.runId, "Complete");
+    const tokens = Object.fromEntries(["chat-1", "chat-2", "chat-3", "chat-4"].map((runId) => [runId, stores.runTokens.issue(runId, "tools")]));
+    const job = runningJob("API-1");
+    stores.jobs.recordRun(job.jobId, job.spec.runId);
+    cluster.leave(job.spec);
+    const jobToken = stores.runTokens.issue(job.spec.runId, "runner");
+
+    expect((await executor.stopOrphans("chat-", (runId) => runId === held.runId)).sort()).toEqual(["chat-1", "chat-3", "chat-4"]);
+
+    expect(cluster.deletedJobs).toEqual([{ name: jobNameOf(orphan.runId), propagationPolicy: "Foreground" }]);
+    expect(cluster.configMaps.has(specConfigMapOf(orphan.runId))).toBe(false);
+    for (const runId of ["chat-1", "chat-3", "chat-4"]) expect(stores.runTokens.verify(runId, "tools", tokens[runId] ?? "")).toBe(false);
+    // An ended Job is left to its TTL: its session sidecar may still be uploading.
+    expect(cluster.jobs.has(jobNameOf(ended.runId))).toBe(true);
+    // The held chat and the job's run are untouched.
+    expect(cluster.jobs.has(jobNameOf(held.runId))).toBe(true);
+    expect(stores.runTokens.verify(held.runId, "tools", tokens["chat-2"] ?? "")).toBe(true);
+    expect(cluster.jobs.has(jobNameOf(job.spec.runId))).toBe(true);
+    expect(stores.runTokens.verify(job.spec.runId, "runner", jobToken)).toBe(true);
+    // Nothing is left to stop.
+    expect(await executor.stopOrphans("chat-", (runId) => runId === held.runId)).toEqual([]);
+  });
+
+  it("stopOrphans skips a chat run this process still waits on", async () => {
+    const spec = podSpecFor({ runId: "chat-5", jobId: 0, kind: "chat", interactive: true, push: null, identifier: "API-5" });
+    const executed = executor.execute(spec);
+    await until(() => cluster.createdJobs.length === 1);
+    expect(await executor.stopOrphans("chat-", () => false)).toEqual([]);
+    expect(cluster.jobs.has(jobNameOf(spec.runId))).toBe(true);
+    await executor.cancel(spec.runId);
+    expect((await settles(executed)).report).toMatchObject({ interrupted: true });
   });
 });

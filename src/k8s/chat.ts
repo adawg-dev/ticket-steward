@@ -2,7 +2,7 @@ import type { CoreV1Api } from "@kubernetes/client-node";
 import { errorMessage } from "../core/workspace.js";
 import { logger } from "../log.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
-import type { ChatEnd, ChatLauncher, ChatStart } from "../server/admin.js";
+import { CHAT_RUN_PREFIX, type ChatEnd, type ChatLauncher, type ChatStart } from "../server/admin.js";
 import type { KubernetesExecutor } from "./executor.js";
 import { RUN_LABELS } from "./runJob.js";
 
@@ -25,15 +25,26 @@ interface ChatRun {
   settled: Settled | null;
 }
 
+/** The chat launcher of the Kubernetes runtime, with what `serve` uses to stop the chat runs no lease holds. */
+export interface KubernetesChat extends ChatLauncher {
+  /**
+   * Ends every chat run `held` rejects: one this process started as `end` does (grace, then stop), and any other chat
+   * run pod or token left behind (started before a restart, or its CLI died without releasing) is stopped and revoked.
+   * Returns the run ids it ended or stopped.
+   */
+  reap(held: (runId: string) => boolean): Promise<string[]>;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * `steward chat` on Kubernetes: each chat is an interactive run (`interactiveSpec`) the executor runs as a run pod like
  * any job's, with the same sidecars, policy hook and session sync. `start` resolves with the pod's name once it exists;
  * the CLI attaches to its agent container. `end` gives the run a grace period to report after the person left, then stops it.
+ * `reap` does the same for the runs whose lease is gone, so a chat whose CLI or steward died does not keep its pod and tokens.
  */
 export const kubernetesChat = (p: {
-  executor: Pick<KubernetesExecutor, "execute" | "cancel">;
+  executor: Pick<KubernetesExecutor, "execute" | "cancel" | "stopOrphans">;
   pods: PodsApi;
   namespace: string;
   interactiveSpec: (start: ChatStart) => RunSpec;
@@ -41,7 +52,7 @@ export const kubernetesChat = (p: {
   pollMs?: number;
   podTimeoutMs?: number;
   endGraceMs?: number;
-}): ChatLauncher => {
+}): KubernetesChat => {
   const pollMs = p.pollMs ?? DEFAULT_POLL_MS;
   const runs = new Map<string, ChatRun>();
 
@@ -67,6 +78,21 @@ export const kubernetesChat = (p: {
     if ("error" in settled) return { ok: false, error: p.redact(settled.error), unpushed: null };
     const { report, work } = settled.result;
     return { ok: report.ok, error: report.error === null ? null : p.redact(report.error), unpushed: p.redact(work.unpushed) };
+  };
+
+  const end = async (runId: string): Promise<ChatEnd> => {
+    const run = runs.get(runId);
+    // Started before a restart: nothing waits on it here, so it is stopped and its tokens and spec go.
+    if (run === undefined) {
+      await p.executor.cancel(runId);
+      return { ok: null, error: null, unpushed: null };
+    }
+    runs.delete(runId);
+    const settled = await settle(run, p.endGraceMs ?? DEFAULT_END_GRACE_MS);
+    if (settled !== null) return ended(settled);
+    logger.info({ runId }, "steward chat: the run did not end after the person left; stopping it");
+    await p.executor.cancel(runId);
+    return ended(await run.done);
   };
 
   return {
@@ -100,19 +126,19 @@ export const kubernetesChat = (p: {
       }
     },
 
-    end: async (runId) => {
-      const run = runs.get(runId);
-      // Started before a restart: nothing waits on it here, so it is stopped and its tokens and spec go.
-      if (run === undefined) {
-        await p.executor.cancel(runId);
-        return { ok: null, error: null, unpushed: null };
-      }
-      runs.delete(runId);
-      const settled = await settle(run, p.endGraceMs ?? DEFAULT_END_GRACE_MS);
-      if (settled !== null) return ended(settled);
-      logger.info({ runId }, "steward chat: the run did not end after the person left; stopping it");
-      await p.executor.cancel(runId);
-      return ended(await run.done);
+    end,
+
+    reap: async (held) => {
+      // Taken out of `runs` by `end` at once, so a reap that overlaps this one does not end them again.
+      const mine = [...runs.keys()].filter((runId) => !held(runId));
+      const results = await Promise.allSettled(mine.map((runId) => end(runId)));
+      results.forEach((result, i) => {
+        if (result.status === "rejected") logger.warn({ runId: mine[i], err: errorMessage(result.reason) }, "steward chat: a run no lease holds could not be ended");
+      });
+      if (mine.length > 0) logger.info({ runIds: mine }, "steward chat: ended runs whose lease is gone");
+      // Runs this process waits on are the executor's, and skipped there; the others no lease holds are stopped.
+      const others = await p.executor.stopOrphans(CHAT_RUN_PREFIX, held);
+      return [...mine, ...others];
     },
   };
 };

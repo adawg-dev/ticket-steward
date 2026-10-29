@@ -10,10 +10,9 @@ import type { PipelineDeps } from "../core/deps.js";
 import type { RunExecutor } from "../run/executor.js";
 import { collectSecretValues, Redactor } from "../core/redact.js";
 import { interactiveChatSpec } from "../chat/run.js";
-import { kubernetesChat } from "../k8s/chat.js";
+import { kubernetesChat, type KubernetesChat } from "../k8s/chat.js";
 import { clusterApis } from "../k8s/cluster.js";
 import { kubernetesExecutor, type KubernetesExecutor } from "../k8s/executor.js";
-import type { ChatLauncher } from "../server/admin.js";
 import { openStores, type Stores } from "../store/index.js";
 import { createLinearTracker } from "../tracker/linear/index.js";
 import type { Tracker } from "../tracker/types.js";
@@ -30,8 +29,8 @@ export interface Runtime {
   deps: PipelineDeps;
   /** On the Kubernetes runtime: the executor that runs each job as a run pod, which `serve` also reattaches and serves callbacks for. */
   kubernetes?: KubernetesExecutor;
-  /** On the Kubernetes runtime: `steward chat`'s interactive run pods, which serve's admin API launches. */
-  chat?: ChatLauncher;
+  /** On the Kubernetes runtime: `steward chat`'s interactive run pods, which serve's admin API launches and serve reaps. */
+  chat?: KubernetesChat;
 }
 
 export const openMirror = (loaded: LoadedConfig): Mirror =>

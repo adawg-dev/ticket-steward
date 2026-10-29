@@ -33,6 +33,12 @@ export interface KubernetesExecutor extends RunExecutor, RunCallbacks {
    * the next `execute` of the same run; the others are requeued and their run's objects removed.
    */
   reattach(): Promise<void>;
+  /**
+   * Stops the runs whose id starts with `prefix` that nothing here waits on and `keep` does not hold: a live Job is
+   * deleted, and the run's tokens and spec go. An ended Job is left to its TTL (its session sidecar may still be
+   * uploading); a run with neither a live Job nor tokens is skipped. Returns the run ids it stopped.
+   */
+  stopOrphans(prefix: string, keep: (runId: string) => boolean): Promise<string[]>;
   /** The specs of adopted runs no `execute` has taken yet. */
   adopted(): RunSpec[];
   /** Stops an adopted run nobody will wait on (its job ended another way): its Job, tokens and spec are removed. */
@@ -322,6 +328,24 @@ export const kubernetesExecutor = (p: {
         logger.info({ jobId: job.id, runId: job.runId }, "requeued a running job whose run pod is gone");
       }
       if (runs.size > 0) ensureWatch();
+    },
+
+    stopOrphans: async (prefix, keep) => {
+      const list = await p.batch.listNamespacedJob({ namespace, labelSelector: RUN_LABELS.runId });
+      const live = new Set(
+        list.items.filter((job) => jobEnded(job) === null).flatMap((job) => {
+          const runId = job.metadata?.labels?.[RUN_LABELS.runId];
+          return runId === undefined ? [] : [runId];
+        }),
+      );
+      const candidates = new Set([...live, ...p.stores.runTokens.runIds()]);
+      const orphans = [...candidates].filter((runId) => runId.startsWith(prefix) && !runs.has(runId) && !keep(runId));
+      for (const runId of orphans) {
+        if (live.has(runId)) await deleteJob(runId);
+        await endRun(runId);
+        logger.info({ runId }, "stopped a run nothing holds");
+      }
+      return orphans;
     },
 
     adopted: () => [...runs.values()].filter((run) => run.adopted).map((run) => run.spec),

@@ -14,6 +14,7 @@ export class RunTokens {
   private readonly insert;
   private readonly select;
   private readonly remove;
+  private readonly selectRuns;
 
   constructor(db: Database) {
     this.insert = db.prepare<[string, string, string, string]>(
@@ -21,6 +22,7 @@ export class RunTokens {
     );
     this.select = db.prepare<[string, string], { token_hash: string }>("SELECT token_hash FROM run_tokens WHERE run_id = ? AND role = ?");
     this.remove = db.prepare<[string]>("DELETE FROM run_tokens WHERE run_id = ?");
+    this.selectRuns = db.prepare<[], { run_id: string }>("SELECT DISTINCT run_id FROM run_tokens ORDER BY run_id");
   }
 
   /** A new token for the run's role; one issued before for the same role stops working. */
@@ -36,6 +38,11 @@ export class RunTokens {
     const stored = Buffer.from(row.token_hash, "hex");
     const given = sha256(token);
     return stored.length === given.length && timingSafeEqual(stored, given);
+  }
+
+  /** The runs that hold tokens: those not yet revoked. */
+  runIds(): string[] {
+    return this.selectRuns.all().map((row) => row.run_id);
   }
 
   /** Both of the run's tokens stop working. */

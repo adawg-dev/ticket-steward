@@ -1,11 +1,11 @@
 import type { V1Pod } from "@kubernetes/client-node";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../src/chat/session.js";
-import { kubernetesChat, type PodsApi } from "../../src/k8s/chat.js";
+import { kubernetesChat, type KubernetesChat, type PodsApi } from "../../src/k8s/chat.js";
 import { containerState } from "../../src/k8s/cluster.js";
 import type { KubernetesExecutor } from "../../src/k8s/executor.js";
 import type { RunReport, RunSpec, WorkReport } from "../../src/run/protocol.js";
-import type { ChatLauncher, ChatStart } from "../../src/server/admin.js";
+import type { ChatStart } from "../../src/server/admin.js";
 import { podSpecFor } from "./helpers.js";
 
 const SESSION: AgentSession = { sessionId: "session-1", worktreeName: "ticket-API-1", headSha: "a".repeat(40), branch: "fix/API-1", loopId: null, jobId: 7 };
@@ -17,9 +17,12 @@ type Result = { report: RunReport; work: WorkReport };
 class FakeExecutor {
   readonly specs: RunSpec[] = [];
   readonly cancelled: string[] = [];
+  /** What `stopOrphans` was asked, and the run ids it reports stopped. */
+  readonly orphanCalls: Array<{ prefix: string; kept: string[] }> = [];
+  orphans: string[] = [];
   private readonly finishers = new Map<string, { resolve: (result: Result) => void; reject: (err: Error) => void }>();
 
-  readonly api: Pick<KubernetesExecutor, "execute" | "cancel"> = {
+  readonly api: Pick<KubernetesExecutor, "execute" | "cancel" | "stopOrphans"> = {
     execute: (spec) =>
       new Promise<Result>((resolve, reject) => {
         this.specs.push(spec);
@@ -29,6 +32,10 @@ class FakeExecutor {
       this.cancelled.push(runId);
       this.finish(runId, { ok: false, error: "the run pod ended without a report", interrupted: true }, "");
       return Promise.resolve();
+    },
+    stopOrphans: (prefix, keep) => {
+      this.orphanCalls.push({ prefix, kept: ["chat-1", "chat-2", "chat-8"].filter(keep) });
+      return Promise.resolve(this.orphans);
     },
   };
 
@@ -46,7 +53,7 @@ class FakeExecutor {
 
 let executor: FakeExecutor;
 let pods: V1Pod[];
-let launcher: ChatLauncher;
+let launcher: KubernetesChat;
 
 const podsApi: PodsApi = {
   listNamespacedPod: ({ labelSelector }) => {
@@ -115,6 +122,22 @@ describe("kubernetesChat", () => {
   it("stops a run it did not start (the steward restarted while the chat was open)", async () => {
     expect(await launcher.end("chat-9")).toEqual({ ok: null, error: null, unpushed: null });
     expect(executor.cancelled).toEqual(["chat-9"]);
+  });
+
+  it("reap ends its runs no lease holds, keeps the held ones, and has the executor stop the other chat runs", async () => {
+    pods.push({ metadata: { name: "run-chat-1-xyz", labels: { "steward.run-id": "chat-1" } } });
+    pods.push({ metadata: { name: "run-chat-2-xyz", labels: { "steward.run-id": "chat-2" } } });
+    await launcher.start(START);
+    await launcher.start({ ...START, runId: "chat-2" });
+    executor.orphans = ["chat-8"];
+    expect(await launcher.reap((runId) => runId === "chat-2")).toEqual(["chat-1", "chat-8"]);
+    // Its own run had the grace period, then was stopped; the held one goes on.
+    expect(executor.cancelled).toEqual(["chat-1"]);
+    expect(executor.orphanCalls).toEqual([{ prefix: "chat-", kept: ["chat-2"] }]);
+    // A later reap does not end it again; once its lease is gone the held run is ended too.
+    executor.orphans = [];
+    expect(await launcher.reap(() => false)).toEqual(["chat-2"]);
+    expect(executor.cancelled).toEqual(["chat-1", "chat-2"]);
   });
 });
 

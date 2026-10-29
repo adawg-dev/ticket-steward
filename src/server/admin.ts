@@ -49,8 +49,17 @@ export interface AdminDeps {
   chat?: ChatLauncher;
 }
 
+/** Every chat run's id starts with this; no job's run does (theirs are `<jobId>-<attempt>`). */
+export const CHAT_RUN_PREFIX = "chat-";
+
 /** The run id of the interactive run a lease holds: fixed by the lease, so a restarted steward can still end it. */
-export const chatRunIdOf = (leaseId: number): string => `chat-${leaseId}`;
+export const chatRunIdOf = (leaseId: number): string => `${CHAT_RUN_PREFIX}${leaseId}`;
+
+/** The chat runs a live lease holds; stale leases (their CLI died) are pruned first, so their runs are not held. */
+export const heldChatRuns = (stores: Pick<Stores, "leases">): Set<string> => {
+  stores.leases.pruneStale();
+  return new Set(stores.leases.active().map((lease) => chatRunIdOf(lease.id)));
+};
 
 /** A fresh token in `<runtimeDir>/admin.token`, mode 0600; returns it. */
 export const writeAdminToken = async (runtimeDir: string): Promise<string> => {
