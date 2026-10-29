@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { KEYPROXY_HOST, KEYPROXY_PORT, modelUpstream, startKeyproxy, type ModelUpstream } from "../keyproxy/server.js";
+import { KEYPROXY_HOST, KEYPROXY_PORT, MODEL_SECRET_NAMES, modelUpstream, startKeyproxy, type ModelUpstream } from "../keyproxy/server.js";
 import { parseListen } from "../tools/server.js";
 import { errorMessage, exitWith, fail, loadFromProgram, println, type CliContext } from "./context.js";
 
@@ -13,7 +13,7 @@ export const registerKeyproxy = (program: Command, ctx: CliContext): void => {
       let upstream: ModelUpstream;
       try {
         listen = parseListen(opts.listen, "keyproxy");
-        upstream = modelUpstream((await loadFromProgram(program, ctx)).secrets);
+        upstream = modelUpstream((await loadFromProgram(program, ctx, { secrets: MODEL_SECRET_NAMES })).secrets);
       } catch (err) {
         return fail(ctx, `keyproxy: ${errorMessage(err)}`);
       }

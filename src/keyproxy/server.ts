@@ -24,6 +24,9 @@ export interface ModelUpstream {
 
 const present = (value: string | undefined): value is string => value !== undefined && value !== "";
 
+/** The secrets `modelUpstream` reads; the keyproxy sidecar loads these and no other. */
+export const MODEL_SECRET_NAMES = ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+
 /** The upstream and the credential the claude-code brain would use from these secrets, in its order. */
 export const modelUpstream = (secrets: Secrets): ModelUpstream => {
   const baseUrl = present(secrets.ANTHROPIC_BASE_URL) ? secrets.ANTHROPIC_BASE_URL : DEFAULT_BASE_URL;

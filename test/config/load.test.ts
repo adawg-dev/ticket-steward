@@ -195,6 +195,13 @@ describe("implement secrets", () => {
     await expect(loadConfig({ configPath: join(dir, "steward.config.ts") })).rejects.toThrow("implement requires GITLAB_PUSH_TOKEN in .env");
   });
 
+  it("leaves out .env keys that are not among the named secrets", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "steward-load-"));
+    writeFiles(dir, "GITLAB_PUSH_TOKEN=glpat-push-token-value\nLINEAR_API_KEY=lin\nMIRROR_TOKEN=mirror\n");
+    const loaded = await loadConfig({ configPath: join(dir, "steward.config.ts"), secretNames: ["MIRROR_TOKEN", "MIRROR_USERNAME"] });
+    expect(loaded.secrets).toEqual({ MIRROR_TOKEN: "mirror" });
+  });
+
   it("resolves implement.prompt against the config dir and reads the push token", async () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-load-"));
     writeFiles(dir, "GITLAB_PUSH_TOKEN=glpat-push-token-value\n");
@@ -219,6 +226,21 @@ describe("loadConfig with secrets from AWS Secrets Manager", () => {
   it("keeps the push token rule, naming the secrets map", async () => {
     await writeSource(join(dir, "steward.config.ts"), configSource(awsBlock({ LINEAR_API_KEY: "DEV_LINEAR" })));
     await expect(loadConfig({ cwd: dir, secretFetcher: fetcher({ DEV_LINEAR: "lin_api_aws" }) })).rejects.toThrow("implement requires GITLAB_PUSH_TOKEN in secrets.map");
+  });
+
+  it("reads only the named secrets, and asks for the push token only when it is among them", async () => {
+    await writeSource(
+      join(dir, "steward.config.ts"),
+      configSource(awsBlock({ GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_API_KEY: "DEV_LINEAR", ANTHROPIC_API_KEY: "DEV_MODEL", MIRROR_TOKEN: "DEV_MIRROR" })),
+    );
+    const reads: string[] = [];
+    const recording = { get: async (id: string) => (reads.push(id), `value-of-${id}`) };
+
+    const { secrets } = await loadConfig({ cwd: dir, secretFetcher: recording, secretNames: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] });
+
+    expect(secrets).toEqual({ ANTHROPIC_API_KEY: "value-of-DEV_MODEL" });
+    expect(reads).toEqual(["DEV_MODEL"]);
+    await expect(loadConfig({ cwd: dir, secretFetcher: fetcher({ DEV_MIRROR: "m" }), secretNames: ["GITLAB_PUSH_TOKEN", "MIRROR_TOKEN"] })).rejects.toThrow("Secrets Manager: DEV_PUSH not found");
   });
 
   it("fails naming a missing secret id", async () => {

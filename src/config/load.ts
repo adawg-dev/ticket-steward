@@ -6,11 +6,11 @@ import { createJiti } from "jiti";
 import { StewardConfigSchema } from "./schema.js";
 import { overlayTemplateIssues } from "../overlay/template.js";
 import { loadSecretsFrom } from "./secretSource.js";
-import type { SecretFetcher, Secrets } from "./secretSource.js";
+import type { SecretFetcher, SecretName, Secrets } from "./secretSource.js";
 import type { StewardConfig } from "./schema.js";
 
 export { SecretsSchema } from "./secretSource.js";
-export type { Secrets } from "./secretSource.js";
+export type { SecretName, Secrets } from "./secretSource.js";
 
 export interface LoadedConfig {
   config: StewardConfig;
@@ -44,8 +44,9 @@ const checkOverlayTemplate = async (templateDir: string): Promise<void> => {
 /**
  * `secretFetcher` stands in for Secrets Manager when `secrets.source` is "aws" (tests). `withoutSecrets` reads no secret
  * at all and returns none: a run pod's agent container holds no credential and has no identity to read one with.
+ * `secretNames` reads only those (a run pod's sidecars), and the push token rule applies only when it is among them.
  */
-export const loadConfig = async (opts: { configPath?: string; cwd?: string; secretFetcher?: SecretFetcher; withoutSecrets?: boolean }): Promise<LoadedConfig> => {
+export const loadConfig = async (opts: { configPath?: string; cwd?: string; secretFetcher?: SecretFetcher; withoutSecrets?: boolean; secretNames?: readonly SecretName[] }): Promise<LoadedConfig> => {
   const configPath = resolve(opts.configPath ?? join(opts.cwd ?? process.cwd(), CONFIG_FILENAME));
   const configDir = dirname(configPath);
   const jiti = createJiti(import.meta.url, { alias: { [PACKAGE_ALIAS]: packageEntryPath }, moduleCache: false });
@@ -69,8 +70,9 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string; secr
   if (config.workspace.overlayTemplateDir !== undefined) await checkOverlayTemplate(config.workspace.overlayTemplateDir);
   if (opts.withoutSecrets === true) return { config, secrets: {}, configPath, configDir };
   const secretsConfig = config.secrets ?? { source: "file" };
-  const secrets = await loadSecretsFrom(secretsConfig, configDir, opts.secretFetcher);
-  if (config.implement !== undefined && (secrets.GITLAB_PUSH_TOKEN ?? "") === "") {
+  const secrets = await loadSecretsFrom(secretsConfig, configDir, opts.secretFetcher, opts.secretNames);
+  const needsPushToken = opts.secretNames === undefined || opts.secretNames.includes("GITLAB_PUSH_TOKEN");
+  if (config.implement !== undefined && needsPushToken && (secrets.GITLAB_PUSH_TOKEN ?? "") === "") {
     throw new Error(`implement requires GITLAB_PUSH_TOKEN in ${secretsConfig.source === "file" ? ".env" : "secrets.map"}`);
   }
   return { config, secrets, configPath, configDir };

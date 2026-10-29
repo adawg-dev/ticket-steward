@@ -4,7 +4,7 @@ import type { Brain } from "../brain/types.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { codehostMcpSpec } from "../codehost/server.js";
 import type { CodeHost } from "../codehost/types.js";
-import { loadConfig, type LoadedConfig } from "../config/load.js";
+import { loadConfig, type LoadedConfig, type SecretName } from "../config/load.js";
 import type { SecretFetcher } from "../config/secretSource.js";
 import type { PodsApi } from "../k8s/chat.js";
 import type { AttachTty } from "../k8s/cluster.js";
@@ -93,8 +93,15 @@ export const fail = (ctx: CliContext, message: string, code = 1): never => {
 
 export const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-/** Loads the config named by the root `--config` option, or the one in the current directory; `withoutSecrets` reads none. */
-export const loadFromProgram = (program: Command, ctx: CliContext, opts: { withoutSecrets?: boolean } = {}): Promise<LoadedConfig> => {
+/**
+ * Loads the config named by the root `--config` option, or the one in the current directory; `withoutSecrets` reads
+ * none, `secrets` only those names.
+ */
+export const loadFromProgram = (program: Command, ctx: CliContext, opts: { withoutSecrets?: boolean; secrets?: readonly SecretName[] } = {}): Promise<LoadedConfig> => {
   const { config } = program.opts<{ config?: string }>();
-  return ctx.loadConfig({ ...(config === undefined ? {} : { configPath: config }), ...(opts.withoutSecrets === true ? { withoutSecrets: true } : {}) });
+  return ctx.loadConfig({
+    ...(config === undefined ? {} : { configPath: config }),
+    ...(opts.withoutSecrets === true ? { withoutSecrets: true } : {}),
+    ...(opts.secrets === undefined ? {} : { secretNames: opts.secrets }),
+  });
 };

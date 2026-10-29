@@ -16,7 +16,8 @@ export const registerRenderOverlay = (program: Command, ctx: CliContext): void =
     .action(async (opts: { template?: string; agentOut: string; rulesOut: string; guardOut: string }) => {
       let rendered: RenderedOverlay;
       try {
-        const { config } = await loadFromProgram(program, ctx);
+        // The template's ids are read directly below; no steward secret is needed here.
+        const { config } = await loadFromProgram(program, ctx, { withoutSecrets: true });
         const templateDir = opts.template ?? config.workspace.overlayTemplateDir;
         if (templateDir === undefined) throw new Error("no --template given and workspace.overlayTemplateDir is not set");
         const secrets = config.secrets ?? { source: "file" };

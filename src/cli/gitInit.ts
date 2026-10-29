@@ -15,7 +15,7 @@ export const registerGitInit = (program: Command, ctx: CliContext): void => {
       let spec: RunSpec;
       try {
         spec = RunSpecSchema.parse(JSON.parse(await readFile(opts.spec, "utf8")));
-        const { config, secrets } = await loadFromProgram(program, ctx);
+        const { config, secrets } = await loadFromProgram(program, ctx, { secrets: ["MIRROR_TOKEN", "MIRROR_USERNAME"] });
         await gitInit({ spec, fetchUrl: injectToken(config.workspace.fetchUrl, secrets.MIRROR_TOKEN, secrets.MIRROR_USERNAME) });
       } catch (err) {
         // Git's messages are scrubbed already; a URL in any other error is scrubbed here.

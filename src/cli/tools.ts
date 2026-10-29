@@ -20,6 +20,12 @@ export const AGENT_CHECKS_URL = "http://127.0.0.1:4183";
 export const CALLBACK_URL_ENV = "STEWARD_CALLBACK_URL";
 export const TOOLS_TOKEN_ENV = "STEWARD_TOOLS_TOKEN";
 
+/**
+ * The credentials the tools sidecar uses: the code host's API token (also Orbit's), the push token and the mirror's.
+ * No model key, tracker key or webhook secret; the push guard adds the overlay's values from the guard file.
+ */
+export const TOOLS_SECRET_NAMES = ["GITLAB_TOKEN", "GITLAB_PUSH_TOKEN", "GITHUB_TOKEN", "MIRROR_TOKEN", "MIRROR_USERNAME"] as const;
+
 const readSpec = async (path: string): Promise<RunSpec> => RunSpecSchema.parse(JSON.parse(await readFile(path, "utf8")));
 
 export const registerTools = (program: Command, ctx: CliContext): void => {
@@ -42,7 +48,7 @@ export const registerTools = (program: Command, ctx: CliContext): void => {
       const token = process.env[TOOLS_TOKEN_ENV];
       if (callbackUrl === undefined || callbackUrl === "" || token === undefined || token === "") return fail(ctx, `tools: ${CALLBACK_URL_ENV} and ${TOOLS_TOKEN_ENV} must be set`);
 
-      const loaded = await loadFromProgram(program, ctx);
+      const loaded = await loadFromProgram(program, ctx, { secrets: TOOLS_SECRET_NAMES });
       const { config, secrets } = loaded;
       const redactor = await buildRedactor(loaded);
       const guard = toolsGuard({ guardFile: opts.guard ?? null, overlayDir: config.workspace.overlayDir, skillsDir: config.workspace.skillsDir, secrets });

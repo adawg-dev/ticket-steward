@@ -23,6 +23,7 @@ export const SecretsSchema = z.object({
   OPENAI_BASE_URL: z.string().optional(),
 });
 export type Secrets = z.infer<typeof SecretsSchema>;
+export type SecretName = keyof Secrets;
 
 /** Reads one secret's stored string by id; null when no such secret exists. */
 export interface SecretFetcher {
@@ -76,14 +77,21 @@ export const readSecretValue = async (fetcher: SecretFetcher, id: string): Promi
   return value;
 };
 
-/** The steward's secrets: the config dir's `.env`, or each mapped Secrets Manager id in turn. */
-export const loadSecretsFrom = async (config: SecretsConfig, configDir: string, fetcher?: SecretFetcher): Promise<Secrets> => {
+const pick = (values: Record<string, string>, only: readonly SecretName[] | undefined): Record<string, string> =>
+  only === undefined ? values : Object.fromEntries(Object.entries(values).filter(([name]) => (only as readonly string[]).includes(name)));
+
+/**
+ * The steward's secrets: the config dir's `.env`, or each mapped Secrets Manager id in turn. With `only`, just those
+ * names: a run pod's sidecar or init container holds (and reads from Secrets Manager) the credentials it uses and no
+ * other.
+ */
+export const loadSecretsFrom = async (config: SecretsConfig, configDir: string, fetcher?: SecretFetcher, only?: readonly SecretName[]): Promise<Secrets> => {
   if (config.source === "file") {
     const raw = await readFile(join(configDir, ".env"), "utf8").catch(() => "");
-    return SecretsSchema.parse(parse(raw));
+    return SecretsSchema.parse(pick(parse(raw), only));
   }
   const source = fetcher ?? awsSecretFetcher(config.region);
   const values: Record<string, string> = {};
-  for (const [name, id] of Object.entries(config.map)) values[name] = await readSecretValue(source, id);
+  for (const [name, id] of Object.entries(pick(config.map, only))) values[name] = await readSecretValue(source, id);
   return SecretsSchema.parse(values);
 };
