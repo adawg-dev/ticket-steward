@@ -233,6 +233,29 @@ describe("sessions against MinIO", () => {
     expect(fake().stsCalls).toHaveLength(1);
   });
 
+  it("signs in again once when MinIO turns its credentials away after a restart", async () => {
+    const store = s3ObjectStore({ endpoint: fake().endpoint, bucket: "steward-sessions", credentials: () => minioCredentials({ endpoint: fake().endpoint, tokenFile: tokenFile(), durationSeconds: 3600 }) });
+    await store.put("sessions/ENG-7/s1.jsonl", new TextEncoder().encode("one\n"));
+
+    fake().restart();
+    await store.put("sessions/ENG-7/s1.jsonl", new TextEncoder().encode("one\ntwo\n"));
+
+    expect(fake().store.text("sessions/ENG-7/s1.jsonl")).toBe("one\ntwo\n");
+    expect(fake().rejected).toEqual(["PUT /steward-sessions/sessions/ENG-7/s1.jsonl"]);
+    expect(fake().stsCalls).toHaveLength(2);
+    // Other failures are not a reason to sign in again.
+    await expect(store.get("sessions/ENG-7/absent")).rejects.toThrow("MinIO: reading s3://steward-sessions/sessions/ENG-7/absent failed");
+    expect(fake().stsCalls).toHaveLength(2);
+  });
+
+  it("fails after one fresh sign-in when MinIO keeps turning the credentials away", async () => {
+    const store = s3ObjectStore({ endpoint: fake().endpoint, bucket: "steward-sessions", credentials: async () => ({ accessKeyId: "WRONG", secretAccessKey: "wrong", sessionToken: "wrong" }) });
+
+    await expect(store.list("sessions/ENG-7/")).rejects.toThrow("MinIO: listing s3://steward-sessions/sessions/ENG-7/ failed: AccessDenied");
+
+    expect(fake().rejected).toEqual(["GET /steward-sessions/", "GET /steward-sessions/"]);
+  });
+
   it("pushes a change made before SIGTERM, then exits 0", async () => {
     const configDir = join(dir, "sessions");
     const folder = sessionFolder(configDir, WORKTREE);

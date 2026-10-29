@@ -43,6 +43,8 @@ export interface FakeMinio {
   stsCalls: Record<string, string>[];
   /** S3 requests turned away for missing or wrong credentials. */
   rejected: string[];
+  /** As a MinIO restart does with its new root key: every session token handed out so far stops working. */
+  restart: () => void;
   close: () => Promise<void>;
 }
 
@@ -63,6 +65,8 @@ export const startFakeMinio = async (p: { bucket: string; token: string }): Prom
   const store = new MemoryObjectStore();
   const stsCalls: Record<string, string>[] = [];
   const rejected: string[] = [];
+  let generation = 0;
+  const sessionToken = (): string => `${FAKE_SESSION_TOKEN}-${generation}`;
 
   const sts = (body: string, res: ServerResponse): void => {
     const form = Object.fromEntries(new URLSearchParams(body));
@@ -77,16 +81,18 @@ export const startFakeMinio = async (p: { bucket: string; token: string }): Prom
       200,
       `<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleWithWebIdentityResult><Credentials>` +
         `<AccessKeyId>${FAKE_ACCESS_KEY}</AccessKeyId><SecretAccessKey>${FAKE_SECRET_KEY}</SecretAccessKey>` +
-        `<SessionToken>${FAKE_SESSION_TOKEN}</SessionToken><Expiration>${expiration}</Expiration>` +
+        `<SessionToken>${sessionToken()}</SessionToken><Expiration>${expiration}</Expiration>` +
         `</Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>`,
     );
   };
 
   const s3 = async (req: IncomingMessage, url: URL, body: Buffer, res: ServerResponse): Promise<void> => {
     const authorization = req.headers.authorization ?? "";
-    if (!authorization.includes(`Credential=${FAKE_ACCESS_KEY}/`) || req.headers["x-amz-security-token"] !== FAKE_SESSION_TOKEN) {
+    const token = req.headers["x-amz-security-token"];
+    if (!authorization.includes(`Credential=${FAKE_ACCESS_KEY}/`) || token !== sessionToken()) {
       rejected.push(`${req.method ?? ""} ${url.pathname}`);
-      return s3Error(res, 403, "AccessDenied");
+      // MinIO's answer to STS credentials from before a restart, which signed them with an earlier root key.
+      return s3Error(res, 403, typeof token === "string" && token.startsWith(FAKE_SESSION_TOKEN) ? "InvalidAccessKeyId" : "AccessDenied");
     }
     const [, bucket = "", ...rest] = url.pathname.split("/");
     if (bucket !== p.bucket) return s3Error(res, 404, "NoSuchBucket");
@@ -129,6 +135,9 @@ export const startFakeMinio = async (p: { bucket: string; token: string }): Prom
     store,
     stsCalls,
     rejected,
+    restart: () => {
+      generation += 1;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

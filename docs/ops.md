@@ -813,7 +813,11 @@ docker build -f deploy/images/minio.Dockerfile -t "$REGISTRY/ticket-steward/mini
 - MinIO's open-source server is archived and no longer published as an image or binary, so its image is built from
   the last release tags of `minio` and `mc`, pinned by commit. It makes a new root password on each start, uses it to
   create the bucket and the `steward-sessions` policy (`deploy/k8s/base/minio-policy.json`), and keeps it in memory
-  only; no MinIO key exists outside that container.
+  only; no MinIO key exists outside that container. MinIO signs STS credentials with that root key, so a MinIO
+  restart (eviction, drain, OOM) voids every credential handed out: requests with one get `InvalidAccessKeyId`. The
+  sessions containers then sign in again and retry the request once, so a restart costs each a sign-in, not its
+  uploads. A sync that falls while MinIO is down fails and is retried at the next interval; a pod that ends then
+  loses what it wrote since its last successful sync.
 
 **Config.** In `steward.config.ts`:
 

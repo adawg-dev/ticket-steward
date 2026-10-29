@@ -73,30 +73,49 @@ export const minioCredentials = async (p: { endpoint: string; tokenFile: string;
 };
 
 /**
+ * What MinIO answers a request signed with STS credentials it no longer honours. Its session tokens are signed with the
+ * root key, which the MinIO image makes new on every start, so a MinIO restart turns every outstanding credential into
+ * one of these until it is replaced.
+ */
+const STALE_CREDENTIAL_CODES = new Set(["InvalidAccessKeyId", "InvalidTokenId", "InvalidToken", "ExpiredToken", "AccessDenied"]);
+const staleCredentials = (error: unknown): boolean => error instanceof Error && STALE_CREDENTIAL_CODES.has(error.name);
+
+/**
  * One bucket on MinIO, path-style. `credentials` is a provider: the SDK keeps what it returns until five minutes
- * before its expiration, then asks again.
+ * before its expiration, then asks again. A request MinIO turns away for its credentials is retried once on a new
+ * client, which asks the provider afresh (a new STS sign-in), so a MinIO restart costs a sign-in, not the uploads
+ * until the old credentials expire.
  */
 export const s3ObjectStore = (p: { endpoint: string; bucket: string; credentials: AwsCredentialIdentityProvider }): ObjectStore => {
-  const client = new S3Client({
-    endpoint: p.endpoint,
-    region: MINIO_REGION,
-    forcePathStyle: true,
-    credentials: p.credentials,
-    // Whole-file puts with a known length; no aws-chunked trailers.
-    requestChecksumCalculation: "WHEN_REQUIRED",
-    responseChecksumValidation: "WHEN_REQUIRED",
-  });
+  const newClient = (): S3Client =>
+    new S3Client({
+      endpoint: p.endpoint,
+      region: MINIO_REGION,
+      forcePathStyle: true,
+      credentials: p.credentials,
+      // Whole-file puts with a known length; no aws-chunked trailers.
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
+    });
+  let client = newClient();
   const where = (key: string): string => `s3://${p.bucket}/${key}`;
-  const wrap = async <T>(what: string, run: () => Promise<T>): Promise<T> => {
+  const wrap = async <T>(what: string, run: (client: S3Client) => Promise<T>): Promise<T> => {
     try {
-      return await run();
+      try {
+        return await run(client);
+      } catch (error) {
+        if (!staleCredentials(error)) throw error;
+        client.destroy();
+        client = newClient();
+        return await run(client);
+      }
     } catch (error) {
       throw new Error(`MinIO: ${what} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
   };
   return {
     list: (prefix) =>
-      wrap(`listing ${where(prefix)}`, async () => {
+      wrap(`listing ${where(prefix)}`, async (client) => {
         const objects: StoredObject[] = [];
         for await (const page of paginateListObjectsV2({ client }, { Bucket: p.bucket, Prefix: prefix })) {
           for (const { Key: key, Size: size, LastModified: lastModified } of page.Contents ?? []) {
@@ -106,13 +125,13 @@ export const s3ObjectStore = (p: { endpoint: string; bucket: string; credentials
         return objects;
       }),
     get: (key) =>
-      wrap(`reading ${where(key)}`, async () => {
+      wrap(`reading ${where(key)}`, async (client) => {
         const { Body: body } = await client.send(new GetObjectCommand({ Bucket: p.bucket, Key: key }));
         if (body === undefined) throw new Error("no body");
         return body.transformToByteArray();
       }),
     put: (key, body) =>
-      wrap(`writing ${where(key)}`, async () => {
+      wrap(`writing ${where(key)}`, async (client) => {
         await client.send(new PutObjectCommand({ Bucket: p.bucket, Key: key, Body: body, ContentLength: body.byteLength }));
       }),
   };
