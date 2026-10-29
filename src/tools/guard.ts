@@ -1,9 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import type { StewardConfig } from "../config/schema.js";
 import { localGuard, type PushGuard } from "../push/service.js";
 
 /** `render-overlay --guard-out`: every real value and every placeholder of the run's overlay. */
 const GuardFile = z.array(z.string());
+
+/**
+ * The dir whose files, by relative path, the steward lays into the worktree. On Kubernetes that is the overlay template:
+ * render-overlay writes each template file at the same relative path, and the Compose `overlayDir` is not in the pod.
+ */
+export const stewardOverlayDir = (config: Pick<StewardConfig, "runtime" | "workspace">): string =>
+  config.runtime?.kind === "kubernetes" && config.workspace.overlayTemplateDir !== undefined ? config.workspace.overlayTemplateDir : config.workspace.overlayDir;
 
 /**
  * The tools sidecar's push guard: the values in the run's guard file, real and placeholder alike, plus what the local guard

@@ -8,7 +8,7 @@ import { httpCheckRunner } from "../push/checks.js";
 import { MINUTE_MS, pushFromWorktree, type PushResult } from "../push/service.js";
 import { RunSpecSchema, type RunSpec } from "../run/protocol.js";
 import { postWork, recordingLedger, toolsWork } from "../tools/finish.js";
-import { toolsGuard } from "../tools/guard.js";
+import { stewardOverlayDir, toolsGuard } from "../tools/guard.js";
 import { httpLedger } from "../tools/httpLedger.js";
 import { parseListen, startToolsServer, toolRoutes, TOOLS_HOST, TOOLS_PORT } from "../tools/server.js";
 import { errorMessage, exitWith, fail, loadFromProgram, println, type CliContext } from "./context.js";
@@ -51,7 +51,8 @@ export const registerTools = (program: Command, ctx: CliContext): void => {
       const loaded = await loadFromProgram(program, ctx, { secrets: TOOLS_SECRET_NAMES });
       const { config, secrets } = loaded;
       const redactor = await buildRedactor(loaded);
-      const guard = toolsGuard({ guardFile: opts.guard ?? null, overlayDir: config.workspace.overlayDir, skillsDir: config.workspace.skillsDir, secrets });
+      // The rendered overlay's paths (the template's) are steward files for the push and the work report alike.
+      const guard = toolsGuard({ guardFile: opts.guard ?? null, overlayDir: stewardOverlayDir(config), skillsDir: config.workspace.skillsDir, secrets });
       const { ledger, lastPushed } = recordingLedger(httpLedger({ baseUrl: callbackUrl, runId: spec.runId, token }));
       const checksTimeoutMs = ((config.implement?.checksTimeoutMinutes ?? 0) + 1) * MINUTE_MS;
       const deps = {

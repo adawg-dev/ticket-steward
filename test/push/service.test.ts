@@ -1,12 +1,13 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { Redactor } from "../../src/core/redact.js";
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushDeps } from "../../src/push/service.js";
 import type { PushTarget } from "../../src/push/target.js";
 import { openStores, type Stores } from "../../src/store/index.js";
-import { toolsGuard } from "../../src/tools/guard.js";
+import { stewardOverlayDir, toolsGuard } from "../../src/tools/guard.js";
+import { RUNTIME } from "../k8s/helpers.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
@@ -234,6 +235,43 @@ describe("pushFromWorktree refusals", () => {
     const result = await push(createTarget(), "fix", { ...deps, guard: toolsGuard({ guardFile, overlayDir: repo.overlayDir, skillsDir: undefined, secrets: deps.secrets }) });
 
     expect(result).toEqual({ ok: false, reason: "the change contains a secret value", detail: "src/adapter.ts" });
+  });
+
+  describe("on Kubernetes, where render-overlay lays the template's paths into the worktree", () => {
+    /** The tools sidecar's guard, its steward files the template's relative paths (the Compose overlay dir is not in the pod). */
+    const podGuard = async (files: Record<string, string>): Promise<PushDeps> => {
+      const templateDir = join(repo.root, "overlay-template");
+      for (const [path, content] of Object.entries(files)) {
+        await mkdir(dirname(join(templateDir, path)), { recursive: true });
+        await writeFile(join(templateDir, path), content);
+      }
+      const config = makeConfig();
+      const overlayDir = stewardOverlayDir({ runtime: RUNTIME, workspace: { ...config.workspace, overlayDir: join(repo.root, "absent-in-the-pod"), overlayTemplateDir: templateDir } });
+      expect(overlayDir).toBe(templateDir);
+      const guardFile = join(repo.root, "guard.json");
+      await writeFile(guardFile, "[]\n");
+      const deps = makeDeps(config);
+      return { ...deps, guard: toolsGuard({ guardFile, overlayDir, skillsDir: undefined, secrets: deps.secrets }) };
+    };
+
+    it("refuses a commit that adds a rendered overlay file", async () => {
+      const deps = await podGuard({ "apps/api/.env": "JWT_SECRET={{local}}\nSTRIPE_KEY={{secret:DEV_S@api.stripe.com}}\n" });
+      // The rendered file, as the agent finds it in its worktree, force-added past any ignore rule.
+      await mkdir(join(worktree.path, "apps", "api"), { recursive: true });
+      await writeFile(join(worktree.path, "apps", "api", ".env"), "JWT_SECRET=0123456789abcdef0123456789abcdef\n");
+      await git(worktree.path, ["add", "-f", "--", "apps/api/.env"]);
+      await git(worktree.path, ["commit", "-q", "-m", "API-1: config"]);
+
+      expect(await push(createTarget(), "fix", deps)).toEqual({ ok: false, reason: "the change would commit files the steward copied in", detail: "apps/api/.env" });
+    });
+
+    it("does not count a tracked file the overlay overwrote as uncommitted work", async () => {
+      const deps = await podGuard({ "src/adapter.ts": "export const adapter = {{local}};\n" });
+      await agentCommit("API-1: other", "export const other = 1;\n", "src/other.ts");
+      await writeFile(join(worktree.path, "src", "adapter.ts"), "export const adapter = 42;\n");
+
+      expect(await push(createTarget(), "fix", deps)).toMatchObject({ ok: true });
+    });
   });
 
   it("refuses when the ticket was closed during the run, and pushes nothing", async () => {
