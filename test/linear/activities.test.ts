@@ -137,6 +137,21 @@ describe("createBrainLineMapper", () => {
     expect(events[0]).toEqual({ activity: { type: "action", action: "Running", parameter: "psql [placeholder] -c 'select 1'" }, ephemeral: true });
   });
 
+  it("masks a guard value that crosses the 80-char cut of a command, sending no part of it", () => {
+    const secret = "q7Vx2LmP9rTz4KbN8wYc3HdF6jGs1AeU5oRi0XnBq7Vx2LmP9rTz4KbN8wYc3HdF";
+    const map = mapper(panelScrub({ redact: identity, guardValues: () => [secret] }));
+    const command = `curl -sS -H 'Authorization: Bearer ${secret}' https://api.example.test/v1/things`;
+    expect(command.indexOf(secret)).toBeLessThan(80);
+    expect(command.indexOf(secret) + secret.length).toBeGreaterThan(80);
+    const shown = "curl -sS -H 'Authorization: Bearer ***' https://api.example.test/v1/things";
+    const events = [toolUse("t1", "Bash", { command }), toolResult("t1", "ok")].flatMap((line) => map(line));
+    expect(events).toEqual<PanelEvent[]>([
+      { activity: { type: "action", action: "Running", parameter: shown }, ephemeral: true },
+      { activity: { type: "action", action: "Running", parameter: shown, result: "ok" }, ephemeral: false },
+    ]);
+    expect(JSON.stringify(events)).not.toContain(secret.slice(0, 8));
+  });
+
   it("maps TodoWrite to a plan with Linear's statuses and no action", () => {
     const map = mapper();
     const events = map(

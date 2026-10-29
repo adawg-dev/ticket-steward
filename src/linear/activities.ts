@@ -49,8 +49,15 @@ interface Pending {
   parameter: string;
 }
 
-/** The action and parameter shown for a tool call, and whether its result is shown; null for TodoWrite (a plan). */
-const describeTool = (name: string, input: unknown, workspacePath: string | undefined): (Pending & { reportsResult: boolean }) | null => {
+/**
+ * The action and parameter shown for a tool call, whether its result is shown, and how many chars of the parameter are
+ * shown (cut only after scrubbing, so a secret crossing the cut is still masked whole); null for TodoWrite (a plan).
+ */
+const describeTool = (
+  name: string,
+  input: unknown,
+  workspacePath: string | undefined,
+): (Pending & { reportsResult: boolean; maxParameterChars?: number }) | null => {
   if (name === "TodoWrite") return null;
   if (name === "Edit" || name === "Write" || name === "MultiEdit") {
     const parsed = FileInput.safeParse(input);
@@ -61,7 +68,7 @@ const describeTool = (name: string, input: unknown, workspacePath: string | unde
   if (name === "Bash") {
     const parsed = CommandInput.safeParse(input);
     const firstLine = parsed.success ? (parsed.data.command.split("\n")[0] ?? "").trim() : "";
-    return { action: "Running", parameter: firstLine.slice(0, MAX_COMMAND_CHARS), reportsResult: true };
+    return { action: "Running", parameter: firstLine, reportsResult: true, maxParameterChars: MAX_COMMAND_CHARS };
   }
   if (name === "Read") return { action: "Reading", parameter: "", reportsResult: false };
   if (name === "Grep" || name === "Glob") return { action: "Searching", parameter: "", reportsResult: false };
@@ -111,7 +118,7 @@ export const createBrainLineMapper = (p: { scrub: (text: string) => string; work
         if (todos.success) events.push({ plan: todos.data.todos.map((todo) => ({ content: p.scrub(todo.content), status: PLAN_STATUS[todo.status] })) });
         continue;
       }
-      const shown = { action: described.action, parameter: p.scrub(described.parameter) };
+      const shown = { action: described.action, parameter: p.scrub(described.parameter).slice(0, described.maxParameterChars) };
       if (described.reportsResult) pending.set(tool.data.id, shown);
       events.push({ activity: { type: "action", ...shown }, ephemeral: true });
     }
