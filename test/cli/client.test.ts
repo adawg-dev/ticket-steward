@@ -43,7 +43,7 @@ const kubernetesConfig = (config: StewardConfig): StewardConfig => ({ ...config,
 
 const serveAdmin = async (chat?: ChatLauncher): Promise<number> => {
   const resolveTicket = (key: string) => Promise.resolve({ id: `issue-${key}`, identifier: key });
-  const app = buildAdminServer({ token: TOKEN, stores, settings: new SettingsStore(stores.db, DEFAULT_SETTINGS), resolveTicket, ...(chat === undefined ? {} : { chat }) });
+  const app = buildAdminServer({ token: TOKEN, stores, settings: new SettingsStore(stores.db, DEFAULT_SETTINGS), resolveTicket, fetchTicket: () => Promise.reject(new Error("Intended Test Error")), ...(chat === undefined ? {} : { chat }) });
   servers.push(app);
   await app.listen({ port: 0, host: "127.0.0.1" });
   const address = app.server.address();

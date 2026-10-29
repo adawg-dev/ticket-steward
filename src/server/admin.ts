@@ -10,6 +10,7 @@ import { logger } from "../log.js";
 import { SettingsSchema } from "../settings/schema.js";
 import { SettingsError, type SettingsStore } from "../settings/store.js";
 import type { Job, JobStatus, Loop, Stores } from "../store/index.js";
+import type { TicketBundle } from "../tracker/types.js";
 
 /** The admin API's port, bound to 127.0.0.1 only: the CLI in the dispatcher pod (`kubectl exec … steward …`) is its client. */
 export const ADMIN_PORT = 3022;
@@ -49,6 +50,8 @@ export interface AdminDeps {
   settings: SettingsStore;
   /** Issue key or UUID → the issue; rejects when there is none. */
   resolveTicket: (key: string) => Promise<{ id: string; identifier: string }>;
+  /** The resolved issue as Linear has it, read with the dispatcher's token: the CLI holds none. */
+  fetchTicket: (issueId: string) => Promise<TicketBundle>;
   chat?: ChatLauncher;
 }
 
@@ -112,8 +115,8 @@ type KeyParams = { key: string };
 const digest = (value: string): Buffer => createHash("sha256").update(value).digest();
 
 /**
- * The dispatcher's admin API on `ADMIN_HOST:ADMIN_PORT`: job and ticket state, retries, and `steward chat`'s leases and
- * interactive run pods, and the runtime settings. Every request carries `Authorization: Bearer <token>`, the token `serve` wrote to the runtime dir;
+ * The dispatcher's admin API on `ADMIN_HOST:ADMIN_PORT`: job and ticket state, the tickets as Linear has them (the CLI
+ * reads Linear only here), retries, `steward chat`'s leases and interactive run pods, and the runtime settings. Every request carries `Authorization: Bearer <token>`, the token `serve` wrote to the runtime dir;
  * anything else gets 401. A later CLI, MCP server or web UI builds on these routes.
  */
 export const buildAdminServer = (deps: AdminDeps): FastifyInstance => {
@@ -183,6 +186,16 @@ export const buildAdminServer = (deps: AdminDeps): FastifyInstance => {
       leases: stores.leases.active().filter((lease) => lease.issueId === ticket.id),
       running: stores.jobs.runningForIssue(ticket.id),
     };
+  });
+
+  app.get<{ Params: KeyParams }>("/api/tickets/:key/bundle", async (request, reply) => {
+    const ticket = await ticketOf(request, reply);
+    if (ticket === null) return reply;
+    try {
+      return await deps.fetchTicket(ticket.id);
+    } catch (err) {
+      return reply.code(502).send({ error: `${ticket.identifier} could not be read from Linear: ${errorMessage(err)}` });
+    }
   });
 
   app.get("/api/settings", () => deps.settings.get());

@@ -127,6 +127,44 @@ const pushLanded = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, 
 /** The spec's run id: the job's attempt, or the dry run's process. */
 export const runIdOf = (ctx: RunContext): string => (ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`);
 
+/** The implement prompt for the ticket, cut from `baseSha` into the run's worktree. */
+const implementPrompt = async (
+  ctx: RunContext,
+  deps: PipelineDeps,
+  p: { settings: ImplementConfig; bundle: TicketBundle; baseSha: string; paths: JobPaths },
+): Promise<string> => {
+  const { settings, bundle, baseSha, paths } = p;
+  const brief = extractAgentBrief(bundle.description);
+  return renderImplementPrompt(await readFile(settings.prompt, "utf8"), {
+    identifier: ctx.identifier,
+    teamKey: ctx.teamKey,
+    teamName: bundle.team.name,
+    ticket: renderTicketMarkdown(bundle),
+    workspacePath: join(paths.workRoot, paths.worktreeName),
+    baseBranch: deps.config.workspace.baseBranch,
+    sha: baseSha,
+    artifactsDir: paths.artifactsDir,
+    stewardPort: jobPort(deps),
+    hasBrief: brief !== null,
+    brief: brief ?? "",
+    branchTypes: settings.branchTypes.join(", "),
+    hasChecks: settings.checks.length > 0,
+    checks: stewardChecks(settings.checks, baseSha).map((command) => `- \`${command}\``).join("\n"),
+  }, await readRepoPartial(deps.configPath));
+};
+
+/**
+ * `steward implement --dry-run`: the prompt a run on the ticket would get, from the bundle the dispatcher read, cut from
+ * the mirror's current base (never fetched here). Runs nothing and writes nothing.
+ */
+export const previewImplementPrompt = async (ctx: RunContext, deps: PipelineDeps, bundle: TicketBundle): Promise<string> => {
+  const settings = deps.config.implement;
+  if (settings === undefined) throw new Error("implement is not configured (add an implement block)");
+  const { baseBranch } = deps.config.workspace;
+  const baseSha = deps.mirror.exists() ? await deps.mirror.resolveSha(baseBranch) : `<${baseBranch}>`;
+  return implementPrompt(ctx, deps, { settings, bundle, baseSha, paths: implementPaths(ctx, deps) });
+};
+
 /**
  * The prepare half: the closed check, the base, the ticket-branch checks and the prompt. Either a spec to execute, or the
  * job's outcome without running the brain.
@@ -162,23 +200,7 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
   const worktreePath = join(paths.workRoot, paths.worktreeName);
   let prompt: string;
   try {
-    const brief = extractAgentBrief(bundle.description);
-    prompt = renderImplementPrompt(await readFile(settings.prompt, "utf8"), {
-      identifier: ctx.identifier,
-      teamKey: ctx.teamKey,
-      teamName: bundle.team.name,
-      ticket: renderTicketMarkdown(bundle),
-      workspacePath: worktreePath,
-      baseBranch: deps.config.workspace.baseBranch,
-      sha: baseSha,
-      artifactsDir: paths.artifactsDir,
-      stewardPort: jobPort(deps),
-      hasBrief: brief !== null,
-      brief: brief ?? "",
-      branchTypes: settings.branchTypes.join(", "),
-      hasChecks: settings.checks.length > 0,
-      checks: stewardChecks(settings.checks, baseSha).map((command) => `- \`${command}\``).join("\n"),
-    }, await readRepoPartial(deps.configPath));
+    prompt = await implementPrompt(ctx, deps, { settings, bundle, baseSha, paths });
   } catch (err) {
     return { outcome: prepareFailed(deps, err) };
   }

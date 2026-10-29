@@ -4,6 +4,7 @@ import { z } from "zod";
 import { kubernetesRuntime, type StewardConfig } from "../config/schema.js";
 import { ADMIN_HOST, ADMIN_PORT, ADMIN_TOKEN_FILE } from "../server/admin.js";
 import { SettingsSchema, type Settings, type SettingsPatch } from "../settings/schema.js";
+import type { TicketBundle } from "../tracker/types.js";
 import type { CliContext } from "./context.js";
 
 const PROBE_TIMEOUT_MS = 2_000;
@@ -51,6 +52,24 @@ const JobDetailSchema = z.object({
   loop: LoopViewSchema.nullable(),
 });
 
+const TicketBundleSchema: z.ZodType<TicketBundle> = z.object({
+  id: z.string(),
+  identifier: z.string(),
+  url: z.string(),
+  title: z.string(),
+  description: z.string(),
+  team: z.object({ id: z.string(), key: z.string(), name: z.string() }),
+  state: z.object({ name: z.string(), type: z.string() }),
+  labels: z.array(z.string()),
+  priority: z.number(),
+  creator: z.object({ name: z.string(), isBot: z.boolean() }).nullable(),
+  createdAt: z.string(),
+  comments: z.array(z.object({ author: z.string(), body: z.string(), createdAt: z.string() })),
+  attachments: z.array(z.object({ title: z.string(), url: z.string() })),
+  appliedTemplate: z.string().nullable(),
+  templates: z.array(z.object({ name: z.string(), description: z.string(), body: z.string(), requiredFields: z.array(z.string()) })),
+});
+
 const ChatOpenedSchema = z.object({ runId: z.string(), pod: z.string(), container: z.string(), leaseId: z.number() });
 const ChatClosedSchema = z.object({ released: z.boolean(), ok: z.boolean().nullable(), error: z.string().nullable(), unpushed: z.string().nullable() });
 const ErrorBody = z.object({ error: z.string() });
@@ -89,6 +108,8 @@ export interface AdminClient {
   /** False when no chat holds the ticket any more. */
   heartbeat(key: string): Promise<boolean>;
   closeChat(key: string): Promise<ChatClosed>;
+  /** The ticket (issue key or UUID) as the dispatcher reads it from Linear; the CLI holds no Linear token. */
+  ticketBundle(key: string): Promise<TicketBundle>;
   /** The runtime settings in effect. */
   settings(): Promise<Settings>;
   /** Applies the patch (audited as `admin-cli`); resolves to the settings now in effect. */
@@ -137,6 +158,7 @@ export const adminClient = (fetchImpl: typeof fetch, p: { token: string; port?: 
       }
     },
     closeChat: (key) => request(ChatClosedSchema, "DELETE", ticketPath(key)),
+    ticketBundle: (key) => request(TicketBundleSchema, "GET", `/api/tickets/${encodeURIComponent(key)}/bundle`),
     settings: () => request(SettingsSchema, "GET", "/api/settings"),
     setSettings: (patch) => request(SettingsSchema, "PATCH", "/api/settings", patch),
   };

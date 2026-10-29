@@ -66,6 +66,8 @@ export interface ConfigPaths {
   implement?: { prompt: string; checks?: string[] };
   /** Needs `implement` too. */
   greptile?: { prompt: string; pollSeconds?: number };
+  /** The config's `secrets` block; the `.env` file when unset. */
+  secrets?: Record<string, unknown>;
 }
 
 /** Writes a steward.config.ts into `dir` pointing at the given paths and returns its path. */
@@ -76,6 +78,7 @@ export const writeConfig = async (dir: string, p: ConfigPaths): Promise<string> 
   const greptile = p.greptile === undefined ? "" : `greptile: ${JSON.stringify({ botUsername: "greptile-bot", ...p.greptile })},`;
   const slots = p.slots === undefined ? "" : `slots: ${JSON.stringify(p.slots)},`;
   const port = p.port === null ? "" : `port: ${p.port},`;
+  const secrets = p.secrets === undefined ? "" : `secrets: ${JSON.stringify(p.secrets)},`;
   const source = `
 import { defineConfig } from "ticket-steward";
 export default defineConfig({
@@ -98,6 +101,7 @@ export default defineConfig({
   ${implement}
   ${greptile}
   ${slots}
+  ${secrets}
 });
 `;
   const configPath = join(dir, "steward.config.ts");

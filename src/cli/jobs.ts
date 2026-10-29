@@ -13,7 +13,7 @@ import { errorMessage, fail, loadFromProgram, println, type CliContext } from ".
 import { reportOutcome, runInline, tailJob, terminalOutcome, TAIL_POLL_MS, withRunLock } from "./inline.js";
 import { artifactsDir, jobsDir, workRoot } from "./paths.js";
 import { answers, localHealthUrl, sleep } from "./probe.js";
-import { buildRuntime } from "./runtime.js";
+import { buildRuntime, CLI_SECRET_NAMES } from "./runtime.js";
 
 const DEFAULT_LIMIT = 20;
 const HEALTH_TIMEOUT_MS = 2_000;
@@ -132,7 +132,7 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when an implement result is stored")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
-      const loaded = await loadFromProgram(program, ctx);
+      const loaded = await loadFromProgram(program, ctx, { secrets: CLI_SECRET_NAMES });
       const client = await admin(ctx, loaded.config);
       if (client !== null) {
         try {

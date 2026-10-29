@@ -8,6 +8,7 @@ import { buildAdminServer, chatRunIdOf, writeAdminToken, type ChatLauncher } fro
 import { DEFAULT_SETTINGS } from "../../src/settings/schema.js";
 import { SettingsStore } from "../../src/settings/store.js";
 import { openStores, type Stores } from "../../src/store/index.js";
+import type { TicketBundle } from "../../src/tracker/types.js";
 
 const SHA = "c".repeat(40);
 const TOKEN = "admin-token-value";
@@ -35,6 +36,31 @@ const resolveTicket = (key: string): Promise<{ id: string; identifier: string }>
   return Promise.resolve({ id: `issue-${key}`, identifier: key });
 };
 
+/** The ticket as Linear has it, for the issues `resolveTicket` knows. */
+const bundleOf = (issueId: string): TicketBundle => {
+  const identifier = issueId.replace(/^issue-/, "");
+  return {
+    id: issueId,
+    identifier,
+    url: `https://linear.app/acme/issue/${identifier}`,
+    title: "Adapter drops the last chunk",
+    description: "The adapter loses the final chunk.",
+    team: { id: "team-1", key: "API", name: "API" },
+    state: { name: "Todo", type: "unstarted" },
+    labels: [],
+    priority: 2,
+    creator: { name: "Ada", isBot: false },
+    createdAt: "2026-10-29T00:00:00.000Z",
+    comments: [],
+    attachments: [],
+    appliedTemplate: null,
+    templates: [],
+  };
+};
+
+const fetchTicket = (issueId: string): Promise<TicketBundle> =>
+  issueId === "issue-API-9" ? Promise.reject(new Error("Linear is down")) : Promise.resolve(bundleOf(issueId));
+
 /** An implement job of the ticket that left a session in its worktree, with its push landed. */
 const withSession = (identifier: string): number => {
   const id = stores.jobs.enqueue({ kind: "cli", issueId: `issue-${identifier}`, identifier, teamKey: "API", action: "implement" });
@@ -52,7 +78,7 @@ beforeEach(async () => {
   started = [];
   ended = [];
   settings = new SettingsStore(stores.db, DEFAULT_SETTINGS);
-  app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, chat: launcher });
+  app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, fetchTicket, chat: launcher });
 });
 
 afterEach(async () => {
@@ -139,6 +165,16 @@ describe("admin API tickets", () => {
     });
     expect((await call("GET", "/api/tickets/nope")).statusCode).toBe(404);
   });
+
+  it("returns the ticket's bundle as the dispatcher reads it from Linear", async () => {
+    const response = await call("GET", "/api/tickets/API-1/bundle");
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(bundleOf("issue-API-1"));
+    expect((await call("GET", "/api/tickets/nope/bundle")).statusCode).toBe(404);
+    const down = await call("GET", "/api/tickets/API-9/bundle");
+    expect(down.statusCode).toBe(502);
+    expect(down.json()).toEqual({ error: "API-9 could not be read from Linear: Linear is down" });
+  });
 });
 
 describe("admin API chat", () => {
@@ -178,7 +214,7 @@ describe("admin API chat", () => {
 
   it("gives the lease back when the run pod cannot be started", async () => {
     withSession("API-1");
-    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, chat: { ...launcher, start: () => Promise.reject(new Error("quota exceeded")) } });
+    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, fetchTicket, chat: { ...launcher, start: () => Promise.reject(new Error("quota exceeded")) } });
     const response = await call("POST", "/api/chat/API-1");
     expect(response.statusCode).toBe(502);
     expect(response.json()).toEqual({ error: "the chat's run pod could not be started: quota exceeded" });
@@ -205,7 +241,7 @@ describe("admin API chat", () => {
     const [lease] = stores.leases.active();
     if (lease === undefined) throw new Error("no lease taken");
     // A fresh server over the same database: the steward restarted while the chat was open.
-    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, chat: launcher });
+    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, fetchTicket, chat: launcher });
     expect((await call("POST", "/api/chat/API-1/heartbeat")).statusCode).toBe(200);
     expect((await call("DELETE", "/api/chat/API-1")).json()).toMatchObject({ released: true });
     expect(ended).toEqual([chatRunIdOf(lease.id)]);
@@ -214,7 +250,7 @@ describe("admin API chat", () => {
 
   it("answers 501 when the runtime cannot launch chats", async () => {
     withSession("API-1");
-    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket });
+    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, fetchTicket });
     const response = await call("POST", "/api/chat/API-1");
     expect(response.statusCode).toBe(501);
     expect(stores.leases.active()).toEqual([]);

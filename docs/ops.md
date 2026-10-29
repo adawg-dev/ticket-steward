@@ -344,11 +344,11 @@ the warning `handed back: <reason>` (see it, with the detail and the agent's que
 `steward jobs show`). The ticket gets `ready-for-human` or `needs-info` and no comment; they
 are the answer, not an error. Only a push or label-change failure is `publish_failed`.
 
-**`steward implement KEY [--dry-run]`.** Enqueues when `serve` is running, otherwise runs
-inline under `run.lock`. It never swaps labels and re-runs even after a prior success; the
-existing-branch check still prevents a second push. `--dry-run` runs the agent without the
-push tool, then prints the agent's work on the base (its commits and uncommitted changes) or
-the hand-back it would make; nothing is pushed or written to Linear.
+**`steward implement KEY --dry-run`.** Prints the implement prompt a run on the ticket would
+get, from the ticket as `serve`'s admin API reads it (the CLI never holds a Linear token, so this
+needs the Kubernetes runtime's admin API) and the mirror's current base. Nothing runs and nothing
+is written. Without `--dry-run` it refuses: assigning the steward in Linear is the only way to
+start work.
 
 One implement job can hold the worker for about 90 minutes (setup, up to 60 of brain,
 checks); other heavy jobs queue behind it unless `slots` gives the worker more lanes.
@@ -435,7 +435,7 @@ loop whose await, fix or hand-back job fails for good (out of attempts, or a cra
 within a few minutes, so it never sits in a running state with nothing to move it. Retryable errors only add up while
 they come in a row: each poll that finds the loop still waiting starts the count over.
 
-**Restart.** Re-add `ready-for-agent` to the ticket, or run `steward fix <KEY>` (leaves labels alone). Notes people
+**Restart.** Re-add `ready-for-agent` to the ticket. Notes people
 posted on the MR after the hand-back are given to the restarted loop's next fix round; system notes and notes from
 Greptile, GitLab bot users (project and group access tokens) and the steward's own `GITLAB_TOKEN` user are left out.
 With no open MR to resume on, the restart says so in a note on the loop's last MR and queues a fresh implement. `steward jobs show <id>` prints the loop and one line per round
@@ -538,11 +538,10 @@ curl -s https://steward.example.com/health
    to `agent-implemented` (or the ticket is handed back), as in §1.7a.
 3. `steward jobs` lists the implement job as `succeeded`.
 
-For a ticket outside Linear's webhook path:
+To see what a run on a ticket would be told:
 
 ```bash
-steward implement KEY-123 --dry-run    # runs the agent without the push tool and prints its unpushed work; takes run.lock (refused while serve runs)
-steward implement KEY-123              # enqueues if serve is running, otherwise runs inline under run.lock
+steward implement KEY-123 --dry-run    # prints the implement prompt, read through serve's admin API; runs nothing
 ```
 
 ### 1.10 Worker slots (optional)
@@ -625,7 +624,7 @@ instance itself is capped at 300 s), create the worktree, copy the overlay with 
 brain with `STEWARD_PORT` set to the slot's app port, publish, and `down` the slot. A slot that does not
 come up fails the job as retryable with `setup failed: slot <n>: …` and the helper's output tail in the
 attempt's `setupTail`. `steward serve` brings every slot down when it starts and when it stops;
-retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward implement KEY` without serve runs on slot 1.
+retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward jobs retry ID` without serve runs on slot 1.
 
 **Resource guard.** On by default, with or without `slots`. Before a lane claims a heavy job (implement,
 fix, restart) the worker checks the host: available memory (`MemAvailable`) must be at least

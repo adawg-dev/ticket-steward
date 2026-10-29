@@ -2,7 +2,6 @@ import { Command } from "commander";
 import { registerChat } from "./chat.js";
 import { defaultContext, exitWith, type CliContext } from "./context.js";
 import { registerDoctor } from "./doctor.js";
-import { registerFix } from "./fix.js";
 import { registerGitInit } from "./gitInit.js";
 import { registerImplement } from "./implement.js";
 import { registerInit } from "./init.js";
@@ -21,7 +20,7 @@ import { registerTools } from "./tools.js";
 
 export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   const program = new Command("steward")
-    .description("implements Linear tickets labelled for the agent and follows their merge requests")
+    .description("implements the Linear tickets assigned to the steward and follows their merge requests")
     .option("--config <path>", "path to steward.config.ts (default: ./steward.config.ts)")
     .configureOutput({
       writeOut: (text) => void ctx.stdout.write(text),
@@ -34,7 +33,6 @@ export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   registerOverlay(program, ctx);
   registerServe(program, ctx);
   registerImplement(program, ctx);
-  registerFix(program, ctx);
   registerChat(program, ctx);
   registerJobs(program, ctx);
   registerSettings(program, ctx);

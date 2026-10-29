@@ -95,7 +95,7 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
           const token = await writeAdminToken(k8s.runtimeDir);
           const { stores, tracker, chat } = runtime;
           const settings = new SettingsStore(stores.db, seedSettings(config));
-          admin = buildAdminServer({ token, stores, settings, resolveTicket: (key) => tracker.resolveIssueId(key), ...(chat === undefined ? {} : { chat }) });
+          admin = buildAdminServer({ token, stores, settings, resolveTicket: (key) => tracker.resolveIssueId(key), fetchTicket: (issueId) => tracker.fetchTicket(issueId), ...(chat === undefined ? {} : { chat }) });
           await admin.listen({ port: ADMIN_PORT, host: ADMIN_HOST });
         } catch (err) {
           stopReaping();

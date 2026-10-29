@@ -4,7 +4,7 @@ import { createBrain } from "../brain/index.js";
 import type { Brain, BrainInput, BrainRun } from "../brain/types.js";
 import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { createCodeHost } from "../codehost/index.js";
-import type { LoadedConfig } from "../config/load.js";
+import { SecretsSchema, type LoadedConfig, type SecretName } from "../config/load.js";
 import { kubernetesRuntime } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import type { RunExecutor } from "../run/executor.js";
@@ -19,6 +19,7 @@ import type { Tracker } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
 import { injectToken, Mirror } from "../workspace/mirror.js";
 import { SlotClient } from "../workspace/slots.js";
+import { connectAdmin, type AdminClient } from "./client.js";
 import type { CliContext } from "./context.js";
 import { binPath, mirrorPath } from "./paths.js";
 
@@ -45,11 +46,46 @@ export const buildRedactor = async (loaded: LoadedConfig): Promise<Redactor> => 
   return new Redactor(collectSecretValues(loaded.secrets, overlayFiles));
 };
 
-/** The tracker and, when it is the real Linear one, the app token it holds in memory. */
+/** Every secret but the Linear app's: the CLI never holds a Linear credential, so its commands load these only. */
+export const CLI_SECRET_NAMES: readonly SecretName[] = SecretsSchema.keyof().options.filter((name) => !name.startsWith("LINEAR_"));
+
+/** The dispatcher's tracker and the app token it holds in memory; only `serve` (and the push server it runs) opens it. */
 export const openTracker = (loaded: LoadedConfig, ctx: CliContext): { tracker: Tracker; linearToken?: LinearToken } => {
   if (ctx.factories?.tracker !== undefined) return { tracker: ctx.factories.tracker };
   const linearToken = createLinearToken(loaded.secrets);
   return { tracker: createLinearTracker(loaded.secrets, { token: linearToken }), linearToken };
+};
+
+/** Ticket reads through the dispatcher's admin API, which reads Linear with its own token. */
+export const adminTracker = (client: Pick<AdminClient, "ticketBundle">): Pick<Tracker, "resolveIssueId" | "fetchTicket" | "readDescription"> => ({
+  resolveIssueId: async (idOrKey) => {
+    const { id, identifier, team } = await client.ticketBundle(idOrKey);
+    return { id, identifier, teamKey: team.key };
+  },
+  fetchTicket: (issueId) => client.ticketBundle(issueId),
+  readDescription: async (issueId) => (await client.ticketBundle(issueId)).description,
+});
+
+export const NO_ADMIN_API = "the CLI reaches Linear only through steward serve's admin API (the kubernetes runtime), which does not answer here";
+
+/** A CLI command's tracker: reads through the admin API, connected on first use; it holds no token and writes nothing. */
+const cliTracker = (loaded: LoadedConfig, ctx: CliContext): Tracker => {
+  let connected: Promise<Pick<Tracker, "resolveIssueId" | "fetchTicket" | "readDescription">> | undefined;
+  const reads = (): Promise<Pick<Tracker, "resolveIssueId" | "fetchTicket" | "readDescription">> => {
+    connected ??= connectAdmin(ctx, loaded.config).then((client) => {
+      if (client === null) throw new Error(NO_ADMIN_API);
+      return adminTracker(client);
+    });
+    return connected;
+  };
+  return {
+    kind: "linear",
+    resolveIssueId: async (idOrKey) => (await reads()).resolveIssueId(idOrKey),
+    fetchTicket: async (issueId) => (await reads()).fetchTicket(issueId),
+    readDescription: async (issueId) => (await reads()).readDescription(issueId),
+    appUserId: () => Promise.reject(new Error("the CLI reaches Linear only through steward serve's admin API, which keeps the app's user to itself")),
+    credentialsRejected: () => false,
+  };
 };
 
 /** An injected brain runs in-process; the real brains run detached via the pipeline's default. */
@@ -64,8 +100,9 @@ const refuseInline: RunExecutor = { execute: () => Promise.reject(new Error(INLI
 
 export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: { serve?: boolean } = {}): Promise<Runtime> => {
   const { config, secrets, configPath } = loaded;
+  // Only the dispatcher holds the Linear token; every other command reads Linear through its admin API.
+  const { tracker, linearToken } = opts.serve === true ? openTracker(loaded, ctx) : { tracker: ctx.factories?.tracker ?? cliTracker(loaded, ctx) };
   const stores = openStores(config.dataDir);
-  const { tracker, linearToken } = openTracker(loaded, ctx);
   const linear = linearToken === undefined ? {} : { linearToken };
   const injectedBrain = ctx.factories?.brain;
   const codehost = ctx.factories?.codehost ?? createCodeHost(config.codehost, secrets);

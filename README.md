@@ -49,7 +49,7 @@ steward doctor                          # every check reported; exits 1 if any f
 steward serve                           # webhook server + worker (in production: systemd)
 ```
 
-Try it on one ticket without touching anything:
+Preview the prompt a run on one ticket would get (read through `steward serve`; nothing runs):
 
 ```bash
 steward implement KEY-123 --dry-run
@@ -64,7 +64,7 @@ steward implement KEY-123 --dry-run
 | `steward mirror init` \| `fetch` | Create or refresh the bare mirror. |
 | `steward overlay sync --from <path> [--allow-pattern <re>]` | Copy gitignored `.env*` files from a checkout into the overlay; refuses prod-looking values unless allowed. |
 | `steward serve` | Webhook server and worker; takes `run.lock`. |
-| `steward implement <KEY\|UUID> [--dry-run]` | Implement one ticket on a new branch: enqueue if `serve` is up, else run inline; never swaps labels. `--dry-run` runs the agent without the push tool and prints its unpushed work. |
+| `steward implement <KEY\|UUID> --dry-run` | Print the implement prompt for one ticket, read through `serve`'s admin API (the CLI holds no Linear token). Work starts only by assigning the steward in Linear. |
 | `steward jobs [--status s] [--limit n]` | List jobs. |
 | `steward jobs show <id>` | Job row with its stored result, attempts, transcript path, artifacts listing. |
 | `steward jobs retry <id>` | Runs the job again: requeues it for `serve` when that is running, otherwise runs it inline under the run lock (publish-only when an implement result is stored; a leftover enrich job fails). |
@@ -118,7 +118,7 @@ One Linear label, added by a person, drives the steward; a ticket created or lab
 
 Setup (labels, `GITLAB_PUSH_TOKEN`, branch protection, the `implement` block) and the flows are in `docs/ops.md` §1.7a.
 
-With a `greptile` block the steward then runs a fix loop on the merge request: it fixes or declines Greptile's findings round by round until the review is 5/5 on a green pipeline (`agent-approved`) or hands the ticket back; restart with `ready-for-agent` or `steward fix <KEY>`. See `docs/ops.md` §1.7b.
+With a `greptile` block the steward then runs a fix loop on the merge request: it fixes or declines Greptile's findings round by round until the review is 5/5 on a green pipeline (`agent-approved`) or hands the ticket back; restart with `ready-for-agent`. See `docs/ops.md` §1.7b.
 
 ## Security posture
 

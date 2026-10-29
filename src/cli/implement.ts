@@ -1,51 +1,34 @@
 import type { Command } from "commander";
-import { shouldEnqueue } from "../core/intake.js";
 import type { RunContext } from "../core/types.js";
-import { runImplement } from "../implement/pipeline.js";
-import { ReadOnlyTracker } from "../tracker/readOnly.js";
-import type { TriggerEvent } from "../tracker/types.js";
-import { fail, loadFromProgram, println, type CliContext } from "./context.js";
-import { reportOutcome, runInline, tailJob, withRunLock } from "./inline.js";
-import { answers, localHealthUrl } from "./probe.js";
-import { buildRuntime } from "./runtime.js";
+import { previewImplementPrompt } from "../implement/pipeline.js";
+import { errorMessage, fail, loadFromProgram, println, type CliContext } from "./context.js";
+import { buildRuntime, CLI_SECRET_NAMES } from "./runtime.js";
 
-const HEALTH_TIMEOUT_MS = 2_000;
+/** Assigning the steward in Linear is the only way to start a job; the CLI previews the prompt only. */
+export const ASSIGN_TO_START = "assign the steward in Linear to start work; steward implement only previews the prompt (--dry-run)";
 
 export const registerImplement = (program: Command, ctx: CliContext): void => {
   program
     .command("implement")
-    .description("implement one ticket on a new branch: enqueue when serve is running, otherwise run inline")
+    .description("preview the implement prompt for one ticket (--dry-run); work starts only by assigning the steward in Linear")
     .argument("<key>", "issue key or UUID")
-    .option("--dry-run", "run the agent without the push tool, print its unpushed work, write nothing", false)
+    .option("--dry-run", "print the prompt a run on the ticket would get, read through steward serve; runs and writes nothing", false)
     .action(async (key: string, opts: { dryRun: boolean }) => {
-      const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);
-      const { config } = runtime.loaded;
-      if (config.implement === undefined) return fail(ctx, "implement is not configured (add an implement block and GITLAB_PUSH_TOKEN)");
-      const { id, identifier, teamKey } = await runtime.tracker.resolveIssueId(key);
-      const event: TriggerEvent = { kind: "cli", issueId: id, identifier, teamKey, action: "implement" };
-      const { jobs } = runtime.stores;
-      const decision = shouldEnqueue({
-        event,
-        allowlist: config.tracker.teams,
-        priorSuccess: false,
-        loop: null,
-        hasQueuedJob: opts.dryRun ? false : jobs.findQueued(id) !== null,
-      });
-      if (decision.action === "skip") return fail(ctx, decision.reason);
-      if (opts.dryRun) {
-        const tracker = new ReadOnlyTracker(runtime.tracker);
-        const dryCtx: RunContext = { jobId: 0, attempt: 1, issueId: id, identifier, teamKey, trigger: event, dryRun: true };
-        println(ctx, `dry run for ${identifier}; nothing will be committed, pushed or written`);
-        const outcome = await withRunLock(runtime, ctx, () => runImplement(dryCtx, { ...runtime.deps, tracker }));
-        if (outcome.status === "succeeded" && outcome.warning !== undefined) println(ctx, outcome.warning);
-        return reportOutcome(ctx, 0, outcome.status === "succeeded" ? { status: "succeeded" } : outcome);
+      if (!opts.dryRun) return fail(ctx, ASSIGN_TO_START);
+      // The Linear app's credentials stay in the dispatcher: the ticket comes from its admin API.
+      const runtime = await buildRuntime(await loadFromProgram(program, ctx, { secrets: CLI_SECRET_NAMES }), ctx);
+      if (runtime.loaded.config.implement === undefined) return fail(ctx, "implement is not configured (add an implement block)");
+      let prompt: string;
+      try {
+        const bundle = await runtime.tracker.fetchTicket(key);
+        const { id, identifier, team } = bundle;
+        const dryCtx: RunContext = { jobId: 0, attempt: 1, issueId: id, identifier, teamKey: team.key, trigger: { kind: "cli", issueId: id, identifier, teamKey: team.key, action: "implement" }, dryRun: true };
+        prompt = await previewImplementPrompt(dryCtx, runtime.deps, bundle);
+      } catch (err) {
+        return fail(ctx, `implement --dry-run: ${errorMessage(err)}`);
+      } finally {
+        runtime.stores.db.close();
       }
-      if (decision.action === "attach") return println(ctx, `${identifier} already has queued implement job ${jobs.findQueued(id)?.id}`);
-      const jobId = jobs.enqueue(event);
-      if (await answers(ctx.fetchImpl, localHealthUrl(config.server.port), HEALTH_TIMEOUT_MS)) {
-        println(ctx, `steward serve is running; enqueued job ${jobId}`);
-        return reportOutcome(ctx, jobId, await tailJob(runtime.stores, jobId, ctx));
-      }
-      reportOutcome(ctx, jobId, await runInline(runtime, jobId, ctx));
+      println(ctx, prompt);
     });
 };

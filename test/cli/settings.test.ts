@@ -75,7 +75,7 @@ describe("steward settings on the Kubernetes runtime", () => {
   it("reads and sets through the admin API", async () => {
     await writeFile(join(dir, "admin.token"), TOKEN, { mode: 0o600 });
     const settings = new SettingsStore(stores.db, DEFAULT_SETTINGS);
-    admin = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket: (key) => Promise.resolve({ id: key, identifier: key }) });
+    admin = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket: (key) => Promise.resolve({ id: key, identifier: key }), fetchTicket: () => Promise.reject(new Error("Intended Test Error")) });
     await admin.listen({ port: 0, host: "127.0.0.1" });
     const address = admin.server.address();
     if (typeof address !== "object" || address === null) throw new Error("no address");
