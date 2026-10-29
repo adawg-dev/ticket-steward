@@ -7,6 +7,7 @@ import type { CodeHost } from "../codehost/types.js";
 import { loadConfig, type LoadedConfig } from "../config/load.js";
 import type { SecretFetcher } from "../config/secretSource.js";
 import type { OrbitExec } from "../orbit/run.js";
+import type { ObjectStore } from "../sessions/store.js";
 import type { TicketBundle } from "../tracker/types.js";
 import type { Tracker } from "../tracker/types.js";
 import type { SlotRunner } from "../workspace/slots.js";
@@ -38,6 +39,8 @@ export interface CliFactories {
   orbitExec?: OrbitExec;
   /** Stands in for Secrets Manager in `render-overlay`. */
   secretFetcher?: SecretFetcher;
+  /** Stands in for the MinIO bucket in `sessions pull|push|sync`. */
+  objectStore?: ObjectStore;
   /** Stands in for the interactive Claude Code process `steward chat` runs; resolves to its exit code. */
   spawnInteractive?: SpawnInteractive;
 }

@@ -12,6 +12,7 @@ import { registerMirror } from "./mirror.js";
 import { registerOverlay } from "./overlay.js";
 import { registerRenderOverlay } from "./renderOverlay.js";
 import { registerServe } from "./serve.js";
+import { registerSessions } from "./sessions.js";
 import { registerTemplates } from "./templates.js";
 import { registerTools } from "./tools.js";
 
@@ -38,5 +39,6 @@ export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   registerTools(program, ctx);
   registerKeyproxy(program, ctx);
   registerRenderOverlay(program, ctx);
+  registerSessions(program, ctx);
   return program;
 };
