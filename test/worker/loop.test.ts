@@ -40,7 +40,6 @@ const createdTrigger: TriggerEvent = {
   action: "implement",
 };
 
-const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 let dataDir: string;
 let stores: Stores;
@@ -53,7 +52,7 @@ let worker: WorkerHandle | null;
 const makeConfig = (): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
+  tracker: { kind: "linear", teams: ["API"] },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",
@@ -641,8 +640,8 @@ describe("startWorker", () => {
     expect(runImplementMock).toHaveBeenCalledTimes(1);
   });
 
-  it("claims nothing while the tracker reports a rejected API key", async () => {
-    tracker.rejectApiKey();
+  it("claims nothing while the tracker reports rejected Linear app credentials", async () => {
+    tracker.rejectCredentials();
     const jobId = stores.jobs.enqueue(createdTrigger);
     start();
     await sleep(30);
@@ -651,10 +650,10 @@ describe("startWorker", () => {
     expect(runImplementMock).not.toHaveBeenCalled();
   });
 
-  it("stops claiming after a job hits a rejected API key and keeps that job queued with its attempt refunded", async () => {
+  it("stops claiming after a job hits rejected Linear app credentials and keeps that job queued with its attempt refunded", async () => {
     runImplementMock.mockImplementationOnce(async () => {
-      tracker.rejectApiKey();
-      return { status: "failed", error: "Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked.", retryable: true };
+      tracker.rejectCredentials();
+      return { status: "failed", error: "Linear rejected the steward's app credentials", retryable: true };
     });
     const firstId = stores.jobs.enqueue(createdTrigger);
     const secondId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-2" });
@@ -673,10 +672,10 @@ describe("startWorker", () => {
     expect(stores.jobs.get(secondId)?.attempts).toBe(0);
   });
 
-  it("does not fail a job on its last attempt when that attempt hits a rejected API key", async () => {
+  it("does not fail a job on its last attempt when that attempt hits rejected Linear app credentials", async () => {
     runImplementMock.mockImplementationOnce(async () => {
-      tracker.rejectApiKey();
-      return { status: "publish_failed", error: "Linear rejected LINEAR_API_KEY (401): the key is invalid or revoked." };
+      tracker.rejectCredentials();
+      return { status: "publish_failed", error: "Linear rejected the steward's app credentials" };
     });
     const jobId = stores.jobs.enqueue(createdTrigger);
     start({ maxAttempts: 1 });

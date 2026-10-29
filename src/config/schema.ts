@@ -6,18 +6,11 @@ const BrainBaseSchema = z.object({
   timeoutMinutes: z.number().positive(),
 });
 
-/** A key that only served enrich (removed 2026-10-28): rejected rather than stripped, so a stale config fails loudly. */
-const removedWithEnrich = (key: string) => z.never({ error: `${key} was removed with enrich (see docs/ops.md)` }).optional();
+/** A removed key: rejected rather than stripped, so a stale config fails loudly with `message`. */
+const removed = (message: string) => z.never({ error: message }).optional();
 
-const LabelsSchema = z.object({
-  triage: removedWithEnrich("tracker.labels.triage"),
-  implement: z.string().min(1).default("ready-for-agent"),
-  needsInfo: z.string().min(1).default("needs-info"),
-  readyForHuman: z.string().min(1).default("ready-for-human"),
-  implemented: z.string().min(1).default("agent-implemented"),
-  /** Set when the fix loop ends with Greptile at 5/5 and a green pipeline. */
-  approved: z.string().min(1).default("agent-approved"),
-});
+/** A key that only served enrich (removed 2026-10-28). */
+const removedWithEnrich = (key: string) => removed(`${key} was removed with enrich (see docs/ops.md)`);
 
 const BRANCH_TYPE = /^[a-z][a-z0-9-]*$/;
 
@@ -160,23 +153,25 @@ const RuntimeSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
+export const BrainSchema = z.discriminatedUnion("kind", [
+  BrainBaseSchema.extend({ kind: z.literal("claude-code") }),
+  BrainBaseSchema.extend({
+    kind: z.literal("openai-agents"),
+    /** Unset leaves the Agents SDK's per-model default, which is "none" for gpt-5.5 and unset for newer models. */
+    reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
+  }),
+]);
+
 export const StewardConfigSchema = z.object({
   dataDir: z.string(),
-  brain: z.discriminatedUnion("kind", [
-    BrainBaseSchema.extend({ kind: z.literal("claude-code") }),
-    BrainBaseSchema.extend({
-      kind: z.literal("openai-agents"),
-      /** Unset leaves the Agents SDK's per-model default, which is "none" for gpt-5.5 and unset for newer models. */
-      reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
-    }),
-  ]),
+  brain: BrainSchema,
   tracker: z.object({
     kind: z.literal("linear"),
     teams: z.array(z.string()).default([]),
     gatewayIssues: removedWithEnrich("tracker.gatewayIssues"),
     bugLabels: removedWithEnrich("tracker.bugLabels"),
-    /** The labels the steward reads and sets; required by implement. */
-    labels: LabelsSchema.optional(),
+    /** Removed with the label trigger: assigning the steward's Linear app starts work. */
+    labels: removed("tracker.labels: assign the steward in Linear instead (docs/ops.md)"),
     /** Removed; rejected rather than stripped, so a config still carrying it fails loudly. */
     triggerLabel: z.never({ error: "tracker.triggerLabel was replaced by tracker.labels (see docs/ops.md)" }).optional(),
   }),
@@ -233,8 +228,9 @@ export const StewardConfigSchema = z.object({
     ctx.addIssue({ code: "custom", path: ["chat"], message: 'chat requires brain.kind "claude-code"' });
   }
   if (config.implement === undefined) ctx.addIssue({ code: "custom", path: ["implement"], message: "implement is required" });
-  if (config.implement !== undefined && config.tracker.labels === undefined) {
-    ctx.addIssue({ code: "custom", path: ["implement"], message: "implement requires tracker.labels" });
+  // The Linear app's panel and steering are built on the claude-code brain's streaming session.
+  if (config.tracker.kind === "linear" && config.brain.kind !== "claude-code") {
+    ctx.addIssue({ code: "custom", path: ["brain"], message: 'the Linear app requires brain.kind "claude-code"' });
   }
   if (config.slots !== undefined && config.workspace.port !== undefined) {
     ctx.addIssue({ code: "custom", path: ["workspace", "port"], message: "workspace.port was replaced by slots.appPortBase (see docs/ops.md)" });
@@ -259,7 +255,6 @@ export type StewardConfigInput = z.input<typeof StewardConfigSchema>;
 export const defineConfig = (config: StewardConfigInput): StewardConfigInput => config;
 export type BrainConfig = StewardConfig["brain"];
 export type CodeHostConfig = StewardConfig["codehost"];
-export type LabelsConfig = NonNullable<StewardConfig["tracker"]["labels"]>;
 export type ImplementConfig = NonNullable<StewardConfig["implement"]>;
 export type GreptileConfig = NonNullable<StewardConfig["greptile"]>;
 export type ChatConfig = NonNullable<StewardConfig["chat"]>;

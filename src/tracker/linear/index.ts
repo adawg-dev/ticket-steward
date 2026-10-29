@@ -1,14 +1,33 @@
 import type { Secrets } from "../../config/load.js";
+import { createClientCredentialsToken, LINEAR_APP_SCOPES, type LinearToken } from "./auth.js";
 import { LinearTracker } from "./client.js";
 
-export { createLinearClient, LinearApiKeyRejectedError, LinearTracker } from "./client.js";
+export { createClientCredentialsToken, LINEAR_APP_SCOPES, LinearCredentialsRejectedError, type LinearToken } from "./auth.js";
+export { createLinearClient, LinearTracker } from "./client.js";
 export { toTemplateSummary } from "./templates.js";
 export { parseEvent, verifySignature } from "./webhook.js";
 
-export const requireLinearApiKey = (secrets: Secrets): string => {
-  const apiKey = secrets.LINEAR_API_KEY;
-  if (apiKey === undefined || apiKey === "") throw new Error("LINEAR_API_KEY must be set in .env");
-  return apiKey;
+export const requireLinearAppCredentials = (secrets: Secrets): { clientId: string; clientSecret: string } => {
+  const { LINEAR_CLIENT_ID: clientId, LINEAR_CLIENT_SECRET: clientSecret } = secrets;
+  if (clientId === undefined || clientId === "" || clientSecret === undefined || clientSecret === "") {
+    throw new Error("LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET must be set (Secrets Manager DEV_STEWARD_LINEAR_CLIENT_ID and DEV_STEWARD_LINEAR_CLIENT_SECRET)");
+  }
+  return { clientId, clientSecret };
 };
 
-export const createLinearTracker = (secrets: Secrets): LinearTracker => new LinearTracker(requireLinearApiKey(secrets));
+export interface LinearDeps {
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+}
+
+/** The app's token, minted on first use; nothing calls Linear until then. */
+export const createLinearToken = (secrets: Secrets, deps: LinearDeps = {}): LinearToken =>
+  createClientCredentialsToken({
+    ...requireLinearAppCredentials(secrets),
+    scopes: LINEAR_APP_SCOPES,
+    fetchImpl: deps.fetchImpl ?? fetch,
+    now: deps.now ?? Date.now,
+  });
+
+export const createLinearTracker = (secrets: Secrets, deps: LinearDeps & { token?: LinearToken } = {}): LinearTracker =>
+  new LinearTracker(deps.token ?? createLinearToken(secrets, deps));

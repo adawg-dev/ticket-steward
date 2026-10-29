@@ -81,7 +81,6 @@ describe("steward implement", () => {
     expect(stdout()).toContain("dry run: no push tool; the agent's work on");
     expect(stdout()).toContain("uncommitted:\n  src/adapter.ts");
     expect(brain.lastInput().mcpServers).not.toHaveProperty("push");
-    expect(tracker.labelSwaps()).toEqual([]);
     expect(await git(repo.repo, ["branch", "--list", "*/API-1-*"])).toBe("");
   });
 

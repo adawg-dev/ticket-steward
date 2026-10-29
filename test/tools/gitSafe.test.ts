@@ -17,7 +17,6 @@ import { FakeTracker } from "../fakes/fakeTracker.js";
 import { tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { git } from "../workspace/helpers.js";
 
-const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 const BRANCH = "fix/API-1-adapter-drops-the-last-chunk";
 
 const issue: TicketBundle = {
@@ -47,7 +46,7 @@ let evil: string;
 const config = (): StewardConfig => ({
   dataDir: repo.dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
+  tracker: { kind: "linear", teams: ["API"] },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: { fetchUrl: repo.repo, baseBranch: "main", overlayDir: repo.overlayDir, setup: [], setupTimeoutMinutes: 1, port: 4100, keepOnFailure: false },
   retention: { keptWorktrees: 3, days: 30 },

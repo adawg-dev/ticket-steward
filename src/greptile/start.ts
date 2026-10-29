@@ -45,20 +45,13 @@ export const startLoop = (deps: Pick<PipelineDeps, "config" | "stores">, job: Jo
   });
 };
 
-type RestartDeps = Pick<PipelineDeps, "config" | "stores" | "tracker" | "gitlab" | "redactor">;
+type RestartDeps = Pick<PipelineDeps, "config" | "stores" | "gitlab" | "redactor">;
 
 const fail = (error: string): JobOutcome => ({ status: "failed", error, retryable: false });
 
 /** Back to `awaiting_review` at round 0 on the open MR, adopting its head; the history and hand-back time are kept. */
 const resumeLoop = async (deps: RestartDeps, loop: Loop, mr: MergeRequestInfo, labelDriven: boolean): Promise<JobOutcome> => {
   const { stores } = deps;
-  const labels = deps.config.tracker.labels;
-  try {
-    // Before the loop moves, so a failed swap is retried on a loop that is still handed back.
-    if (labelDriven && labels !== undefined) await deps.tracker.swapLabel(loop.issueId, labels.implement, labels.implemented);
-  } catch (err) {
-    return { status: "failed", error: `labels: ${errorMessage(err)}`, retryable: true };
-  }
   transaction(stores.db, () => {
     stores.loops.update(loop.id, {
       state: "awaiting_review",

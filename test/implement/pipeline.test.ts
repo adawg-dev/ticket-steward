@@ -26,7 +26,6 @@ import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
 
 const IMPLEMENT_PROMPT = fileURLToPath(new URL("../../prompts/implement.md", import.meta.url));
-const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const issue: TicketBundle = {
   id: "issue-1",
@@ -69,7 +68,7 @@ let port: number;
 const makeConfig = (implement: Partial<NonNullable<StewardConfig["implement"]>> = {}): StewardConfig => ({
   dataDir: repo.dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
+  tracker: { kind: "linear", teams: ["API"] },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: { fetchUrl: repo.repo, baseBranch: "main", overlayDir: repo.overlayDir, setup: [], setupTimeoutMinutes: 1, port, keepOnFailure: false },
   retention: { keptWorktrees: 3, days: 30 },
@@ -110,6 +109,12 @@ type AgentStep = (workspace: string, push: (branchType?: string | null) => Promi
 const commitAndPush: AgentStep = async (workspace, push) => {
   await agentCommit(workspace, "API-1: Keep the last chunk");
   await push("fix");
+};
+
+/** As `commitAndPush`, then Linear fails the publish step's ticket read. */
+const pushThenLinearDown: AgentStep = async (workspace, push) => {
+  await commitAndPush(workspace, push);
+  tracker.failNextRead();
 };
 
 /**
@@ -193,7 +198,7 @@ const depsFor = (brain: AgentBrain, config: StewardConfig = makeConfig()): Pipel
 const remoteBranches = (): Promise<string> => git(repo.repo, ["branch", "--list", "*/API-1-*"]);
 
 describe("runImplement", () => {
-  it("succeeds once the agent pushed through the push tool, swapping to agent-implemented and nothing else", async () => {
+  it("succeeds once the agent pushed through the push tool, moving no labels", async () => {
     const brain = agentBrain(implemented);
     const ctx = claim();
 
@@ -207,8 +212,7 @@ describe("runImplement", () => {
     expect(await git(repo.repo, ["log", "-1", "--format=%s", `refs/heads/${BRANCH}`])).toBe("API-1: Keep the last chunk");
     expect(job?.pushedAt).not.toBeNull();
     expect(job?.implementResult).toEqual({ result: implemented, handback: null, baseSha: await git(repo.repo, ["rev-parse", "main"]) });
-    expect(tracker.labelSwaps()).toEqual([{ issueId: "issue-1", from: "ready-for-agent", to: "agent-implemented" }]);
-    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-agent"]);
     expect(brain.calls[0]?.output).toBe("implement");
     expect(brain.calls[0]?.timeoutMs).toBe(60_000);
   });
@@ -251,7 +255,6 @@ describe("runImplement", () => {
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the agent did not push its change" });
     expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toEqual({ label: "readyForHuman", reason: "the agent did not push its change", detail: "uncommitted:\n  src/adapter.ts" });
     expect(await remoteBranches()).toBe("");
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 
   it("hands back with the commits when the agent committed but its push was refused", async () => {
@@ -284,7 +287,6 @@ describe("runImplement", () => {
     const detail = stores.jobs.get(ctx.jobId)?.implementResult?.handback?.detail ?? "";
     expect(detail).toMatch(/^uncommitted:\n {2}notes\.md\ncommits not pushed:\n {2}[0-9a-f]{7} API-1: Test it$/);
     expect(await git(repo.repo, ["log", "--format=%s", `main..refs/heads/${BRANCH}`])).toBe("API-1: Keep the last chunk");
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 
   it("does not count the files the steward copied in as unpushed work", async () => {
@@ -316,7 +318,6 @@ describe("runImplement", () => {
     const job = stores.jobs.get(ctx.jobId);
     expect(job?.pushedAt).not.toBeNull();
     expect(stores.pushes.forJob(ctx.jobId)).toMatchObject([{ sha: job?.commitSha, pushedAt: expect.any(String) }]);
-    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
   });
 
   it("attaches the screenshots the agent listed and stores what it attached with the result, for the MR summary", async () => {
@@ -363,7 +364,6 @@ describe("runImplement", () => {
     const outcome = await runImplement(ctx, depsFor(agentBrain({ ...implemented, outcome: "needs_info", questions: ["Which stream?"] }, async () => undefined)));
 
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the ticket needs more information" });
-    expect(tracker.labelsOf("issue-1")).toEqual(["needs-info"]);
     expect(stores.jobs.get(ctx.jobId)?.implementResult?.result?.questions).toEqual(["Which stream?"]);
     expect(await remoteBranches()).toBe("");
   });
@@ -371,7 +371,6 @@ describe("runImplement", () => {
   it("hands back to ready-for-human when the agent failed", async () => {
     const ctx = claim();
     await runImplement(ctx, depsFor(agentBrain({ ...implemented, outcome: "failed", failureDetail: "the streaming test keeps failing" }, async () => undefined)));
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
     expect(recorded(ctx.jobId)).toContain("the streaming test keeps failing");
   });
 
@@ -385,7 +384,6 @@ describe("runImplement", () => {
     expect(outcome).toEqual({ status: "succeeded", warning: "handed back: a branch for API-1 already exists" });
     expect(brain.calls).toHaveLength(0);
     expect(recorded(ctx.jobId)).toContain("feature/API-1-by-hand");
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 
   it("finishes a reattached run pod's attempt from its own spec, its push counted as this run's", async () => {
@@ -446,7 +444,6 @@ describe("runImplement", () => {
     const ctx = { ...claim(), dryRun: true };
     const outcome = await runImplement(ctx, depsFor(agentBrain({ ...implemented, summary: "" }, async () => undefined)));
     expect(outcome).toEqual({ status: "succeeded", warning: "dry run: would hand back: the agent's result was invalid\nsummary is empty" });
-    expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("refuses a Done ticket without running the brain", async () => {
@@ -466,7 +463,6 @@ describe("runImplement", () => {
     expect(brain.pushes).toMatchObject([{ ok: false, reason: "API-1 is Canceled; Ticket Steward does not work on Done or Canceled tickets" }]);
     expect(outcome).toEqual({ status: "failed", error: "API-1 is Canceled; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
     expect(await remoteBranches()).toBe("");
-    expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("does not hand back when the ticket is closed while the agent runs", async () => {
@@ -475,7 +471,6 @@ describe("runImplement", () => {
     });
     const outcome = await runImplement(claim(), depsFor(brain));
     expect(outcome).toEqual({ status: "failed", error: "API-1 is Done; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
-    expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("ignores git config planted in the job dir by an earlier attempt", async () => {
@@ -488,11 +483,6 @@ describe("runImplement", () => {
 
     expect(outcome).toEqual({ status: "succeeded" });
     expect(await git(repo.repo, ["rev-parse", "--verify", `refs/heads/${BRANCH}`])).toBe(stores.jobs.get(ctx.jobId)?.commitSha);
-  });
-
-  it("leaves labels alone for a CLI-triggered job", async () => {
-    await runImplement(claim({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" }), depsFor(agentBrain(implemented)));
-    expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("runs the brain and the push tool's checks against the slot's app port", async () => {
@@ -655,7 +645,7 @@ describe("the fix loop start", () => {
     expect((await runImplement(ctx, depsFor(brain, withGreptile()))).status).toBe("failed");
     expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
 
-    tracker.failNextSwap();
+    tracker.failNextRead();
     expect((await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined, withGreptile()))).status).toBe("publish_failed");
     const retry = await publishImplementOnly({ ...ctx, attempt: 3 }, makeDeps(undefined, withGreptile()));
 
@@ -668,10 +658,9 @@ describe("the fix loop start", () => {
 });
 
 describe("publishImplementOnly", () => {
-  it("re-publishes after a failed label swap without pushing again", async () => {
+  it("re-publishes after a failed ticket read without pushing again", async () => {
     const ctx = claim();
-    tracker.failNextSwap();
-    const first = await runImplement(ctx, depsFor(agentBrain(implemented)));
+    const first = await runImplement(ctx, depsFor(agentBrain(implemented, pushThenLinearDown)));
     expect(first.status).toBe("publish_failed");
     const pushed = await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`]);
 
@@ -679,20 +668,17 @@ describe("publishImplementOnly", () => {
 
     expect(retry).toEqual({ status: "succeeded" });
     expect(await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(pushed);
-    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
   });
 
   it("treats its own already-landed push as pushed when the record was lost", async () => {
     const ctx = claim();
-    tracker.failNextSwap();
-    await runImplement(ctx, depsFor(agentBrain(implemented)));
+    await runImplement(ctx, depsFor(agentBrain(implemented, pushThenLinearDown)));
     stores.db.prepare("UPDATE jobs SET pushed_at = NULL WHERE id = ?").run(ctx.jobId);
 
     const retry = await publishImplementOnly({ ...ctx, attempt: 2 }, makeDeps(undefined));
 
     expect(retry).toEqual({ status: "succeeded" });
     expect(stores.jobs.get(ctx.jobId)?.pushedAt).not.toBeNull();
-    expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
   });
 
   it("hands back without pushing when the recorded push never landed", async () => {
@@ -706,7 +692,6 @@ describe("publishImplementOnly", () => {
     expect(retry).toEqual({ status: "succeeded", warning: "handed back: the push did not complete" });
     expect(await remoteBranches()).toBe("");
     expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback).toEqual({ label: "readyForHuman", reason: "the push did not complete", detail: BRANCH });
-    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-human"]);
   });
 
   it("does not record a push when the remote is unreachable", async () => {

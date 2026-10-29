@@ -9,7 +9,7 @@ import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: "./data",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear", teams: ["API"], labels: {} },
+  tracker: { kind: "linear", teams: ["API"] },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "concentrateai/kickoff" },
   workspace: {
     fetchUrl: "https://gitlab.com/concentrateai/kickoff.git",
@@ -101,15 +101,15 @@ describe("loadConfig", () => {
   });
 
   it("parses .env into secrets without touching process.env", async () => {
-    await writeSource(join(dir, "steward.config.ts"), configSource(), "LINEAR_API_KEY=lin_api_test\nLINEAR_WEBHOOK_SECRET=whsec\nANTHROPIC_API_KEY=sk-ant-test\n");
+    await writeSource(join(dir, "steward.config.ts"), configSource(), "LINEAR_CLIENT_SECRET=lin-secret-test\nLINEAR_WEBHOOK_SECRET=whsec\nANTHROPIC_API_KEY=sk-ant-test\n");
     const { secrets } = await loadConfig({ cwd: dir });
     expect(secrets).toEqual({
       ...pushSecret,
-      LINEAR_API_KEY: "lin_api_test",
+      LINEAR_CLIENT_SECRET: "lin-secret-test",
       LINEAR_WEBHOOK_SECRET: "whsec",
       ANTHROPIC_API_KEY: "sk-ant-test",
     });
-    expect(process.env.LINEAR_API_KEY).toBeUndefined();
+    expect(process.env.LINEAR_CLIENT_SECRET).toBeUndefined();
     expect(process.env.LINEAR_WEBHOOK_SECRET).toBeUndefined();
     expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
   });
@@ -120,10 +120,10 @@ describe("loadConfig", () => {
     expect(secrets).toEqual({ ...pushSecret, OPENAI_API_KEY: "sk-openai" });
   });
 
-  it("drops the removed Linear OAuth client credentials", async () => {
+  it("reads the Linear app's client credentials and drops the removed personal API key", async () => {
     await writeSource(join(dir, "steward.config.ts"), configSource(), "LINEAR_CLIENT_ID=lin-client\nLINEAR_CLIENT_SECRET=lin-secret\nLINEAR_API_KEY=lin_api_test\n");
     const { secrets } = await loadConfig({ cwd: dir });
-    expect(secrets).toEqual({ ...pushSecret, LINEAR_API_KEY: "lin_api_test" });
+    expect(secrets).toEqual({ ...pushSecret, LINEAR_CLIENT_ID: "lin-client", LINEAR_CLIENT_SECRET: "lin-secret" });
   });
 });
 
@@ -142,19 +142,20 @@ describe("loadConfig after the MR reviewer was removed", () => {
 });
 
 describe("SecretsSchema", () => {
-  it("accepts LINEAR_API_KEY and LINEAR_WEBHOOK_SECRET", () => {
-    expect(SecretsSchema.parse({ LINEAR_API_KEY: "lin_api_test", LINEAR_WEBHOOK_SECRET: "whsec" })).toEqual({
-      LINEAR_API_KEY: "lin_api_test",
+  it("accepts LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET and LINEAR_WEBHOOK_SECRET", () => {
+    expect(SecretsSchema.parse({ LINEAR_CLIENT_ID: "id", LINEAR_CLIENT_SECRET: "secret", LINEAR_WEBHOOK_SECRET: "whsec" })).toEqual({
+      LINEAR_CLIENT_ID: "id",
+      LINEAR_CLIENT_SECRET: "secret",
       LINEAR_WEBHOOK_SECRET: "whsec",
     });
   });
 
-  it("strips LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET", () => {
-    expect(SecretsSchema.parse({ LINEAR_CLIENT_ID: "id", LINEAR_CLIENT_SECRET: "secret" })).toEqual({});
+  it("strips the removed LINEAR_API_KEY", () => {
+    expect(SecretsSchema.parse({ LINEAR_API_KEY: "lin_api_test" })).toEqual({});
   });
 
-  it("rejects a non-string LINEAR_API_KEY", () => {
-    expect(SecretsSchema.safeParse({ LINEAR_API_KEY: 42 }).success).toBe(false);
+  it("rejects a non-string LINEAR_CLIENT_SECRET", () => {
+    expect(SecretsSchema.safeParse({ LINEAR_CLIENT_SECRET: 42 }).success).toBe(false);
   });
 });
 
@@ -179,7 +180,7 @@ describe("implement secrets", () => {
     const config = {
       dataDir: "./data",
       brain: { kind: "claude-code", model: "m", maxTurns: 1, timeoutMinutes: 1 },
-      tracker: { kind: "linear", labels: {} },
+      tracker: { kind: "linear" },
       codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
       workspace: { fetchUrl: "https://gitlab.example/acme/repo.git", baseBranch: "dev", overlayDir: "./overlay", setup: [], port: 4100 },
       server: { port: 3020, publicUrl: "https://steward.example" },
@@ -191,13 +192,13 @@ describe("implement secrets", () => {
 
   it("fails when implement is configured without GITLAB_PUSH_TOKEN", async () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-load-"));
-    writeFiles(dir, "LINEAR_API_KEY=x\n");
+    writeFiles(dir, "LINEAR_CLIENT_SECRET=x\n");
     await expect(loadConfig({ configPath: join(dir, "steward.config.ts") })).rejects.toThrow("implement requires GITLAB_PUSH_TOKEN in .env");
   });
 
   it("leaves out .env keys that are not among the named secrets", async () => {
     const dir = mkdtempSync(join(tmpdir(), "steward-load-"));
-    writeFiles(dir, "GITLAB_PUSH_TOKEN=glpat-push-token-value\nLINEAR_API_KEY=lin\nMIRROR_TOKEN=mirror\n");
+    writeFiles(dir, "GITLAB_PUSH_TOKEN=glpat-push-token-value\nLINEAR_CLIENT_SECRET=lin\nMIRROR_TOKEN=mirror\n");
     const loaded = await loadConfig({ configPath: join(dir, "steward.config.ts"), secretNames: ["MIRROR_TOKEN", "MIRROR_USERNAME"] });
     expect(loaded.secrets).toEqual({ MIRROR_TOKEN: "mirror" });
   });
@@ -217,21 +218,21 @@ describe("loadConfig with secrets from AWS Secrets Manager", () => {
   const fetcher = (values: Record<string, string>) => ({ get: async (id: string) => values[id] ?? null });
 
   it("reads the mapped secrets through the fetcher and ignores .env", async () => {
-    await writeSource(join(dir, "steward.config.ts"), configSource(awsBlock({ GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_API_KEY: "DEV_LINEAR" })), "LINEAR_API_KEY=from-env-file\n");
-    const { config, secrets } = await loadConfig({ cwd: dir, secretFetcher: fetcher({ DEV_PUSH: '{"GITLAB_PUSH_TOKEN":"glpat-aws"}', DEV_LINEAR: "lin_api_aws" }) });
-    expect(config.secrets).toEqual({ source: "aws", region: "us-west-2", map: { GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_API_KEY: "DEV_LINEAR" } });
-    expect(secrets).toEqual({ GITLAB_PUSH_TOKEN: "glpat-aws", LINEAR_API_KEY: "lin_api_aws" });
+    await writeSource(join(dir, "steward.config.ts"), configSource(awsBlock({ GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_CLIENT_SECRET: "DEV_LINEAR" })), "LINEAR_CLIENT_SECRET=from-env-file\n");
+    const { config, secrets } = await loadConfig({ cwd: dir, secretFetcher: fetcher({ DEV_PUSH: '{"GITLAB_PUSH_TOKEN":"glpat-aws"}', DEV_LINEAR: "lin-secret-aws" }) });
+    expect(config.secrets).toEqual({ source: "aws", region: "us-west-2", map: { GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_CLIENT_SECRET: "DEV_LINEAR" } });
+    expect(secrets).toEqual({ GITLAB_PUSH_TOKEN: "glpat-aws", LINEAR_CLIENT_SECRET: "lin-secret-aws" });
   });
 
   it("keeps the push token rule, naming the secrets map", async () => {
-    await writeSource(join(dir, "steward.config.ts"), configSource(awsBlock({ LINEAR_API_KEY: "DEV_LINEAR" })));
-    await expect(loadConfig({ cwd: dir, secretFetcher: fetcher({ DEV_LINEAR: "lin_api_aws" }) })).rejects.toThrow("implement requires GITLAB_PUSH_TOKEN in secrets.map");
+    await writeSource(join(dir, "steward.config.ts"), configSource(awsBlock({ LINEAR_CLIENT_SECRET: "DEV_LINEAR" })));
+    await expect(loadConfig({ cwd: dir, secretFetcher: fetcher({ DEV_LINEAR: "lin-secret-aws" }) })).rejects.toThrow("implement requires GITLAB_PUSH_TOKEN in secrets.map");
   });
 
   it("reads only the named secrets, and asks for the push token only when it is among them", async () => {
     await writeSource(
       join(dir, "steward.config.ts"),
-      configSource(awsBlock({ GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_API_KEY: "DEV_LINEAR", ANTHROPIC_API_KEY: "DEV_MODEL", MIRROR_TOKEN: "DEV_MIRROR" })),
+      configSource(awsBlock({ GITLAB_PUSH_TOKEN: "DEV_PUSH", LINEAR_CLIENT_SECRET: "DEV_LINEAR", ANTHROPIC_API_KEY: "DEV_MODEL", MIRROR_TOKEN: "DEV_MIRROR" })),
     );
     const reads: string[] = [];
     const recording = { get: async (id: string) => (reads.push(id), `value-of-${id}`) };

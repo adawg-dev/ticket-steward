@@ -3,8 +3,7 @@ import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: "/var/lib/ticket-steward",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  // brain: { kind: "openai-agents", model: "gpt-6-luna", reasoningEffort: "high", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear", teams: ["API", "RSPNS", "MSGS", "CC", "USRAPP", "STFAPP", "APP", "OPS", "PLAT"], labels: {} }, // default label names (ready-for-agent, agent-implemented, ...); only ready-for-agent starts work
+  tracker: { kind: "linear", teams: ["API", "RSPNS", "MSGS", "CC", "USRAPP", "STFAPP", "APP", "OPS", "PLAT"] }, // work starts when someone assigns the steward's Linear app
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "concentrateai/kickoff" },
   // codehost: { kind: "github", owner: "concentrateai", repo: "kickoff" },
   workspace: {

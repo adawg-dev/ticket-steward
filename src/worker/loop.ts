@@ -256,12 +256,12 @@ class Worker {
   }
 
   /**
-   * A rejected Linear API key pauses the queue: jobs stay queued until the steward restarts with a working key. While the
+   * Rejected Linear app credentials pause the queue: jobs stay queued until the steward restarts with working ones. While the
    * resource guard holds, only await_review jobs are claimed; claims are synchronous, so two lanes never pass it together.
    * A lane whose slot a `steward chat` leased claims nothing until the lease ends.
    */
   private claim(lane: Lane): Job | null {
-    if (this.sweeping || this.deps.tracker.apiKeyRejected()) return null;
+    if (this.sweeping || this.deps.tracker.credentialsRejected()) return null;
     const hold = this.heavyHold();
     const job = this.deps.stores.jobs.claimNext({ waitsOnly: hold !== null, slot: lane.slot });
     if (job !== null && job.kind !== "await_review") this.lastHeavyStart = Date.now();
@@ -347,7 +347,7 @@ class Worker {
     }
   }
 
-  /** Persists the outcome: deferred and interrupted runs stay queued, a run that hit a rejected API key goes back to the queue with its attempt refunded, retryable ones wait out the backoff in the queue, the rest are terminal. */
+  /** Persists the outcome: deferred and interrupted runs stay queued, a run that hit rejected Linear app credentials goes back to the queue with its attempt refunded, retryable ones wait out the backoff in the queue, the rest are terminal. */
   private async record(job: Job, attempt: Attempt, outcome: JobOutcome): Promise<void> {
     const { jobs, attempts } = this.deps.stores;
     if (outcome.status === "deferred") {
@@ -364,9 +364,9 @@ class Worker {
       return;
     }
     attempts.finish(attempt.id, attemptPatch(outcome));
-    if (outcome.status !== "succeeded" && this.deps.tracker.apiKeyRejected()) {
+    if (outcome.status !== "succeeded" && this.deps.tracker.credentialsRejected()) {
       jobs.releaseClaim(job.id, outcome.error);
-      logger.warn({ jobId: job.id }, "job returned to the queue: Linear rejected the API key");
+      logger.warn({ jobId: job.id }, "job returned to the queue: Linear rejected the app credentials");
       return;
     }
     if (isRetryable(outcome) && job.attempts < this.maxAttempts) {
@@ -390,7 +390,7 @@ class Worker {
 
   /** Hands back running loops left with no job (best effort; a failed hand-back is tried again on the next timer). */
   private rescueStranded(): Promise<void> {
-    if (this.stopped || this.deps.tracker.apiKeyRejected()) return Promise.resolve();
+    if (this.stopped || this.deps.tracker.credentialsRejected()) return Promise.resolve();
     this.rescuing ??= this.handBackStranded().finally(() => {
       this.rescuing = null;
     });

@@ -26,8 +26,9 @@ describe("steward init", () => {
     expect(await readFile(join(dir, "prompts", "implement.md"), "utf8")).toBe(await readFile(resolve("prompts/implement.md"), "utf8"));
     expect(await readFile(join(dir, "prompts", "fix.md"), "utf8")).toBe(await readFile(resolve("prompts/fix.md"), "utf8"));
     expect(await readFile(join(dir, ".env.example"), "utf8")).toBe(await readFile(resolve(".env.example"), "utf8"));
-    expect(await readFile(join(dir, ".env.example"), "utf8")).toMatch(/^LINEAR_API_KEY=$/m);
-    expect(await readFile(join(dir, ".env.example"), "utf8")).not.toContain("LINEAR_CLIENT_");
+    expect(await readFile(join(dir, ".env.example"), "utf8")).toMatch(/^LINEAR_CLIENT_ID=$/m);
+    expect(await readFile(join(dir, ".env.example"), "utf8")).toMatch(/^LINEAR_CLIENT_SECRET=$/m);
+    expect(await readFile(join(dir, ".env.example"), "utf8")).not.toContain("LINEAR_API_KEY");
     expect((await readFile(join(dir, "steward.config.ts"), "utf8")).startsWith('import { defineConfig } from "ticket-steward";')).toBe(true);
     expect(stdout()).toBe(
       [`wrote ${join(dir, "steward.config.ts")}`, `wrote ${join(dir, ".env.example")}`, `wrote ${join(dir, "prompts", "implement.md")}`, `wrote ${join(dir, "skills", "README.md")}`, `wrote ${join(dir, "prompts", "fix.md")}`, ""].join("\n"),

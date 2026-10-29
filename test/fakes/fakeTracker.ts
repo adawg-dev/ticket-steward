@@ -1,12 +1,13 @@
 import type { TicketBundle, Tracker } from "../../src/tracker/types.js";
 
-/** In-memory Linear: reads tickets and records label swaps, the steward's only Linear writes. */
+export const FAKE_APP_USER_ID = "steward-app-user";
+
+/** In-memory Linear: reads tickets as the steward's app user. */
 export class FakeTracker implements Tracker {
   readonly kind = "linear";
   private readonly issues = new Map<string, TicketBundle>();
-  private readonly swaps: Array<{ issueId: string; from: string; to: string }> = [];
-  private failingSwaps = 0;
   private rejected = false;
+  private failingReads = 0;
 
   constructor(issues: TicketBundle[] = []) {
     for (const issue of issues) this.issues.set(issue.id, issue);
@@ -20,24 +21,24 @@ export class FakeTracker implements Tracker {
     return this.issue(issueId).description;
   }
 
-  labelSwaps(): Array<{ issueId: string; from: string; to: string }> {
-    return [...this.swaps];
-  }
-
   labelsOf(issueId: string): string[] {
     return [...this.issue(issueId).labels];
   }
 
-  failNextSwap(): void {
-    this.failingSwaps += 1;
+  failNextRead(): void {
+    this.failingReads += 1;
   }
 
-  rejectApiKey(): void {
+  rejectCredentials(): void {
     this.rejected = true;
   }
 
-  apiKeyRejected(): boolean {
+  credentialsRejected(): boolean {
     return this.rejected;
+  }
+
+  async appUserId(): Promise<string> {
+    return FAKE_APP_USER_ID;
   }
 
   async resolveIssueId(idOrKey: string): Promise<{ id: string; identifier: string; teamKey: string }> {
@@ -47,23 +48,15 @@ export class FakeTracker implements Tracker {
   }
 
   async fetchTicket(issueId: string): Promise<TicketBundle> {
+    if (this.failingReads > 0) {
+      this.failingReads -= 1;
+      throw new Error("Linear down");
+    }
     return structuredClone(this.issue(issueId));
   }
 
   async readDescription(issueId: string): Promise<string> {
     return this.issue(issueId).description;
-  }
-
-  async swapLabel(issueId: string, from: string, to: string): Promise<void> {
-    if (this.failingSwaps > 0) {
-      this.failingSwaps -= 1;
-      throw new Error("Linear down");
-    }
-    const current = this.issue(issueId);
-    const kept = current.labels.filter((label) => label.toLowerCase() !== from.toLowerCase());
-    const labels = kept.some((label) => label.toLowerCase() === to.toLowerCase()) ? kept : [...kept, to];
-    this.issues.set(issueId, { ...current, labels });
-    this.swaps.push({ issueId, from, to });
   }
 
   private issue(issueId: string): TicketBundle {

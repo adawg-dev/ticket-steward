@@ -23,7 +23,7 @@ export interface ServerDeps {
 
 export interface HealthReport {
   ok: boolean;
-  apiKeyRejected: boolean;
+  credentialsRejected: boolean;
   worker: WorkerState;
   counts: { queued: number; failedLast24h: number };
   lastSuccessAt: string | null;
@@ -71,11 +71,11 @@ const isFailedWithin = (job: Job, sinceMs: number): boolean =>
 
 const healthReport = (deps: ServerDeps): HealthReport => {
   const { jobs } = deps.stores;
-  const apiKeyRejected = deps.tracker.apiKeyRejected();
+  const credentialsRejected = deps.tracker.credentialsRejected();
   const since = Date.now() - DAY_MS;
   return {
-    ok: !apiKeyRejected,
-    apiKeyRejected,
+    ok: !credentialsRejected,
+    credentialsRejected,
     worker: deps.workerState(),
     counts: {
       queued: jobs.list({ status: "queued", limit: COUNT_LIMIT }).length,
@@ -96,9 +96,8 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
     const body = parseJson(request.body);
     if (body === undefined) return reply.code(400).send({ ok: false });
 
-    const labels = deps.config.tracker.labels;
-    const triggers = labels === undefined ? undefined : { implement: labels.implement };
-    const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body, { labels: triggers });
+    // The label trigger is gone: a ticket event reaches intake, which skips it, until agent-session intake replaces this.
+    const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body);
     if (event === null || event.kind === "cli") return { ok: true, action: "ignored" };
 
     const decision = intake(deps, event);
@@ -189,7 +188,7 @@ const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => 
 const registerHealth = (app: FastifyInstance, deps: ServerDeps): void => {
   app.get("/health", async (_request, reply) => {
     const report = healthReport(deps);
-    return reply.code(report.apiKeyRejected ? 503 : 200).send(report);
+    return reply.code(report.credentialsRejected ? 503 : 200).send(report);
   });
 };
 

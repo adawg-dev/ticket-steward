@@ -17,7 +17,6 @@ let stores: Stores;
 let tracker: FakeTracker;
 let app: FastifyInstance;
 
-const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const IMPLEMENT = {
   prompt: "./prompts/implement.md",
@@ -33,7 +32,7 @@ const IMPLEMENT = {
 const makeConfig = (implement: typeof IMPLEMENT | null = IMPLEMENT): StewardConfig => ({
   dataDir,
   brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-  tracker: { kind: "linear", teams: ["API"], labels: LABELS },
+  tracker: { kind: "linear", teams: ["API"] },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
   workspace: {
     fetchUrl: "https://gitlab.example/acme/repo.git",
@@ -81,7 +80,7 @@ describe("buildServer", () => {
     tracker = new FakeTracker();
     app = buildServer({
       config: makeConfig(),
-      secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
+      secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_CLIENT_SECRET: "lin-secret-test" },
       stores,
       tracker,
       workerState: () => WORKER_IDLE,
@@ -109,24 +108,12 @@ describe("buildServer", () => {
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
-    it("queues an implement job for a signed Issue create carrying the implement label", async () => {
+    it("no longer starts work from the implement label on a signed Issue create", async () => {
       const response = await post("Issue", "delivery-1", issueCreatePayload());
 
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ ok: true, action: "enqueue" });
-      const jobs = stores.jobs.list({ limit: 10 });
-      expect(jobs.length).toBe(1);
-      expect(jobs[0]).toMatchObject({ status: "queued", issueId: "issue-1", kind: "implement" });
-      expect(jobs[0]?.trigger).toEqual({
-        kind: "issue.created",
-        issueId: "issue-1",
-        identifier: "API-1",
-        teamKey: "API",
-        deliveryId: "delivery-1",
-        description: "The adapter loses the final chunk.",
-        stateType: null,
-        action: "implement",
-      });
+      expect(response.json()).toEqual({ ok: true, action: "skip" });
+      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
     it("skips a signed Issue create without the implement label", async () => {
@@ -137,12 +124,13 @@ describe("buildServer", () => {
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
-    it("answers 200 for a repeated delivery without a second job", async () => {
+    it("answers 200 for a repeated delivery and reports it as a duplicate", async () => {
       await post("Issue", "delivery-1", issueCreatePayload());
       const response = await post("Issue", "delivery-1", issueCreatePayload());
 
       expect(response.statusCode).toBe(200);
-      expect(stores.jobs.list({ limit: 10 }).length).toBe(1);
+      expect(response.json()).toEqual({ ok: true, action: "duplicate" });
+      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
     it("ignores an Issue create for a team outside the allowlist", async () => {
@@ -164,7 +152,7 @@ describe("buildServer", () => {
       await app.close();
       app = buildServer({
         config: makeConfig(null),
-        secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_API_KEY: "lin_api_test" },
+        secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_CLIENT_SECRET: "lin-secret-test" },
         stores,
         tracker,
         workerState: () => WORKER_IDLE,
@@ -193,17 +181,10 @@ describe("buildServer", () => {
 
       const readyForAgentUpdate = (stateType = "unstarted") => labelUpdate(stateType, [AGENT_LABEL], []);
 
-      it("queues an implement job when ready-for-agent is added", async () => {
+      it("ignores ready-for-agent being added: assigning the steward starts work now", async () => {
         const response = await post("Issue", "delivery-9", readyForAgentUpdate());
 
-        expect(response.json()).toEqual({ ok: true, action: "enqueue" });
-        expect(stores.jobs.list({ limit: 10 })[0]).toMatchObject({ kind: "implement", trigger: { kind: "issue.labeled", action: "implement" } });
-      });
-
-      it("skips a Done ticket when the label is added", async () => {
-        const response = await post("Issue", "delivery-1", readyForAgentUpdate("completed"));
-
-        expect(response.json()).toEqual({ ok: true, action: "skip" });
+        expect(response.json()).toEqual({ ok: true, action: "ignored" });
         expect(stores.jobs.list({ limit: 10 })).toEqual([]);
       });
 
@@ -214,7 +195,7 @@ describe("buildServer", () => {
         expect(stores.jobs.list({ limit: 10 })).toEqual([]);
       });
 
-      const createLoop = (state: "awaiting_review" | "handed_back"): number => {
+      it("does not restart a handed-back loop when ready-for-agent is added", async () => {
         const jobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
         stores.jobs.claimById(jobId);
         stores.jobs.finish(jobId, { status: "succeeded" });
@@ -222,28 +203,11 @@ describe("buildServer", () => {
           issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: jobId, branch: "feature/api-1", baseSha: "a".repeat(40), headSha: "b".repeat(40),
           worktreeName: "api-1", labelDriven: false, sessionId: null,
         });
-        stores.loops.update(id, { state });
-        return id;
-      };
+        stores.loops.update(id, { state: "handed_back" });
 
-      it("queues a restart job when ready-for-agent is added to a handed-back loop", async () => {
-        const loopId = createLoop("handed_back");
-        const before = stores.jobs.list({ limit: 10 }).length;
         const response = await post("Issue", "delivery-9", readyForAgentUpdate());
 
-        expect(response.json()).toEqual({ ok: true, action: "restart" });
-        const queued = stores.jobs.list({ status: "queued", limit: 10 });
-        expect(queued).toHaveLength(1);
-        expect(stores.jobs.list({ limit: 10 })).toHaveLength(before + 1);
-        expect(queued[0]).toMatchObject({ kind: "restart", subject: `loop:${loopId}` });
-        expect(queued[0]?.trigger).toMatchObject({ kind: "loop", step: "restart", loopId, labelDriven: true });
-      });
-
-      it("skips ready-for-agent while the loop is awaiting a review", async () => {
-        createLoop("awaiting_review");
-        const response = await post("Issue", "delivery-9", readyForAgentUpdate());
-
-        expect(response.json()).toEqual({ ok: true, action: "skip" });
+        expect(response.json()).toEqual({ ok: true, action: "ignored" });
         expect(stores.jobs.list({ status: "queued", limit: 10 })).toEqual([]);
       });
 
@@ -659,7 +623,7 @@ describe("buildServer", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({
         ok: true,
-        apiKeyRejected: false,
+        credentialsRejected: false,
         worker: { running: [] },
         counts: { queued: 1, failedLast24h: 0 },
         lastSuccessAt: null,
@@ -680,14 +644,14 @@ describe("buildServer", () => {
       expect(response.json().lastSuccessAt).toBe(stores.jobs.get(succeededId)?.finishedAt);
     });
 
-    it("answers 503 once Linear rejected the API key", async () => {
-      tracker.rejectApiKey();
+    it("answers 503 once Linear rejected the app credentials", async () => {
+      tracker.rejectCredentials();
 
       const response = await app.inject({ method: "GET", url: "/health" });
 
       expect(response.statusCode).toBe(503);
       expect(response.json().ok).toBe(false);
-      expect(response.json().apiKeyRejected).toBe(true);
+      expect(response.json().credentialsRejected).toBe(true);
     });
 
     it("lists every running slot", async () => {

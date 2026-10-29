@@ -1,5 +1,5 @@
 import { ReadOnlyTracker } from "../../src/tracker/readOnly.js";
-import { FakeTracker } from "../fakes/fakeTracker.js";
+import { FAKE_APP_USER_ID, FakeTracker } from "../fakes/fakeTracker.js";
 import type { TicketBundle, Tracker } from "../../src/tracker/types.js";
 
 const bundle: TicketBundle = {
@@ -20,16 +20,15 @@ const bundle: TicketBundle = {
   templates: [],
 };
 
-const swapLabelMock = vi.fn<Tracker["swapLabel"]>();
-const apiKeyRejectedMock = vi.fn<Tracker["apiKeyRejected"]>();
+const credentialsRejectedMock = vi.fn<Tracker["credentialsRejected"]>();
 
 const inner: Tracker = {
   kind: "linear",
   resolveIssueId: async () => ({ id: "issue-uuid-1", identifier: "API-42", teamKey: "API" }),
   fetchTicket: async () => bundle,
   readDescription: async () => "Something is broken",
-  swapLabel: swapLabelMock,
-  apiKeyRejected: apiKeyRejectedMock,
+  appUserId: async () => "app-user-1",
+  credentialsRejected: credentialsRejectedMock,
 };
 
 describe("ReadOnlyTracker", () => {
@@ -44,33 +43,17 @@ describe("ReadOnlyTracker", () => {
     expect(await tracker.resolveIssueId("API-42")).toEqual({ id: "issue-uuid-1", identifier: "API-42", teamKey: "API" });
     expect(await tracker.fetchTicket("issue-uuid-1")).toEqual(bundle);
     expect(await tracker.readDescription("issue-uuid-1")).toBe("Something is broken");
-    expect(tracker.writes).toEqual([]);
   });
 
-  it("records writes in order without calling the inner tracker", async () => {
+  it("reads the app user from the inner tracker", async () => {
+    expect(await new ReadOnlyTracker(new FakeTracker([bundle])).appUserId()).toBe(FAKE_APP_USER_ID);
+  });
+
+  it("reports the inner tracker's credential state", () => {
     const tracker = new ReadOnlyTracker(inner);
-    await tracker.swapLabel("issue-uuid-1", "ready-for-agent", "agent-implemented");
-    await tracker.swapLabel("issue-uuid-1", "agent-implemented", "agent-approved");
-    expect(tracker.writes).toEqual([
-      { method: "swapLabel", args: ["issue-uuid-1", "ready-for-agent", "agent-implemented"] },
-      { method: "swapLabel", args: ["issue-uuid-1", "agent-implemented", "agent-approved"] },
-    ]);
-    expect(swapLabelMock).not.toHaveBeenCalled();
-  });
-
-  it("reports the inner tracker's API key state", () => {
-    const tracker = new ReadOnlyTracker(inner);
-    apiKeyRejectedMock.mockReturnValue(false);
-    expect(tracker.apiKeyRejected()).toBe(false);
-    apiKeyRejectedMock.mockReturnValue(true);
-    expect(tracker.apiKeyRejected()).toBe(true);
-  });
-
-  it("records swapLabel without forwarding it", async () => {
-    const fake = new FakeTracker([bundle]);
-    const tracker = new ReadOnlyTracker(fake);
-    await tracker.swapLabel("issue-uuid-1", "needs-triage", "needs-info");
-    expect(tracker.writes).toEqual([{ method: "swapLabel", args: ["issue-uuid-1", "needs-triage", "needs-info"] }]);
-    expect(fake.labelSwaps()).toEqual([]);
+    credentialsRejectedMock.mockReturnValue(false);
+    expect(tracker.credentialsRejected()).toBe(false);
+    credentialsRejectedMock.mockReturnValue(true);
+    expect(tracker.credentialsRejected()).toBe(true);
   });
 });

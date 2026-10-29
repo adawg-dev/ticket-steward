@@ -126,7 +126,7 @@ describe("the runtime config", () => {
   const base = {
     dataDir: "/var/lib/ticket-steward",
     brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-    tracker: { kind: "linear", labels: {} },
+    tracker: { kind: "linear" },
     codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
     workspace: { fetchUrl: "https://gitlab.example/acme/repo.git", baseBranch: "dev", overlayDir: "/x", overlayTemplateDir: "/t", setup: [] },
     server: { port: 3020, publicUrl: "https://steward.example" },

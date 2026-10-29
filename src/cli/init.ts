@@ -10,8 +10,7 @@ const CONFIG_TEMPLATE = `import { defineConfig } from "ticket-steward";
 export default defineConfig({
   dataDir: "/var/lib/ticket-steward",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  // brain: { kind: "openai-agents", model: "gpt-6-luna", reasoningEffort: "high", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear", teams: ["ENG"], labels: {} }, // labels default to ready-for-agent, agent-implemented, ...
+  tracker: { kind: "linear", teams: ["ENG"] }, // work starts when someone assigns the steward's Linear app
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "org/repo" },
   // codehost: { kind: "github", owner: "org", repo: "repo" },
   workspace: {

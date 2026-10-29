@@ -40,7 +40,7 @@ export const registerMcp = (program: Command, ctx: CliContext): void => {
       }
       const loaded = await ctx.loadConfig({ configPath });
       const redactor = await buildRedactor(loaded);
-      const ledger = storeLedger({ stores: openStores(loaded.config.dataDir), tracker: openTracker(loaded, ctx) });
+      const ledger = storeLedger({ stores: openStores(loaded.config.dataDir), tracker: openTracker(loaded, ctx).tracker });
       const deps = { config: loaded.config, secrets: loaded.secrets, mirror: openMirror(loaded), ledger, redactor };
       await startPushMcpServer({
         push: (request) =>

@@ -89,7 +89,7 @@ const dryRunHandback = ({ reason, detail }: Handback): string => (detail === "" 
 const finish = async (ctx: RunContext, deps: PipelineDeps, stored: StoredImplement): Promise<JobOutcome> => {
   if (ctx.dryRun) return { status: "succeeded", warning: stored.handback === null ? "dry run: would publish" : dryRunHandback(stored.handback) };
   deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
-  return publishImplement({ ctx, tracker: deps.tracker, labels: deps.config.tracker.labels, stored });
+  return publishImplement({ ctx, tracker: deps.tracker, stored });
 };
 
 /** Overlay files (never to be committed) and every secret the change must not carry: the overlay's and the steward's own. */
@@ -267,7 +267,7 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
   // Stored before the loop starts, so a crash from here on retries via publishImplementOnly, which starts it once.
   deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
   startLoopFor(ctx, deps, paths, baseSha);
-  return publishImplement({ ctx, tracker: deps.tracker, labels: deps.config.tracker.labels, stored });
+  return publishImplement({ ctx, tracker: deps.tracker, stored });
 };
 
 const executeImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
@@ -317,5 +317,5 @@ export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps):
       return { status: "publish_failed", error: `loop: ${errorMessage(err)}` };
     }
   }
-  return publishImplement({ ctx, tracker: deps.tracker, labels: deps.config.tracker.labels, stored });
+  return publishImplement({ ctx, tracker: deps.tracker, stored });
 };

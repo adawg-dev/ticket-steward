@@ -74,7 +74,7 @@ describe("collectSecretValues", () => {
         "# comment",
       ].join("\n"),
     );
-    const values = collectSecretValues({ LINEAR_API_KEY: "linear-secret", MIRROR_TOKEN: undefined }, [envFile]);
+    const values = collectSecretValues({ LINEAR_CLIENT_SECRET: "linear-secret", MIRROR_TOKEN: undefined }, [envFile]);
     expect(values).toEqual(["linear-secret", "postgres://u:p@host/db", "sk_test_abcdefgh", "mailpass123"]);
   });
 

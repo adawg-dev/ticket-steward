@@ -128,6 +128,8 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
         await internal?.close();
         await admin?.close();
         kubernetes?.close();
+        // The Linear token lived in this process only; revoke it rather than leave it valid.
+        await runtime.linearToken?.revoke().catch((err: unknown) => logger.warn({ err: errorMessage(err) }, "the Linear app token could not be revoked"));
         exitWith(ctx, 0);
       };
       process.once("SIGINT", () => void shutdown());

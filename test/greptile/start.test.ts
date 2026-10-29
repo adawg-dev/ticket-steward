@@ -27,13 +27,12 @@ const labeled: TriggerEvent = {
 let dataDir: string;
 let stores: Stores;
 
-const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 
 const depsWith = (greptile: GreptileConfig | undefined): { config: StewardConfig; stores: Stores } => {
   const config: StewardConfig = {
     dataDir,
     brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-    tracker: { kind: "linear", teams: ["API"], labels: LABELS },
+    tracker: { kind: "linear", teams: ["API"] },
     codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
     workspace: { fetchUrl: "https://gitlab.example/acme/repo.git", baseBranch: "dev", overlayDir: join(dataDir, "overlay"), setup: [], setupTimeoutMinutes: 1, port: 4100, keepOnFailure: false },
     retention: { keptWorktrees: 3, days: 30 },
@@ -198,7 +197,6 @@ describe("runRestart", () => {
     expect(queued("await_review").map((job) => job.trigger)).toEqual([
       { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "await" },
     ]);
-    expect(tracker.labelSwaps()).toEqual([{ issueId: "issue-1", from: "ready-for-agent", to: "agent-implemented" }]);
   });
 
   it("adopts nothing when the MR is still at the steward's last push", async () => {
@@ -210,14 +208,13 @@ describe("runRestart", () => {
     expect(loopOf(id)).toMatchObject({ adoptedFrom: null, headSha: HEAD, state: "awaiting_review" });
   });
 
-  it("leaves labels alone for a steward fix restart and records the loop as not label-driven", async () => {
+  it("records a steward fix restart as not label-driven", async () => {
     gitlab.openMr = fakeMergeRequest({ sha: PERSON });
     const id = handedBackLoop();
 
     await runRestart(claimRestart(id, false), restartDeps());
 
     expect(loopOf(id).labelDriven).toBe(false);
-    expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("with no open MR, says so on the loop's last MR and queues a fresh implement from the label", async () => {
@@ -229,7 +226,6 @@ describe("runRestart", () => {
     expect(gitlab.notes).toHaveLength(1);
     expect(gitlab.notes[0]).toContain("No open merge request for fix/API-1-adapter; Ticket Steward is starting a fresh implement.");
     expect(gitlab.notes[0]).toContain("<!-- ticket-steward:loop");
-    expect(tracker.labelSwaps()).toEqual([]);
     const implement = queued("implement");
     expect(implement).toHaveLength(1);
     expect(implement[0]?.trigger).toMatchObject({ kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
@@ -253,6 +249,5 @@ describe("runRestart", () => {
 
     expect(outcome).toEqual({ status: "succeeded", warning: `loop ${id} is awaiting_review, not handed back` });
     expect(loopOf(id).headSha).toBe(HEAD);
-    expect(tracker.labelSwaps()).toEqual([]);
   });
 });

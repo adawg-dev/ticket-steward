@@ -6,7 +6,9 @@ import { z } from "zod";
 import type { SecretsConfig } from "./schema.js";
 
 export const SecretsSchema = z.object({
-  LINEAR_API_KEY: z.string().optional(),
+  /** The steward's Linear OAuth app (client-credentials grant); Secrets Manager DEV_STEWARD_LINEAR_CLIENT_ID / _SECRET. */
+  LINEAR_CLIENT_ID: z.string().optional(),
+  LINEAR_CLIENT_SECRET: z.string().optional(),
   LINEAR_WEBHOOK_SECRET: z.string().optional(),
   MIRROR_TOKEN: z.string().optional(),
   MIRROR_USERNAME: z.string().optional(),

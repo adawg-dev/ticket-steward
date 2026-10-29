@@ -4,8 +4,6 @@ import type { ImplementResult, StoredImplement } from "../../src/implement/resul
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 
-const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
-
 const issue: TicketBundle = {
   id: "issue-1",
   identifier: "API-1",
@@ -45,40 +43,27 @@ beforeEach(() => {
 });
 
 const publish = (stored: StoredImplement, trigger: TriggerEvent = labeled) =>
-  publishImplement({ ctx: ctxFor(trigger), tracker, labels: LABELS, stored });
+  publishImplement({ ctx: ctxFor(trigger), tracker, stored });
 
 describe("publishImplement", () => {
-  it("swaps the implement label for agent-implemented after a push, and writes nothing else", async () => {
+  it("succeeds after a push and moves no labels", async () => {
     expect(await publish({ result: implemented, handback: null })).toEqual({ status: "succeeded" });
-    expect(tracker.labelSwaps()).toEqual([{ issueId: "issue-1", from: "ready-for-agent", to: "agent-implemented" }]);
+    expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-agent"]);
   });
 
-  it("swaps to needs-info for a needs-info hand-back", async () => {
+  it("succeeds with the hand-back's reason as a warning", async () => {
     const stored: StoredImplement = { result: { ...implemented, outcome: "needs_info", questions: ["Which stream?"] }, handback: { label: "needsInfo", reason: "the ticket needs more information", detail: "" } };
     expect(await publish(stored)).toEqual({ status: "succeeded", warning: "handed back: the ticket needs more information" });
-    expect(tracker.labelSwaps()).toEqual([{ issueId: "issue-1", from: "ready-for-agent", to: "needs-info" }]);
   });
 
-  it("swaps to ready-for-human for any other hand-back", async () => {
-    const stored: StoredImplement = { result: null, handback: { label: "readyForHuman", reason: "a branch for API-1 already exists", detail: "feature/API-1-by-hand" } };
-    expect(await publish(stored)).toEqual({ status: "succeeded", warning: "handed back: a branch for API-1 already exists" });
-    expect(tracker.labelSwaps()).toEqual([{ issueId: "issue-1", from: "ready-for-agent", to: "ready-for-human" }]);
-  });
-
-  it("leaves labels alone for a CLI implement", async () => {
-    expect(await publish({ result: implemented, handback: null }, { kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" })).toEqual({ status: "succeeded" });
-    expect(tracker.labelSwaps()).toEqual([]);
-  });
-
-  it("never writes to a closed ticket", async () => {
+  it("fails a job whose ticket was closed meanwhile", async () => {
     tracker.addIssue({ ...structuredClone(issue), state: { name: "Done", type: "completed" } });
     expect(await publish({ result: implemented, handback: null })).toEqual({ status: "failed", error: "API-1 is Done; Ticket Steward does not work on Done or Canceled tickets", retryable: false });
-    expect(tracker.labelSwaps()).toEqual([]);
   });
 
-  it("reports a failed swap as publish_failed so a retry runs it again", async () => {
-    tracker.failNextSwap();
-    expect(await publish({ result: implemented, handback: null })).toEqual({ status: "publish_failed", error: "labels: Linear down" });
+  it("reports a failed ticket read as publish_failed so a retry runs it again", async () => {
+    tracker.failNextRead();
+    expect(await publish({ result: implemented, handback: null })).toEqual({ status: "publish_failed", error: "ticket: Linear down" });
   });
 });
 

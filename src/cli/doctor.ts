@@ -14,6 +14,7 @@ import type { LoadedConfig } from "../config/load.js";
 import { appPortOf, kubernetesRuntime, type SlotsConfig, type StewardConfig } from "../config/schema.js";
 import { execOrbit, orbitEnv } from "../orbit/run.js";
 import { orbitRemote, runOrbitTool } from "../orbit/server.js";
+import { createLinearToken, type LinearToken } from "../tracker/linear/index.js";
 import { listFiles } from "../workspace/files.js";
 import { git, scrubCredentials } from "../workspace/git.js";
 import { injectToken, splitCredentials } from "../workspace/mirror.js";
@@ -34,7 +35,6 @@ const playwrightBrowsersPath = (): string => process.env.PLAYWRIGHT_BROWSERS_PAT
 const SENSITIVE_HOME_DIRS = [".ssh", ".kube"];
 
 const ViewerResponse = z.object({ data: z.object({ viewer: z.object({ id: z.string(), name: z.string() }) }) });
-const LabelsResponse = z.object({ data: z.object({ issueLabels: z.object({ nodes: z.array(z.object({ name: z.string() })) }) }) });
 const GraphqlErrors = z.object({ errors: z.array(z.object({ extensions: z.object({ code: z.string().optional() }).optional() })) });
 
 const missing = (secrets: Record<string, string | undefined>, keys: string[]): string[] => keys.filter((key) => secrets[key] === undefined || secrets[key] === "");
@@ -127,23 +127,35 @@ const workspaceChecks = (loaded: LoadedConfig): Check[] => {
 const isAuthenticationError = (status: number, body: unknown): boolean =>
   status === 401 || (GraphqlErrors.safeParse(body).data?.errors.some((error) => error.extensions?.code === "AUTHENTICATION_ERROR") ?? false);
 
+/**
+ * Mints a token for the steward's Linear app, reads `viewer`, and revokes the token again: doctor holds it for one
+ * query only.
+ */
 const linearChecks = ({ secrets }: LoadedConfig, ctx: CliContext): Check[] => [
   {
-    name: "linear api key",
+    name: "linear app",
     run: async () => {
-      const apiKey = secrets.LINEAR_API_KEY;
-      if (apiKey === undefined || apiKey === "") return flunk("missing LINEAR_API_KEY; create a personal API key for the steward's Linear user");
-      const response = await ctx.fetchImpl(LINEAR_GRAPHQL_URL, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: apiKey },
-        body: JSON.stringify({ query: "{ viewer { id name } }" }),
-        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-      });
-      const body: unknown = await response.json().catch(() => undefined);
-      if (isAuthenticationError(response.status, body)) return flunk("Linear rejected LINEAR_API_KEY: the key is invalid or revoked");
-      if (!response.ok) return flunk(`viewer query answered ${response.status}`);
-      const { name } = ViewerResponse.parse(body).data.viewer;
-      return ok(`authenticated as ${name}; every steward write appears as this user, so use a dedicated bot user`);
+      const fetchImpl: typeof fetch = (input, init) => ctx.fetchImpl(input, { ...init, signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+      let token: LinearToken;
+      try {
+        token = createLinearToken(secrets, { fetchImpl });
+      } catch (err) {
+        return flunk(errorMessage(err));
+      }
+      try {
+        const response = await fetchImpl(LINEAR_GRAPHQL_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${await token.get()}` },
+          body: JSON.stringify({ query: "{ viewer { id name } }" }),
+        });
+        const body: unknown = await response.json().catch(() => undefined);
+        if (isAuthenticationError(response.status, body)) return flunk("Linear rejected the app's freshly minted token");
+        if (!response.ok) return flunk(`viewer query answered ${response.status}`);
+        const { id, name } = ViewerResponse.parse(body).data.viewer;
+        return ok(`authenticated as ${name} (app user ${id})`);
+      } finally {
+        await token.revoke().catch(() => undefined);
+      }
     },
   },
 ];
@@ -159,27 +171,7 @@ const lsRemoteSite = async (dataDir: string): Promise<{ cwd: string; ceiling: st
 
 const implementChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   const { config, secrets } = loaded;
-  const labels = config.tracker.labels;
   const checks: Check[] = [];
-  if (labels !== undefined) {
-    checks.push({
-      name: "linear labels",
-      run: async () => {
-        const apiKey = secrets.LINEAR_API_KEY ?? "";
-        const names = [labels.implement, labels.needsInfo, labels.readyForHuman, labels.implemented, ...(config.greptile === undefined ? [] : [labels.approved])];
-        const response = await ctx.fetchImpl(LINEAR_GRAPHQL_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: apiKey },
-          body: JSON.stringify({ query: "query($names: [String!]) { issueLabels(first: 250, filter: { name: { in: $names } }) { nodes { name } } }", variables: { names } }),
-          signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-        });
-        if (!response.ok) return flunk(`issueLabels answered ${response.status}`);
-        const found = new Set(LabelsResponse.parse(await response.json()).data.issueLabels.nodes.map((node) => node.name.toLowerCase()));
-        const absent = names.filter((name) => !found.has(name.toLowerCase()));
-        return absent.length === 0 ? ok(names.join(", ")) : flunk(`missing in Linear: ${absent.join(", ")}`);
-      },
-    });
-  }
   const settings = config.implement;
   if (settings === undefined) return checks;
   checks.push({

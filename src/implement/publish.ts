@@ -1,5 +1,4 @@
 import { renderMedia, type MediaUploads } from "../codehost/media.js";
-import type { LabelsConfig } from "../config/schema.js";
 import { closedReason } from "../core/intake.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
@@ -26,32 +25,17 @@ export const buildImplementSummary = (input: { jobId: number; identifier: string
 };
 
 /**
- * Labels only: Linear gets no comments. A push moves the label to `implemented`, a hand-back to its own label; the
- * hand-back's reason stays in the job record. A failed swap is publish_failed so a retry re-runs only this. Never
- * writes to a Done/Canceled ticket.
+ * Settles the job against the ticket: a Done/Canceled ticket fails it. Outcome labels were removed with the label
+ * trigger; the hand-back's reason stays in the job record. A failed read is publish_failed so a retry re-runs only this.
  */
-export const publishImplement = async (input: {
-  ctx: RunContext;
-  tracker: Tracker;
-  labels: LabelsConfig | undefined;
-  stored: StoredImplement;
-}): Promise<JobOutcome> => {
-  const { ctx, tracker, labels, stored } = input;
+export const publishImplement = async (input: { ctx: RunContext; tracker: Tracker; stored: StoredImplement }): Promise<JobOutcome> => {
+  const { ctx, tracker, stored } = input;
   try {
     const latest = await tracker.fetchTicket(ctx.issueId);
     const closed = closedReason(ctx.identifier, latest.state);
     if (closed !== null) return { status: "failed", error: closed, retryable: false };
   } catch (err) {
-    return { status: "publish_failed", error: `labels: ${errorMessage(err)}` };
-  }
-  // Only label-triggered jobs move labels; `steward implement KEY` (a cli trigger) leaves them alone.
-  if ((ctx.trigger.kind === "issue.created" || ctx.trigger.kind === "issue.labeled") && ctx.trigger.action === "implement" && labels !== undefined) {
-    const target = stored.handback === null ? labels.implemented : labels[stored.handback.label];
-    try {
-      await tracker.swapLabel(ctx.issueId, labels.implement, target);
-    } catch (err) {
-      return { status: "publish_failed", error: `labels: ${errorMessage(err)}` };
-    }
+    return { status: "publish_failed", error: `ticket: ${errorMessage(err)}` };
   }
   return stored.handback === null ? { status: "succeeded" } : { status: "succeeded", warning: `handed back: ${stored.handback.reason}` };
 };

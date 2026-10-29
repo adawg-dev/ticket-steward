@@ -62,14 +62,14 @@ describe("loadSecretsFrom", () => {
   });
 
   it("does not read .env when the source is aws", async () => {
-    await writeFile(join(dir, ".env"), "LINEAR_API_KEY=from-env-file\n");
+    await writeFile(join(dir, ".env"), "LINEAR_CLIENT_SECRET=from-env-file\n");
     expect(await loadSecretsFrom(aws({ GITLAB_TOKEN: "DEV_GL" }), dir, fakeFetcher({ DEV_GL: "glpat-x" }))).toEqual({ GITLAB_TOKEN: "glpat-x" });
   });
 
   it("keeps reading .env when the source is file, without asking the fetcher", async () => {
-    await writeFile(join(dir, ".env"), "LINEAR_API_KEY=lin_api_test\nSOMETHING_ELSE=nope\n");
+    await writeFile(join(dir, ".env"), "LINEAR_CLIENT_SECRET=lin-secret-test\nSOMETHING_ELSE=nope\n");
     const fetcher = fakeFetcher({});
-    expect(await loadSecretsFrom({ source: "file" }, dir, fetcher)).toEqual({ LINEAR_API_KEY: "lin_api_test" });
+    expect(await loadSecretsFrom({ source: "file" }, dir, fetcher)).toEqual({ LINEAR_CLIENT_SECRET: "lin-secret-test" });
     expect(fetcher.asked).toEqual([]);
   });
 

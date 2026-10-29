@@ -14,7 +14,7 @@ import { kubernetesChat, type KubernetesChat } from "../k8s/chat.js";
 import { clusterApis } from "../k8s/cluster.js";
 import { kubernetesExecutor, type KubernetesExecutor } from "../k8s/executor.js";
 import { openStores, type Stores } from "../store/index.js";
-import { createLinearTracker } from "../tracker/linear/index.js";
+import { createLinearToken, createLinearTracker, type LinearToken } from "../tracker/linear/index.js";
 import type { Tracker } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
 import { injectToken, Mirror } from "../workspace/mirror.js";
@@ -26,6 +26,8 @@ export interface Runtime {
   loaded: LoadedConfig;
   stores: Stores;
   tracker: Tracker;
+  /** The Linear app's token behind `tracker`, unless a factory supplied the tracker; `serve` revokes it on shutdown. */
+  linearToken?: LinearToken;
   deps: PipelineDeps;
   /** On the Kubernetes runtime: the executor that runs each job as a run pod, which `serve` also reattaches and serves callbacks for. */
   kubernetes?: KubernetesExecutor;
@@ -36,14 +38,19 @@ export interface Runtime {
 export const openMirror = (loaded: LoadedConfig): Mirror =>
   new Mirror(mirrorPath(loaded.config.dataDir), injectToken(loaded.config.workspace.fetchUrl, loaded.secrets.MIRROR_TOKEN, loaded.secrets.MIRROR_USERNAME));
 
-/** Secrets from `.env` (including `LINEAR_API_KEY`) and the overlay are collected once. */
+/** Secrets from `.env` (including `LINEAR_CLIENT_SECRET`) and the overlay are collected once. */
 export const buildRedactor = async (loaded: LoadedConfig): Promise<Redactor> => {
   const { overlayDir } = loaded.config.workspace;
   const overlayFiles = existsSync(overlayDir) ? (await listFiles(overlayDir)).map((file) => join(overlayDir, file)) : [];
   return new Redactor(collectSecretValues(loaded.secrets, overlayFiles));
 };
 
-export const openTracker = (loaded: LoadedConfig, ctx: CliContext): Tracker => ctx.factories?.tracker ?? createLinearTracker(loaded.secrets);
+/** The tracker and, when it is the real Linear one, the app token it holds in memory. */
+export const openTracker = (loaded: LoadedConfig, ctx: CliContext): { tracker: Tracker; linearToken?: LinearToken } => {
+  if (ctx.factories?.tracker !== undefined) return { tracker: ctx.factories.tracker };
+  const linearToken = createLinearToken(loaded.secrets);
+  return { tracker: createLinearTracker(loaded.secrets, { token: linearToken }), linearToken };
+};
 
 /** An injected brain runs in-process; the real brains run detached via the pipeline's default. */
 const brainRunner = (brain: Brain): Pick<PipelineDeps, "runBrain"> => ({
@@ -58,7 +65,8 @@ const refuseInline: RunExecutor = { execute: () => Promise.reject(new Error(INLI
 export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: { serve?: boolean } = {}): Promise<Runtime> => {
   const { config, secrets, configPath } = loaded;
   const stores = openStores(config.dataDir);
-  const tracker = openTracker(loaded, ctx);
+  const { tracker, linearToken } = openTracker(loaded, ctx);
+  const linear = linearToken === undefined ? {} : { linearToken };
   const injectedBrain = ctx.factories?.brain;
   const codehost = ctx.factories?.codehost ?? createCodeHost(config.codehost, secrets);
   const gitlab = ctx.factories?.gitlab ?? createGitLabMr(config, secrets);
@@ -79,7 +87,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
   };
   const kubernetes = kubernetesRuntime(config);
   if (kubernetes !== null) {
-    if (opts.serve !== true) return { loaded, stores, tracker, deps: { ...deps, executor: refuseInline } };
+    if (opts.serve !== true) return { loaded, stores, tracker, ...linear, deps: { ...deps, executor: refuseInline } };
     // Run pods replace slots: each brings its own services on fixed loopback ports.
     const cluster = ctx.factories?.cluster ?? clusterApis(kubernetes.namespace);
     const executor = kubernetesExecutor({ runtime: kubernetes, ...cluster, stores, checksTimeoutMinutes: config.implement?.checksTimeoutMinutes ?? 0 });
@@ -93,9 +101,9 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
             interactiveSpec: (start) => interactiveChatSpec(deps, start),
             redact: (text) => deps.redactor.redact(text),
           });
-    return { loaded, stores, tracker, deps: { ...deps, executor }, kubernetes: executor, ...(chat === undefined ? {} : { chat }) };
+    return { loaded, stores, tracker, ...linear, deps: { ...deps, executor }, kubernetes: executor, ...(chat === undefined ? {} : { chat }) };
   }
   // serve gives each worker loop its own slot; inline runs (implement KEY, jobs retry) use slot 1 under run.lock.
   const slot = config.slots === undefined ? {} : { slot: { n: 1, client: new SlotClient(config.slots, ctx.factories?.slotRunner) } };
-  return { loaded, stores, tracker, deps: { ...deps, ...slot } };
+  return { loaded, stores, tracker, ...linear, deps: { ...deps, ...slot } };
 };

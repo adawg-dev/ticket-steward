@@ -59,13 +59,21 @@ afterEach(async () => {
 const unhealthyFetch: typeof fetch = async () => new Response(JSON.stringify({ ok: false, apiKeyRejected: true }), { status: 503 });
 
 const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
-const API_KEY = "lin_api_doctor_test";
+const LINEAR_TOKEN_URL = "https://api.linear.app/oauth/token";
+const LINEAR_REVOKE_URL = "https://api.linear.app/oauth/revoke";
+const CLIENT_SECRET = "lin-client-secret-doctor-test";
+const LINEAR_ENV = `LINEAR_CLIENT_ID=lin-client-id\nLINEAR_CLIENT_SECRET=${CLIENT_SECRET}\n`;
 
-/** Answers the Linear viewer query with `linear` and the public health URL with 200. */
-const linearFetch = (linear: () => Response, seen: Array<{ url: string; init: RequestInit | undefined }> = []): typeof fetch =>
+/** Mints `app-token` (or answers the mint with `mint`), answers the viewer query with `linear`, and anything else with 200. */
+const linearFetch = (
+  linear: () => Response,
+  seen: Array<{ url: string; init: RequestInit | undefined }> = [],
+  mint: () => Response = () => Response.json({ access_token: "app-token", expires_in: 3600 }),
+): typeof fetch =>
   async (input, init) => {
     const url = input instanceof Request ? input.url : input.toString();
     seen.push({ url, init });
+    if (url === LINEAR_TOKEN_URL) return mint();
     return url === LINEAR_GRAPHQL_URL ? linear() : new Response("{}", { status: 200 });
   };
 
@@ -81,7 +89,7 @@ describe("steward doctor", () => {
 
   it("reports every check even after failures and exits 1", async () => {
     const port = await freeTcpPort();
-    await writeFile(join(dir, ".env"), `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
+    await writeFile(join(dir, ".env"), `${LINEAR_ENV}LINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
     await writeFile(join(repo.overlayDir, ".env"), "DATABASE_URL=postgres://steward:pw@localhost/dev\n");
     const skillsDir = join(dir, "skills");
     await mkdir(skillsDir);
@@ -111,26 +119,25 @@ describe("steward doctor", () => {
     expect(lines[8]).toBe(`[ok] mirror: ${join(repo.dataDir, "repo.git")} fetched; main@${repo.sha.slice(0, 7)}`);
     expect(lines[9]).toBe("[ok] overlay: 1 file(s)");
     expect(lines[10]).toBe(`[ok] skills: ${skillsDir}`);
-    expect(lines[11]).toBe("[fail] linear api key: viewer query answered 503");
+    expect(lines[11]).toBe("[fail] linear app: Linear token mint answered 503");
     // implement is required, so its checks always run.
-    expect(lines[12]).toBe("[fail] linear labels: issueLabels answered 503");
-    expect(lines[13]).toBe(`[ok] push token: GITLAB_PUSH_TOKEN reaches ${repo.repo}`);
-    expect(lines[14]).toBe("[fail] branch protection: protected_branches answered 503");
-    expect(lines[15]).toBe("[fail] public url: https://steward.example/health answered 503");
-    expect(lines[16]).toBe("[ok] codehost mcp: tools: recent_changes, permalink");
-    expect(lines[17]?.startsWith("[ok] playwright mcp: ")).toBe(true);
-    expect(lines[18]).toBe(`[ok] chromium: ${join(browsers, "chromium-1000")}`);
-    expect(lines[19]).toBe(`[ok] port: ${port} is free`);
-    expect(lines[20]).toBe("[ok] orbit: 0.161.0");
-    expect(lines[21]).toBe("[warn] orbit remote: Orbit remote is unavailable: Orbit access denied; the agents' orbit_* tools return this error");
-    expect(lines.length).toBe(22);
+    expect(lines[12]).toBe(`[ok] push token: GITLAB_PUSH_TOKEN reaches ${repo.repo}`);
+    expect(lines[13]).toBe("[fail] branch protection: protected_branches answered 503");
+    expect(lines[14]).toBe("[fail] public url: https://steward.example/health answered 503");
+    expect(lines[15]).toBe("[ok] codehost mcp: tools: recent_changes, permalink");
+    expect(lines[16]?.startsWith("[ok] playwright mcp: ")).toBe(true);
+    expect(lines[17]).toBe(`[ok] chromium: ${join(browsers, "chromium-1000")}`);
+    expect(lines[18]).toBe(`[ok] port: ${port} is free`);
+    expect(lines[19]).toBe("[ok] orbit: 0.161.0");
+    expect(lines[20]).toBe("[warn] orbit remote: Orbit remote is unavailable: Orbit access denied; the agents' orbit_* tools return this error");
+    expect(lines.length).toBe(21);
     expect(orbitCalls.map((call) => call.args)).toEqual([["version"], ["status", "--full-path", "acme/repo", "--response-format", "raw"]]);
     expect(orbitCalls[1]?.env).toMatchObject({ GITLAB_TOKEN: "glpat-token", GITLAB_URL: "https://gitlab.example" });
     expect(orbitCalls[0]?.env).not.toHaveProperty("GITLAB_TOKEN");
   });
 
   it("warns, without failing, when Orbit is not installed", async () => {
-    await writeFile(join(dir, ".env"), `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
+    await writeFile(join(dir, ".env"), `${LINEAR_ENV}LINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
     const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, fetchUrl: repo.repo, port: await freeTcpPort(), serverPort: await freeTcpPort() });
     const missing: OrbitExec = async () => ({ exitCode: null, stdout: "", stderr: "spawn orbit ENOENT", timedOut: false });
     const { ctx, stdout } = makeContext({ fetchImpl: unhealthyFetch, factories: { codehostMcpSpec: fakeCodehostMcpSpec, orbitExec: missing } });
@@ -156,7 +163,7 @@ describe("steward doctor", () => {
     expect(stdout().trimEnd().split("\n")).toContain(`[fail] chromium: no chromium under ${browsers}; run npx playwright install chromium`);
   });
 
-  describe("linear api key check", () => {
+  describe("linear app check", () => {
     const doctorLine = async (env: string, fetchImpl: typeof fetch): Promise<string | undefined> => {
       await writeFile(join(dir, ".env"), env);
       const configPath = await writeConfig(dir, {
@@ -168,55 +175,41 @@ describe("steward doctor", () => {
       });
       const { ctx, stdout } = makeContext({ fetchImpl, factories: { codehostMcpSpec: fakeCodehostMcpSpec } });
       await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"]).catch(() => undefined);
-      return stdout().split("\n").find((line) => line.includes("] linear api key: "));
+      expect(stdout()).not.toContain(CLIENT_SECRET);
+      return stdout().split("\n").find((line) => line.includes("] linear app: "));
     };
 
-    it("fails when LINEAR_API_KEY is missing", async () => {
+    it("fails naming both secrets when the client credentials are missing", async () => {
       const line = await doctorLine("LINEAR_WEBHOOK_SECRET=whsec\n", linearFetch(() => new Response("{}", { status: 200 })));
-      expect(line).toBe("[fail] linear api key: missing LINEAR_API_KEY; create a personal API key for the steward's Linear user");
+      expect(line).toBe(
+        "[fail] linear app: LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET must be set (Secrets Manager DEV_STEWARD_LINEAR_CLIENT_ID and DEV_STEWARD_LINEAR_CLIENT_SECRET)",
+      );
     });
 
-    it("sends the key as a raw Authorization header and reports the viewer's name", async () => {
+    it("mints a token, reads the app user with it as a Bearer token, and revokes it", async () => {
       const seen: Array<{ url: string; init: RequestInit | undefined }> = [];
-      const viewer = () => new Response(JSON.stringify({ data: { viewer: { id: "user-1", name: "Steward Bot" } } }), { status: 200 });
+      const viewer = () => new Response(JSON.stringify({ data: { viewer: { id: "app-user-1", name: "Steward" } } }), { status: 200 });
 
-      const line = await doctorLine(`LINEAR_API_KEY=${API_KEY}\n`, linearFetch(viewer, seen));
+      const line = await doctorLine(LINEAR_ENV, linearFetch(viewer, seen));
 
-      expect(line).toBe("[ok] linear api key: authenticated as Steward Bot; every steward write appears as this user, so use a dedicated bot user");
+      expect(line).toBe("[ok] linear app: authenticated as Steward (app user app-user-1)");
       const query = seen.find((call) => call.url === LINEAR_GRAPHQL_URL);
-      expect(new Headers(query?.init?.headers).get("authorization")).toBe(API_KEY);
+      expect(new Headers(query?.init?.headers).get("authorization")).toBe("Bearer app-token");
       expect(JSON.parse(String(query?.init?.body))).toEqual({ query: "{ viewer { id name } }" });
+      expect(seen.filter((call) => call.url.startsWith("https://api.linear.app/oauth/")).map((call) => call.url)).toEqual([LINEAR_TOKEN_URL, LINEAR_REVOKE_URL]);
     });
 
-    it("reports an invalid or revoked key on 401", async () => {
-      const line = await doctorLine(`LINEAR_API_KEY=${API_KEY}\n`, linearFetch(() => new Response("{}", { status: 401 })));
-      expect(line).toBe("[fail] linear api key: Linear rejected LINEAR_API_KEY: the key is invalid or revoked");
+    it("fails naming the secrets when Linear refuses the client credentials", async () => {
+      const refused = () => Response.json({ error: "invalid_client" }, { status: 401 });
+      const line = await doctorLine(LINEAR_ENV, linearFetch(() => new Response("{}", { status: 200 }), [], refused));
+      expect(line).toContain("[fail] linear app: Linear rejected the steward's app credentials: check LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET");
     });
 
-    it("reports an invalid or revoked key on a GraphQL authentication error", async () => {
+    it("fails when Linear rejects the freshly minted token", async () => {
       const body = JSON.stringify({ errors: [{ message: "Authentication required", extensions: { code: "AUTHENTICATION_ERROR" } }] });
-      const line = await doctorLine(`LINEAR_API_KEY=${API_KEY}\n`, linearFetch(() => new Response(body, { status: 400 })));
-      expect(line).toBe("[fail] linear api key: Linear rejected LINEAR_API_KEY: the key is invalid or revoked");
+      const line = await doctorLine(LINEAR_ENV, linearFetch(() => new Response(body, { status: 400 })));
+      expect(line).toBe("[fail] linear app: Linear rejected the app's freshly minted token");
     });
-  });
-  it("fails when a workflow label is missing in Linear", async () => {
-    const port = await freeTcpPort();
-    const serverPort = await freeTcpPort();
-    const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, fetchUrl: repo.repo, port, serverPort, implement: { prompt: repo.promptPath } });
-    const fetchImpl: typeof fetch = async (input, init) => {
-      const body = typeof init?.body === "string" ? init.body : "";
-      if (String(input) === LINEAR_GRAPHQL_URL && body.includes("issueLabels")) {
-        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [{ name: "needs-triage" }] } } }), { status: 200 });
-      }
-      if (String(input) === LINEAR_GRAPHQL_URL) return new Response(JSON.stringify({ data: { viewer: { id: "u", name: "Bot" } } }), { status: 200 });
-      return new Response("{}", { status: 200 });
-    };
-    const { ctx, stdout } = makeContext({ fetchImpl, factories: { codehostMcpSpec: fakeCodehostMcpSpec } });
-
-    await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toBeInstanceOf(ExitSignal);
-
-    expect(stdout()).toContain("[fail] linear labels: missing in Linear: ready-for-agent, needs-info, ready-for-human, agent-implemented");
-    expect(stdout()).toContain("[ok] push token: GITLAB_PUSH_TOKEN reaches");
   });
 });
 
@@ -229,13 +222,7 @@ describe("greptile checks", () => {
       implement: { prompt: repo.promptPath }, greptile: { prompt, ...(pollSeconds === undefined ? {} : { pollSeconds }) },
     });
     if (env !== "") await appendFile(join(dir, ".env"), env);
-    const fetchImpl: typeof fetch = async (input, init) => {
-      const body = typeof init?.body === "string" ? init.body : "";
-      if (String(input) === LINEAR_GRAPHQL_URL && body.includes("issueLabels")) {
-        return new Response(JSON.stringify({ data: { issueLabels: { nodes: [{ name: "agent-approved" }] } } }), { status: 200 });
-      }
-      return new Response(JSON.stringify({ data: { viewer: { id: "u", name: "Bot" } } }), { status: 200 });
-    };
+    const fetchImpl = linearFetch(() => new Response(JSON.stringify({ data: { viewer: { id: "u", name: "Bot" } } }), { status: 200 }));
     const { ctx, stdout } = makeContext({ fetchImpl, factories: { codehostMcpSpec: fakeCodehostMcpSpec, gitlab } });
     await expect(buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor"])).rejects.toBeInstanceOf(ExitSignal);
     return stdout();
@@ -248,7 +235,6 @@ describe("greptile checks", () => {
     expect(out).toContain("[fail] gitlab token scope: gitlab token lacks api scope");
     expect(out).toContain("[fail] greptile bot: greptile bot user greptile-bot not found");
     expect(out).toContain(`[fail] greptile prompt: ${join(dir, "missing-fix.md")} does not exist`);
-    expect(out).toContain("[fail] linear labels: missing in Linear:");
     expect(out).toContain("[warn] gitlab webhook secret: neither GITLAB_WEBHOOK_SIGNING_TOKEN nor GITLAB_WEBHOOK_SECRET is set; the loop falls back to 5-minute polling");
   });
 
@@ -415,7 +401,7 @@ describe("slot checks", () => {
 
 describe("steward doctor on the kubernetes runtime", () => {
   it("runs the cluster checks in place of the host's app port, chromium and overlay dir, and starts the probe pod when asked", async () => {
-    await writeFile(join(dir, ".env"), `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
+    await writeFile(join(dir, ".env"), `${LINEAR_ENV}LINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
     const templateDir = join(dir, "overlay-template");
     await mkdir(templateDir);
     await writeFile(join(templateDir, ".env"), "PORT=3000\n");

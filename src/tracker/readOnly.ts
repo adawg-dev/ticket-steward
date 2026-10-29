@@ -1,13 +1,8 @@
 import type { TicketBundle, Tracker } from "./types.js";
 
-export interface RecordedWrite {
-  method: "swapLabel";
-  args: string[];
-}
-
+/** A tracker for dry runs: reads pass through; it has no writes to record (Linear writes go through the agent API). */
 export class ReadOnlyTracker implements Tracker {
   readonly kind = "linear";
-  readonly writes: RecordedWrite[] = [];
 
   constructor(private readonly inner: Tracker) {}
 
@@ -23,15 +18,11 @@ export class ReadOnlyTracker implements Tracker {
     return this.inner.readDescription(issueId);
   }
 
-  async swapLabel(issueId: string, from: string, to: string): Promise<void> {
-    this.record("swapLabel", [issueId, from, to]);
+  appUserId(): Promise<string> {
+    return this.inner.appUserId();
   }
 
-  apiKeyRejected(): boolean {
-    return this.inner.apiKeyRejected();
-  }
-
-  private record(method: RecordedWrite["method"], args: string[]): void {
-    this.writes.push({ method, args });
+  credentialsRejected(): boolean {
+    return this.inner.credentialsRejected();
   }
 }

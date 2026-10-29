@@ -1,10 +1,10 @@
-import { RESOURCE_GUARD_DEFAULTS, StewardConfigSchema, appPortOf, defineConfig } from "../../src/config/schema.js";
+import { BrainSchema, RESOURCE_GUARD_DEFAULTS, StewardConfigSchema, appPortOf, defineConfig } from "../../src/config/schema.js";
 import type { StewardConfigInput } from "../../src/config/schema.js";
 
 const minimalInput: StewardConfigInput = {
   dataDir: "/var/lib/ticket-steward",
   brain: { kind: "claude-code", model: "claude-opus-5", maxTurns: 80, timeoutMinutes: 30 },
-  tracker: { kind: "linear", labels: {} },
+  tracker: { kind: "linear" },
   codehost: { kind: "gitlab", baseUrl: "https://gitlab.com", project: "concentrateai/kickoff" },
   workspace: {
     fetchUrl: "https://gitlab.com/concentrateai/kickoff.git",
@@ -42,7 +42,6 @@ describe("StewardConfigSchema", () => {
       ["prompt", { ...minimalInput, prompt: "./prompts/enrich.md" }],
       ["tracker.gatewayIssues", { ...minimalInput, tracker: { ...tracker, gatewayIssues: "enrich" } }],
       ["tracker.bugLabels", { ...minimalInput, tracker: { ...tracker, bugLabels: ["Bug"] } }],
-      ["tracker.labels.triage", { ...minimalInput, tracker: { ...tracker, labels: { triage: "needs-triage" } } }],
     ];
     for (const [key, input] of removed) {
       expect(messages(input)).toEqual([`${key} was removed with enrich (see docs/ops.md)`]);
@@ -73,14 +72,22 @@ describe("StewardConfigSchema", () => {
     expect(result.success).toBe(false);
   });
 
-  it("accepts a github codehost and an openai-agents brain", () => {
-    const parsed = StewardConfigSchema.parse({
-      ...minimalInput,
-      brain: { kind: "openai-agents", model: "gpt-5.5", maxTurns: 80, timeoutMinutes: 30 },
-      codehost: { kind: "github", owner: "concentrateai", repo: "kickoff" },
-    });
-    expect(parsed.brain).toEqual({ kind: "openai-agents", model: "gpt-5.5", maxTurns: 80, timeoutMinutes: 30 });
+  it("accepts a github codehost", () => {
+    const parsed = StewardConfigSchema.parse({ ...minimalInput, codehost: { kind: "github", owner: "concentrateai", repo: "kickoff" } });
     expect(parsed.codehost).toEqual({ kind: "github", owner: "concentrateai", repo: "kickoff" });
+  });
+
+  it("refuses the openai-agents brain: the Linear app needs claude-code", () => {
+    expect(messages({ ...minimalInput, brain: { kind: "openai-agents", model: "gpt-5.5", maxTurns: 80, timeoutMinutes: 30 } })).toEqual([
+      'the Linear app requires brain.kind "claude-code"',
+    ]);
+  });
+
+  it("rejects the removed tracker.labels with a pointer to assigning the steward", () => {
+    const parsed = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { kind: "linear", labels: {} } });
+    expect(parsed.error?.issues).toEqual([
+      expect.objectContaining({ path: ["tracker", "labels"], message: "tracker.labels: assign the steward in Linear instead (docs/ops.md)" }),
+    ]);
   });
 
   it("defineConfig round-trips its input", () => {
@@ -93,35 +100,20 @@ describe("brain.reasoningEffort", () => {
   const openai = { kind: "openai-agents", model: "gpt-6-luna", maxTurns: 80, timeoutMinutes: 30 } as const;
 
   it("accepts a reasoning effort for openai-agents and leaves it unset by default", () => {
-    const set = StewardConfigSchema.parse({ ...minimalInput, brain: { ...openai, reasoningEffort: "high" } });
-    const unset = StewardConfigSchema.parse({ ...minimalInput, brain: openai });
-
-    expect(set.brain).toMatchObject({ reasoningEffort: "high" });
-    expect(unset.brain).not.toHaveProperty("reasoningEffort");
+    expect(BrainSchema.parse({ ...openai, reasoningEffort: "high" })).toMatchObject({ reasoningEffort: "high" });
+    expect(BrainSchema.parse(openai)).not.toHaveProperty("reasoningEffort");
   });
 
   it("rejects an unknown reasoning effort", () => {
-    expect(StewardConfigSchema.safeParse({ ...minimalInput, brain: { ...openai, reasoningEffort: "extreme" } }).success).toBe(false);
+    expect(BrainSchema.safeParse({ ...openai, reasoningEffort: "extreme" }).success).toBe(false);
   });
 });
 
-describe("tracker.labels and implement", () => {
-  const labels = {};
+describe("implement", () => {
   const implement = { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } };
 
-  it("fills every label name with its default", () => {
-    const parsed = StewardConfigSchema.parse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels } });
-    expect(parsed.tracker.labels).toEqual({
-      implement: "ready-for-agent",
-      needsInfo: "needs-info",
-      readyForHuman: "ready-for-human",
-      implemented: "agent-implemented",
-      approved: "agent-approved",
-    });
-  });
-
   it("fills implement defaults", () => {
-    const parsed = StewardConfigSchema.parse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement });
+    const parsed = StewardConfigSchema.parse({ ...minimalInput, implement });
     expect(parsed.implement).toEqual({
       ...implement,
       branchTypes: ["feature", "fix", "chore", "refactor"],
@@ -133,22 +125,20 @@ describe("tracker.labels and implement", () => {
     });
   });
 
-  it("rejects implement without tracker.labels", () => {
-    const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { kind: "linear" }, implement });
-    expect(result.success).toBe(false);
+  it("needs no tracker labels", () => {
+    expect(StewardConfigSchema.safeParse({ ...minimalInput, tracker: { kind: "linear" }, implement }).success).toBe(true);
   });
 
   it("rejects a branch type that is not lowercase kebab", () => {
-    const result = StewardConfigSchema.safeParse({ ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement: { ...implement, branchTypes: ["Fix"] } });
+    const result = StewardConfigSchema.safeParse({ ...minimalInput, implement: { ...implement, branchTypes: ["Fix"] } });
     expect(result.success).toBe(false);
   });
 });
 
 describe("greptile config", () => {
-  const labels = {};
   const implement = { prompt: "./prompts/implement.md", commitAuthor: { name: "Ticket Steward", email: "steward@example.com" } };
   const greptile = { botUsername: "g", prompt: "./prompts/fix.md" };
-  const valid = { ...minimalInput, tracker: { ...minimalInput.tracker, labels }, implement, brain: { kind: "claude-code", model: "m", maxTurns: 1, timeoutMinutes: 1 }, codehost: { kind: "gitlab", baseUrl: "https://gitlab.example.com", project: "g/p" }, greptile };
+  const valid = { ...minimalInput, implement, brain: { kind: "claude-code", model: "m", maxTurns: 1, timeoutMinutes: 1 }, codehost: { kind: "gitlab", baseUrl: "https://gitlab.example.com", project: "g/p" }, greptile };
   it("parses with every default", () => {
     const parsed = StewardConfigSchema.parse(valid);
     expect(parsed.greptile).toEqual({

@@ -31,13 +31,6 @@ export const noteOnce = async (deps: Pick<PipelineDeps, "gitlab" | "redactor">, 
   await deps.gitlab.createNote(loop.projectId, loop.mrIid, deps.redactor.redact(`${text}\n\n${marker}`));
 };
 
-/** Swaps `agent-implemented` for `to`, only for a loop a label started. */
-const swapFromImplemented = async (deps: PipelineDeps, loop: Loop, to: "approved" | "readyForHuman"): Promise<void> => {
-  const labels = deps.config.tracker.labels;
-  if (!loop.labelDriven || labels === undefined) return;
-  await deps.tracker.swapLabel(loop.issueId, labels.implemented, labels[to]);
-};
-
 type Step = { what: string; run: () => Promise<void> };
 
 /** Runs each publish step; the loop state is written only once every step succeeded, so a retry publishes again. */
@@ -53,7 +46,7 @@ const publish = async (deps: PipelineDeps, loop: Loop, steps: Step[], patch: Loo
   return done;
 };
 
-/** Success: the MR gets the round history and the label moves to approved. */
+/** Success: the MR gets the round history. Outcome labels were removed with the label trigger. */
 export const publishPassed = (deps: PipelineDeps, loop: Loop, summary: GreptileSummary): Promise<JobOutcome> => {
   const lines = [
     `Greptile ${summary.score}/5 after ${loop.round} fix rounds.`,
@@ -67,14 +60,13 @@ export const publishPassed = (deps: PipelineDeps, loop: Loop, summary: GreptileS
     loop,
     [
       { what: "merge request note", run: () => noteOnce(deps, loop, LOOP_MARKER(loop.id, "passed"), lines.join("\n")) },
-      { what: "labels", run: () => swapFromImplemented(deps, loop, "approved") },
     ],
     { state: "passed" },
     { status: "succeeded" },
   );
 };
 
-/** Hands the ticket back to a person: a note on the MR saying why the steward stopped, then `ready-for-human`. */
+/** Hands the ticket back to a person: a note on the MR saying why the steward stopped. */
 export const publishHandback = (deps: PipelineDeps, loop: Loop, reason: string, detail = ""): Promise<JobOutcome> => {
   const marker = handbackMarker(loop);
   const last = loop.history.at(-1);
@@ -89,7 +81,6 @@ export const publishHandback = (deps: PipelineDeps, loop: Loop, reason: string, 
     loop,
     [
       { what: "merge request note", run: () => noteOnce(deps, loop, marker, lines.join("\n")) },
-      { what: "labels", run: () => swapFromImplemented(deps, loop, "readyForHuman") },
     ],
     { state: "handed_back", handedBackAt: deps.now().toISOString() },
     { status: "succeeded", warning: `handed back: ${reason}` },

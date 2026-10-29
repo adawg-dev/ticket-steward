@@ -127,7 +127,6 @@ describe("steward fix", () => {
     } finally {
       stores.db.close();
     }
-    expect(tracker.labelSwaps()).toEqual([]);
   });
 
   it("leaves the restart queued while a steward chat holds the ticket", async () => {

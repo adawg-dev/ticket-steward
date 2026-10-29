@@ -33,12 +33,12 @@ const loaded = (): LoadedConfig => {
   const config = StewardConfigSchema.parse({
     dataDir: join(dir, "data"),
     brain: { kind: "claude-code", model: "claude-test", maxTurns: 5, timeoutMinutes: 1 },
-    tracker: { kind: "linear", labels: {} },
+    tracker: { kind: "linear" },
     codehost: { kind: "gitlab", baseUrl: "https://gitlab.example", project: "acme/repo" },
     workspace: { fetchUrl: "https://gitlab.example/acme/repo.git", baseBranch: "main", overlayDir: join(dir, "overlay"), overlayTemplateDir: templateDir, setup: [] },
     server: { port: 3020, publicUrl: "https://steward.example" },
     implement: { prompt: "implement.md", commitAuthor: { name: "Steward", email: "steward@example.com" } },
-    secrets: { source: "aws", region: "eu-west-2", map: { GITLAB_TOKEN: "DEV_STEWARD_GITLAB_TOKEN", LINEAR_API_KEY: "DEV_STEWARD_LINEAR_API_KEY" } },
+    secrets: { source: "aws", region: "eu-west-2", map: { GITLAB_TOKEN: "DEV_STEWARD_GITLAB_TOKEN", LINEAR_CLIENT_SECRET: "DEV_STEWARD_LINEAR_CLIENT_SECRET" } },
     runtime: RUNTIME,
   });
   return { config, secrets: {}, configPath: join(dir, "steward.config.ts"), configDir: dir };
@@ -89,7 +89,7 @@ const deps = (patch: Partial<KubernetesDoctorDeps> = {}): KubernetesDoctorDeps =
   fetchImpl: issuerFetch(),
   cluster: fakeCluster(),
   assumeWebIdentity: async () => "arn:aws:sts::123456789012:assumed-role/steward/steward-doctor",
-  secretFetcher: fetcherOf({ DEV_STEWARD_GITLAB_TOKEN: SECRET_VALUE, DEV_STEWARD_LINEAR_API_KEY: SECRET_VALUE, DEV_STRIPE_KEY: '{"STRIPE_KEY":"sk_test_x"}' }),
+  secretFetcher: fetcherOf({ DEV_STEWARD_GITLAB_TOKEN: SECRET_VALUE, DEV_STEWARD_LINEAR_CLIENT_SECRET: SECRET_VALUE, DEV_STRIPE_KEY: '{"STRIPE_KEY":"sk_test_x"}' }),
   minioSignIn: async () => ({ accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" }),
   objectStore: () => new MemoryObjectStore(),
   awsTokenFile: tokenFile,
@@ -196,13 +196,13 @@ describe("kubernetesChecks", () => {
   describe("dev secrets", () => {
     it("finds every id the secrets map and the overlay template name, printing ids only", async () => {
       const result = await run(kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }), "dev secrets");
-      expect(result).toEqual({ level: "ok", message: "3 id(s) present: DEV_STEWARD_GITLAB_TOKEN, DEV_STEWARD_LINEAR_API_KEY, DEV_STRIPE_KEY" });
+      expect(result).toEqual({ level: "ok", message: "3 id(s) present: DEV_STEWARD_GITLAB_TOKEN, DEV_STEWARD_LINEAR_CLIENT_SECRET, DEV_STRIPE_KEY" });
     });
 
     it("fails naming each missing or empty id, never a value", async () => {
-      const secretFetcher = fetcherOf({ DEV_STEWARD_GITLAB_TOKEN: SECRET_VALUE, DEV_STEWARD_LINEAR_API_KEY: "" });
+      const secretFetcher = fetcherOf({ DEV_STEWARD_GITLAB_TOKEN: SECRET_VALUE, DEV_STEWARD_LINEAR_CLIENT_SECRET: "" });
       const result = await run(kubernetesChecks(loaded(), RUNTIME, deps({ secretFetcher }), { probePod: false }), "dev secrets");
-      expect(result).toEqual({ level: "fail", message: "Secrets Manager: DEV_STEWARD_LINEAR_API_KEY is empty; Secrets Manager: DEV_STRIPE_KEY not found" });
+      expect(result).toEqual({ level: "fail", message: "Secrets Manager: DEV_STEWARD_LINEAR_CLIENT_SECRET is empty; Secrets Manager: DEV_STRIPE_KEY not found" });
       expect(result.message).not.toContain(SECRET_VALUE);
     });
   });
