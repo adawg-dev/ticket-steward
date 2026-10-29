@@ -25,7 +25,7 @@ export const runBrainDetached = async (
   brain: BrainConfig,
   input: BrainInput,
   redactor: Redactor,
-  opts: { signal?: AbortSignal; control?: BrainControlSink } = {},
+  opts: { signal?: AbortSignal; control?: BrainControlSink; onLine?: (line: string) => void } = {},
 ): Promise<BrainRun> => {
   await mkdir(dirname(input.transcriptPath), { recursive: true, mode: 0o700 });
   const transcript = createWriteStream(input.transcriptPath, { flags: "a", mode: 0o600 });
@@ -55,7 +55,11 @@ export const runBrainDetached = async (
     };
     child.on("message", (raw: unknown) => {
       const message = raw as RunnerMessage;
-      if (message.type === "line" && !transcript.destroyed) transcript.write(`${redactor.redact(message.line)}\n`);
+      if (message.type === "line") {
+        const line = redactor.redact(message.line);
+        if (!transcript.destroyed) transcript.write(`${line}\n`);
+        opts.onLine?.(line);
+      }
       if (message.type === "done") settle(message.run);
     });
     child.on("error", (err) => settle({ ok: false, output: undefined, error: err.message }));

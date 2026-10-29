@@ -4,6 +4,7 @@ import type { RunCallbacks } from "../k8s/executor.js";
 import { logger } from "../log.js";
 import type { PushLedger, RemoteHead } from "../push/ledger.js";
 import type { PushTarget } from "../push/target.js";
+import { MAX_STEER_WAIT_MS, type RunChannels } from "../run/channel.js";
 import { RunReportSchema, WorkReportSchema, type RunSpec } from "../run/protocol.js";
 import type { RunTokenRole, RunTokens } from "../store/index.js";
 
@@ -12,6 +13,8 @@ export const INTERNAL_PORT = 3021;
 
 export interface InternalDeps {
   runs: RunCallbacks;
+  /** The runs' event and steering channels, which the executors open and close. */
+  channels: Pick<RunChannels, "line" | "next">;
   tokens: Pick<RunTokens, "verify">;
   /** The steward's own push ledger; the run's target comes from its spec, never from the request. */
   ledger: PushLedger;
@@ -24,6 +27,11 @@ const Sha = z.string().regex(/^[0-9a-f]{40}$/);
 const RecordSchema = z.object({ branch: z.string().min(1), sha: Sha, previousSha: Sha.nullable(), note: z.string().nullable() });
 const LandedSchema = z.object({ sha: Sha });
 const BODY_LIMIT = 5 * 1024 * 1024;
+/** A run pod's batch of brain lines: what it sends every half second, with room for a burst. */
+export const MAX_EVENT_LINES = 200;
+export const EVENTS_BODY_LIMIT = 1024 * 1024;
+const EventsSchema = z.object({ lines: z.array(z.string()).max(MAX_EVENT_LINES) });
+const SteerQuerySchema = z.object({ waitMs: z.coerce.number().int().nonnegative().default(MAX_STEER_WAIT_MS) });
 
 type RunParams = { runId: string };
 type PushParams = RunParams & { id: string };
@@ -35,7 +43,7 @@ const bearer = (request: FastifyRequest): string | null => {
 
 /**
  * The run pods' callback API on `INTERNAL_PORT`. Every route takes one run's token for one role: the runner token (the
- * agent container) may only post the run's report; the tools token (the tools sidecar) may post the work report and use
+ * agent container) may only post the run's report and brain lines and poll its steering; the tools token (the tools sidecar) may post the work report and use
  * the push ledger. Any other token, or one revoked when its run ended, gets 401.
  */
 export const buildInternalServer = (deps: InternalDeps): FastifyInstance => {
@@ -75,6 +83,35 @@ export const buildInternalServer = (deps: InternalDeps): FastifyInstance => {
     if (parsed.data.runId !== request.params.runId) return reply.code(400).send({ error: "the report is for another run" });
     deps.runs.deliverReport(parsed.data);
     return { ok: true };
+  });
+
+  app.post<{ Params: RunParams }>("/internal/runs/:runId/events", { bodyLimit: EVENTS_BODY_LIMIT }, async (request, reply) => {
+    if ((await authorize(request, reply, "runner")) === null) return reply;
+    const parsed = EventsSchema.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, parsed.error);
+    for (const line of parsed.data.lines) deps.channels.line(request.params.runId, line);
+    return { ok: true };
+  });
+
+  /**
+   * Long-polls the run's steering: the commands queued for it, or the first within `waitMs` (at most 25 s), or none.
+   * A poller that leaves before the answer leaves the commands queued for its next poll.
+   */
+  app.get<{ Params: RunParams; Querystring: Record<string, string> }>("/internal/runs/:runId/steer", async (request, reply) => {
+    if ((await authorize(request, reply, "runner")) === null) return reply;
+    const parsed = SteerQuerySchema.safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, parsed.error);
+    const left = new AbortController();
+    const onClose = (): void => {
+      if (!reply.raw.writableFinished) left.abort();
+    };
+    reply.raw.once("close", onClose);
+    try {
+      const commands = await deps.channels.next(request.params.runId, Math.min(parsed.data.waitMs, MAX_STEER_WAIT_MS), left.signal);
+      return { commands };
+    } finally {
+      reply.raw.off("close", onClose);
+    }
   });
 
   app.post<{ Params: RunParams }>("/internal/runs/:runId/work", async (request, reply) => {

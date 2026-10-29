@@ -11,6 +11,7 @@ import { publishImplementOnly, runImplement } from "../../src/implement/pipeline
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
+import { RunChannels } from "../../src/run/channel.js";
 import { STOPPED_JOB_ERROR } from "../../src/run/execute.js";
 import type { RunExecutor } from "../../src/run/executor.js";
 import { localExecutor } from "../../src/run/local.js";
@@ -358,6 +359,39 @@ describe("runImplement", () => {
 
     expect(gitlab.uploads).toEqual([]);
     expect(stores.jobs.get(ctx.jobId)?.implementResult?.media).toEqual(attached);
+  });
+
+  it("runs the local executor's brain on the run's channel: its redacted lines go out, a steer comes in", async () => {
+    const brain = agentBrain(implemented);
+    const channels = new RunChannels();
+    const steered: string[] = [];
+    const runBrain: PipelineDeps["runBrain"] = async (config, input, redactor, opts = {}) => {
+      opts.onLine?.(redactor.redact('{"type":"assistant","token":"glpat-push-token-value"}'));
+      await new Promise<void>((resolve) => {
+        opts.control?.({
+          steer: (message) => {
+            steered.push(message);
+            resolve();
+          },
+          stop: resolve,
+        });
+      });
+      return brain.runBrain(config, input);
+    };
+    const lines: string[] = [];
+    const deps: PipelineDeps = { ...depsFor(brain), runBrain, channels, redactor: new Redactor(["glpat-push-token-value"]) };
+    const local = localExecutor(deps);
+    const executor: RunExecutor = { execute: (spec, signal) => local.execute(spec, signal, { onLine: (line) => lines.push(line) }) };
+    const ctx = claim();
+
+    const running = runImplement(ctx, { ...deps, executor });
+    await vi.waitFor(() => expect(channels.active(issue.id)).not.toBeNull());
+    expect(channels.steer(channels.active(issue.id) ?? "", "use v2")).toBe(true);
+
+    expect(await running).toEqual({ status: "succeeded" });
+    expect(steered).toEqual(["use v2"]);
+    expect(lines).toEqual(['{"type":"assistant","token":"***"}']);
+    expect(channels.active(issue.id)).toBeNull();
   });
 
   it("hands back to needs-info without touching git", async () => {

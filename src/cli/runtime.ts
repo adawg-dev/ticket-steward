@@ -7,6 +7,7 @@ import { createCodeHost } from "../codehost/index.js";
 import type { LoadedConfig } from "../config/load.js";
 import { kubernetesRuntime } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
+import { RunChannels } from "../run/channel.js";
 import type { RunExecutor } from "../run/executor.js";
 import { collectSecretValues, Redactor } from "../core/redact.js";
 import { interactiveChatSpec } from "../chat/run.js";
@@ -29,6 +30,8 @@ export interface Runtime {
   tracker: Tracker;
   /** The Linear app's token behind `tracker`, unless a factory supplied the tracker; `serve` revokes it on shutdown. */
   linearToken?: LinearToken;
+  /** The open runs' event and steering channels (also `deps.channels`); `serve`'s internal run API reaches them for run pods. */
+  channels: RunChannels;
   deps: PipelineDeps;
   /** On the Kubernetes runtime: the executor that runs each job as a run pod, which `serve` also reattaches and serves callbacks for. */
   kubernetes?: KubernetesExecutor;
@@ -87,7 +90,10 @@ const cliTracker = (loaded: LoadedConfig, ctx: CliContext): Tracker => {
 
 /** An injected brain runs in-process; the real brains run detached via the pipeline's default. */
 const brainRunner = (brain: Brain): Pick<PipelineDeps, "runBrain"> => ({
-  runBrain: (_config, input: BrainInput): Promise<BrainRun> => brain.run(input, () => undefined),
+  runBrain: (_config, input: BrainInput, redactor, opts = {}): Promise<BrainRun> => {
+    const { onLine } = opts;
+    return brain.run(input, onLine === undefined ? () => undefined : (line) => onLine(redactor.redact(line)), opts.control);
+  },
 });
 
 /** On the Kubernetes runtime only `serve` runs jobs: a run pod reports to its internal run API, which nothing else serves. */
@@ -104,6 +110,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
   const injectedBrain = ctx.factories?.brain;
   const codehost = ctx.factories?.codehost ?? createCodeHost(config.codehost, secrets);
   const gitlab = ctx.factories?.gitlab ?? createGitLabMr(config, secrets);
+  const channels = new RunChannels();
   const deps: PipelineDeps = {
     config,
     secrets,
@@ -117,14 +124,15 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
     stores,
     redactor: await buildRedactor(loaded),
     now: () => new Date(),
+    channels,
     ...(injectedBrain === undefined ? {} : brainRunner(injectedBrain)),
   };
   const kubernetes = kubernetesRuntime(config);
   if (kubernetes !== null) {
-    if (opts.serve !== true) return { loaded, stores, tracker, ...linear, deps: { ...deps, executor: refuseInline } };
+    if (opts.serve !== true) return { loaded, stores, tracker, ...linear, channels, deps: { ...deps, executor: refuseInline } };
     // Run pods replace slots: each brings its own services on fixed loopback ports.
     const cluster = ctx.factories?.cluster ?? clusterApis(kubernetes.namespace);
-    const executor = kubernetesExecutor({ runtime: kubernetes, ...cluster, stores, checksTimeoutMinutes: config.implement?.checksTimeoutMinutes ?? 0 });
+    const executor = kubernetesExecutor({ runtime: kubernetes, ...cluster, stores, channels, checksTimeoutMinutes: config.implement?.checksTimeoutMinutes ?? 0 });
     const chat =
       cluster.pods === undefined
         ? undefined
@@ -135,9 +143,9 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
             interactiveSpec: (start) => interactiveChatSpec(deps, start),
             redact: (text) => deps.redactor.redact(text),
           });
-    return { loaded, stores, tracker, ...linear, deps: { ...deps, executor }, kubernetes: executor, ...(chat === undefined ? {} : { chat }) };
+    return { loaded, stores, tracker, ...linear, channels, deps: { ...deps, executor }, kubernetes: executor, ...(chat === undefined ? {} : { chat }) };
   }
   // serve gives each worker loop its own slot; `steward chat` leases one of its own.
   const slot = config.slots === undefined ? {} : { slot: { n: 1, client: new SlotClient(config.slots, ctx.factories?.slotRunner) } };
-  return { loaded, stores, tracker, ...linear, deps: { ...deps, ...slot } };
+  return { loaded, stores, tracker, ...linear, channels, deps: { ...deps, ...slot } };
 };

@@ -5,6 +5,7 @@ import { ApiException, type V1ConfigMap, type V1Job } from "@kubernetes/client-n
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DETACHED_ERROR, kubernetesExecutor, NO_WORK_REPORT, POD_ENDED_WITHOUT_REPORT, type ConfigMapsApi, type JobsApi, type KubernetesExecutor } from "../../src/k8s/executor.js";
 import { jobNameOf, SPEC_KEY, specConfigMapOf } from "../../src/k8s/runJob.js";
+import { RunChannels } from "../../src/run/channel.js";
 import type { RunReport, RunSpec, WorkReport } from "../../src/run/protocol.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { TriggerEvent } from "../../src/tracker/types.js";
@@ -125,6 +126,27 @@ afterEach(async () => {
 });
 
 describe("kubernetesExecutor", () => {
+  it("keeps the run's channel open while it waits: the pod's lines reach the caller and the issue's run can be steered", async () => {
+    const channels = new RunChannels();
+    const withChannels = kubernetesExecutor({ runtime: RUNTIME, batch: cluster.batch, core: cluster.core, stores, channels, pollMs: 10, ticketIdleMs: 50, checksTimeoutMinutes: 20 });
+    const { spec } = runningJob("API-1");
+    const lines: string[] = [];
+    const executed = withChannels.execute(spec, undefined, { onLine: (line) => lines.push(line) });
+    await until(() => cluster.createdJobs.length === 1);
+
+    expect(channels.active(spec.issueId)).toBe(spec.runId);
+    channels.line(spec.runId, '{"type":"assistant"}');
+    expect(channels.steer(spec.runId, "use v2")).toBe(true);
+    withChannels.deliverReport(reportFor(spec.runId));
+    withChannels.deliverWork(workFor(spec.runId));
+    await settles(executed);
+    withChannels.close();
+
+    expect(lines).toEqual(['{"type":"assistant"}']);
+    expect(channels.active(spec.issueId)).toBeNull();
+    expect(channels.steer(spec.runId, "too late")).toBe(false);
+  });
+
   it("creates the spec ConfigMap, the run's tokens and the Job, and resolves once the report and the work report arrived", async () => {
     const { jobId, spec } = runningJob("API-1");
     const executed = executor.execute(spec);

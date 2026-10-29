@@ -6,6 +6,7 @@ import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
 import type { Stores } from "../store/index.js";
 import type { Tracker } from "../tracker/types.js";
+import type { RunChannels } from "../run/channel.js";
 import type { RunExecutor } from "../run/executor.js";
 import type { Mirror } from "../workspace/mirror.js";
 import type { SlotRef } from "../workspace/slots.js";
@@ -35,4 +36,6 @@ export interface PipelineDeps {
    * each worker loop's slot and signal apply; the Kubernetes runtime sets its executor here.
    */
   executor?: RunExecutor;
+  /** The open runs' event and steering channels, shared by the executors and whatever steers them (the dispatcher's). */
+  channels?: RunChannels;
 }

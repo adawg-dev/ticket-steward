@@ -21,7 +21,7 @@ import { errorMessage, fail, loadFromProgram, println, type CliContext } from ".
 import { binPath } from "./paths.js";
 import { CALLBACK_URL_ENV } from "./tools.js";
 
-/** The run's runner token, set on the agent container by the run's Job: it may only post this run's report. */
+/** The run's runner token, set on the agent container by the run's Job: it may only post this run's report and events and poll its steering. */
 export const RUNNER_TOKEN_ENV = "STEWARD_RUNNER_TOKEN";
 
 interface RunPodOptions {
@@ -104,7 +104,10 @@ export const registerRunPod = (program: Command, ctx: CliContext): void => {
         ? interactiveBrain(ctx, configPath)
         : injected === undefined
           ? undefined
-          : (_brain, input) => injected.run(input, () => undefined);
+          : (_brain, input, redactor, brainOpts = {}) => {
+              const { onLine } = brainOpts;
+              return injected.run(input, onLine === undefined ? () => undefined : (line) => onLine(redactor.redact(line)), brainOpts.control);
+            };
 
       // A SIGTERM (the Job deleted, the pod evicted) stops the run, which still reports, as interrupted.
       const controller = new AbortController();

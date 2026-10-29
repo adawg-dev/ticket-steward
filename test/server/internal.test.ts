@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunCallbacks } from "../../src/k8s/executor.js";
 import type { PushLedger } from "../../src/push/ledger.js";
 import type { PushTarget } from "../../src/push/target.js";
+import { RunChannels } from "../../src/run/channel.js";
 import type { RunReport, RunSpec, WorkReport } from "../../src/run/protocol.js";
 import { buildInternalServer } from "../../src/server/internal.js";
 import { openStores, type Stores } from "../../src/store/index.js";
@@ -20,6 +21,7 @@ let specs: Map<string, RunSpec>;
 let reports: RunReport[];
 let works: WorkReport[];
 let ledgerCalls: string[];
+let channels: RunChannels;
 
 const ledger: PushLedger = {
   start: (target) => {
@@ -78,8 +80,10 @@ beforeEach(async () => {
   reports = [];
   works = [];
   ledgerCalls = [];
+  channels = new RunChannels();
   app = buildInternalServer({
     runs,
+    channels,
     tokens: stores.runTokens,
     ledger,
     remoteHead: () => () => Promise.resolve(null),
@@ -148,5 +152,36 @@ describe("the internal run API", () => {
     specs.delete(spec.runId);
     expect((await post(`/internal/runs/${spec.runId}/report`, runner, reportFor(spec.runId))).statusCode).toBe(503);
     expect(reports).toEqual([]);
+  });
+
+  it("passes a run pod's brain lines to the run's channel with its runner token only, and refuses a batch too large", async () => {
+    const { spec, runner, tools } = startRun("API-1");
+    const lines: string[] = [];
+    channels.open(spec.runId, (line) => lines.push(line), spec.issueId);
+    const events = `/internal/runs/${spec.runId}/events`;
+
+    expect((await post(events, runner, { lines: ['{"type":"assistant"}', '{"type":"user"}'] })).statusCode).toBe(200);
+    expect((await post(events, tools, { lines: ['{"type":"tools"}'] })).statusCode).toBe(401);
+    expect((await post(events, runner, { lines: Array.from({ length: 201 }, () => "{}") })).statusCode).toBe(400);
+    expect((await post(events, runner, { lines: "not a list" })).statusCode).toBe(400);
+    expect((await post(events, runner, { lines: ["x".repeat(1024 * 1024)] })).statusCode).toBe(413);
+    expect(lines).toEqual(['{"type":"assistant"}', '{"type":"user"}']);
+  });
+
+  it("long-polls the run's steering: commands sent before or during the poll, and none once the wait passes", async () => {
+    const { spec, runner, tools } = startRun("API-1");
+    channels.open(spec.runId, () => undefined, spec.issueId);
+    const steer = (waitMs: number, token = runner) => app.inject({ method: "GET", url: `/internal/runs/${spec.runId}/steer?waitMs=${waitMs}`, headers: { authorization: `Bearer ${token}` } });
+
+    channels.steer(spec.runId, "use v2");
+    expect((await steer(25_000)).json()).toEqual({ commands: [{ type: "steer", message: "use v2" }] });
+
+    const polling = steer(25_000);
+    setTimeout(() => channels.stop(spec.runId), 20);
+    expect((await polling).json()).toEqual({ commands: [{ type: "stop" }] });
+
+    expect((await steer(10)).json()).toEqual({ commands: [] });
+    expect((await steer(10, tools)).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: `/internal/runs/${spec.runId}/steer?waitMs=soon`, headers: { authorization: `Bearer ${runner}` } })).statusCode).toBe(400);
   });
 });

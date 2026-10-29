@@ -4,8 +4,9 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
 import type { SpawnInteractive } from "../../src/cli/context.js";
+import { STOPPED_ERROR, type Brain, type BrainRun } from "../../src/brain/types.js";
 import type { RunSpec } from "../../src/run/protocol.js";
-import { buildPodBrainEnv, EGRESS_CA_DIR, podMcpServers, postReport, scrubRemoteCredentials, startChecksServer, waitForPod, type ChecksServer } from "../../src/run/pod.js";
+import { buildPodBrainEnv, EGRESS_CA_DIR, podChannel, podMcpServers, postReport, scrubRemoteCredentials, startChecksServer, waitForPod, type ChecksServer } from "../../src/run/pod.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { makeContext, writeConfig } from "../cli/helpers.js";
 import { commitFile, git, makeSourceRepo, removeDir, serveGitHttp, tmpDir, type GitHttpServer } from "../workspace/helpers.js";
@@ -296,6 +297,9 @@ describe("scrubRemoteCredentials", () => {
   });
 });
 
+/** The requests to the dispatcher's run API that carry the run report (the pod also posts events and polls steering). */
+const reportsTo = (callback: Recorder): Received[] => callback.received.filter((r) => r.path.endsWith("/report"));
+
 describe("steward run-pod", () => {
   const setUp = async (spec: RunSpec): Promise<{ args: string[]; tools: Awaited<ReturnType<typeof recorder>>; callback: Awaited<ReturnType<typeof recorder>> }> => {
     const tools = await recorder(() => ({ runId: spec.runId, unpushed: "", pushedSha: null }));
@@ -330,8 +334,15 @@ describe("steward run-pod", () => {
     await buildProgram(test.ctx).parseAsync(args);
 
     expect(tools.received.map((r) => `${r.method} ${r.path}`)).toEqual(["POST /finish"]);
-    expect(callback.received).toHaveLength(1);
-    const [report] = callback.received;
+    expect(reportsTo(callback)).toHaveLength(1);
+    const [report] = reportsTo(callback);
+    // The brain's lines went to the run's events before the report, with the runner token.
+    const events = callback.received.filter((r) => r.path === "/internal/runs/7-1/events");
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.every((r) => r.method === "POST" && r.authorization === `Bearer ${RUNNER_TOKEN}`)).toBe(true);
+    expect(events.flatMap((r) => (JSON.parse(r.body) as { lines: string[] }).lines)).toEqual([JSON.stringify({ type: "fake", prompt: "Implement API-1." })]);
+    const order = callback.received.map((r) => r.path);
+    expect(order.lastIndexOf("/internal/runs/7-1/events")).toBeLessThan(order.indexOf("/internal/runs/7-1/report"));
     expect(report).toMatchObject({ method: "POST", path: "/internal/runs/7-1/report", authorization: `Bearer ${RUNNER_TOKEN}` });
     expect(JSON.parse(report?.body ?? "")).toEqual({ runId: "7-1", ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-2", output: { outcome: "pushed" }, usage: { inputTokens: 10, outputTokens: 5 } });
 
@@ -356,7 +367,7 @@ describe("steward run-pod", () => {
 
     expect(tools.received.map((r) => `${r.method} ${r.path}`)).toEqual(["POST /media", "POST /finish"]);
     expect(JSON.parse(tools.received[0]?.body ?? "")).toEqual({ media });
-    expect(JSON.parse(callback.received[0]?.body ?? "")).toMatchObject({ ok: true, media: uploads });
+    expect(JSON.parse(reportsTo(callback)[0]?.body ?? "")).toMatchObject({ ok: true, media: uploads });
   });
 
   it("lists every item as not attached when the tools sidecar cannot attach them", async () => {
@@ -367,7 +378,7 @@ describe("steward run-pod", () => {
 
     await buildProgram(test.ctx).parseAsync(args);
 
-    const report = JSON.parse(callback.received[0]?.body ?? "") as { ok: boolean; media: { embeds: unknown[]; rejected: Array<{ name: string; reason: string }> } };
+    const report = JSON.parse(reportsTo(callback)[0]?.body ?? "") as { ok: boolean; media: { embeds: unknown[]; rejected: Array<{ name: string; reason: string }> } };
     expect(report.ok).toBe(true);
     expect(report.media.embeds).toEqual([]);
     expect(report.media.rejected).toEqual([{ name: "a.png", reason: expect.stringContaining("upload failed") }]);
@@ -381,7 +392,7 @@ describe("steward run-pod", () => {
     await buildProgram(test.ctx).parseAsync(args);
 
     expect(brain.runs).toBe(0);
-    expect(JSON.parse(callback.received[0]?.body ?? "")).toMatchObject({ ok: false, setupFailed: true });
+    expect(JSON.parse(reportsTo(callback)[0]?.body ?? "")).toMatchObject({ ok: false, setupFailed: true });
   });
 
   it("with an interactive spec, resumes the session in Claude Code under the chat hook and reports when it exits", async () => {
@@ -403,6 +414,96 @@ describe("steward run-pod", () => {
     expect(settings).toContain("chat-hook");
     expect(settings).toContain(`'--deny' '${EGRESS_CA_DIR}'`);
     expect(call?.env.ANTHROPIC_AUTH_TOKEN).toBe("steward-keyproxy");
+    // A person at the terminal steers it there: no events and no steering poll.
+    expect(callback.received.map((r) => r.path)).toEqual(["/internal/runs/7-1/report"]);
     expect(JSON.parse(callback.received[0]?.body ?? "")).toMatchObject({ runId: "7-1", ok: true, sessionId: "session-1" });
+  });
+
+  it("hands a steer command from the steering poll to the running brain", async () => {
+    const { args, callback } = await setUp(specFor());
+    let polls = 0;
+    callback.answer = (req) => {
+      if (!req.path.startsWith("/internal/runs/7-1/steer")) return { ok: true };
+      polls += 1;
+      return { commands: polls === 1 ? [{ type: "steer", message: "use v2" }] : [] };
+    };
+    const steered: string[] = [];
+    const brain: Brain = {
+      kind: "claude-code",
+      run: (_input, onMessage, control) => {
+        onMessage(JSON.stringify({ type: "assistant", message: { content: [] } }));
+        return new Promise<BrainRun>((resolve) => {
+          control?.({
+            steer: (message) => {
+              steered.push(message);
+              resolve({ ok: true, output: { outcome: "implemented" } });
+            },
+            stop: () => resolve({ ok: false, output: undefined, error: STOPPED_ERROR }),
+          });
+        });
+      },
+    };
+    const test = makeContext({ fetchImpl: fetch, factories: { brain } });
+
+    await buildProgram(test.ctx).parseAsync(args);
+
+    expect(steered).toEqual(["use v2"]);
+    const poll = callback.received.find((r) => r.path.startsWith("/internal/runs/7-1/steer"));
+    expect(poll).toMatchObject({ method: "GET", path: "/internal/runs/7-1/steer?waitMs=25000", authorization: `Bearer ${RUNNER_TOKEN}` });
+    expect(JSON.parse(reportsTo(callback)[0]?.body ?? "")).toMatchObject({ ok: true, output: { outcome: "implemented" } });
+  });
+});
+
+describe("podChannel", () => {
+  const quick = { flushMs: 10, steerWaitMs: 50, backoffMs: { first: 10, max: 20 } };
+
+  it("keeps the lines while the dispatcher answers 503 and delivers them in order once it is back", async () => {
+    const callback = await recorder(() => ({ ok: true }), (req) => (callback.received.indexOf(req) < 2 ? 503 : 200));
+    servers.push(callback.server);
+    const warnings: string[] = [];
+    const channel = podChannel({ callbackUrl: callback.url, token: RUNNER_TOKEN, runId: "7-1", fetchImpl: fetch, warn: (message) => warnings.push(message), ...quick });
+
+    channel.onLine("one");
+    channel.onLine("two");
+    await vi.waitFor(() => expect(callback.received.length).toBeGreaterThanOrEqual(3));
+    channel.onLine("three");
+    await channel.close();
+
+    const delivered = callback.received.filter((r) => callback.received.indexOf(r) >= 2).flatMap((r) => (JSON.parse(r.body) as { lines: string[] }).lines);
+    expect(delivered).toEqual(["one", "two", "three"]);
+    expect(warnings.some((warning) => warning.includes("503"))).toBe(true);
+  });
+
+  it("sends at most 200 lines a batch", async () => {
+    const callback = await recorder(() => ({ ok: true }));
+    servers.push(callback.server);
+    const channel = podChannel({ callbackUrl: callback.url, token: RUNNER_TOKEN, runId: "7-1", fetchImpl: fetch, warn: () => undefined, ...quick, flushMs: 60_000 });
+
+    for (let i = 0; i < 450; i += 1) channel.onLine(`line ${i}`);
+    await channel.close();
+
+    expect(callback.received.map((r) => (JSON.parse(r.body) as { lines: string[] }).lines.length)).toEqual([200, 200, 50]);
+  });
+
+  it("stops polling a steering the dispatcher refuses (401), and polls again after a 503", async () => {
+    const steered: string[] = [];
+    const handlers = { steer: (message: string) => void steered.push(message), stop: () => undefined };
+    let calls = 0;
+    const fetchImpl: typeof fetch = () => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve(new Response("{}", { status: 503 }));
+      if (calls === 2) return Promise.resolve(Response.json({ commands: [{ type: "steer", message: "use v2" }] }));
+      return Promise.resolve(new Response("{}", { status: 401 }));
+    };
+    const warnings: string[] = [];
+    const channel = podChannel({ callbackUrl: "http://steward.invalid", token: RUNNER_TOKEN, runId: "7-1", fetchImpl, warn: (message) => warnings.push(message), ...quick });
+
+    channel.control(handlers);
+    await vi.waitFor(() => expect(warnings.some((warning) => warning.includes("rejected"))).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await channel.close();
+
+    expect(steered).toEqual(["use v2"]);
+    expect(calls).toBe(3);
   });
 });

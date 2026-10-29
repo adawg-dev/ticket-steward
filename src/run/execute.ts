@@ -36,6 +36,8 @@ export interface ExecuteEnv {
   signal?: AbortSignal;
   /** Receives the handlers that steer and stop the brain once it runs. */
   control?: BrainControlSink;
+  /** Each of the brain's message lines, redacted as in the transcript. */
+  onLine?: (line: string) => void;
   runBrain?: typeof runBrainDetached;
 }
 
@@ -106,6 +108,7 @@ export const executeRun = async (spec: RunSpec, env: ExecuteEnv): Promise<RunRep
     run = await (env.runBrain ?? runBrainDetached)(env.brain, brainInputOf(spec, env, prompt), env.redactor, {
       ...(env.signal === undefined ? {} : { signal: env.signal }),
       ...(env.control === undefined ? {} : { control: env.control }),
+      ...(env.onLine === undefined ? {} : { onLine: env.onLine }),
     });
   } catch (err) {
     return failed(errorMessage(err));

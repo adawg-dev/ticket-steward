@@ -92,6 +92,13 @@ describe("runBrainDetached", () => {
     expect(first).toBe(JSON.stringify({ type: "fake", prompt: "investigate ***" }));
   });
 
+  it("hands each line to onLine redacted as in the transcript", async () => {
+    const lines: string[] = [];
+    await runBrainDetached(fakeBrain, input({}), new Redactor([SECRET]), { onLine: (line) => lines.push(line) });
+    expect(lines[0]).toBe(JSON.stringify({ type: "fake", prompt: "investigate ***" }));
+    expect(lines.join("\n")).not.toContain(SECRET);
+  });
+
   it("still settles the run when the transcript cannot be written", async () => {
     const run = await runBrainDetached(fakeBrain, input({ transcriptPath: "/dev/full" }), new Redactor([]));
     expect(run.ok).toBe(true);

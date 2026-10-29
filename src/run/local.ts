@@ -10,6 +10,7 @@ import { logger } from "../log.js";
 import { settleUnfinished } from "../push/ledger.js";
 import { remoteHeadOf } from "../push/service.js";
 import { createWorktree, type Worktree } from "../workspace/worktree.js";
+import { drainChannel } from "./channel.js";
 import { executeRun } from "./execute.js";
 import type { RunExecutor } from "./executor.js";
 import type { RunSpec, WorkReport } from "./protocol.js";
@@ -76,12 +77,18 @@ const workOf = async (deps: PipelineDeps, spec: RunSpec, worktree: Worktree): Pr
 
 /**
  * Runs the execute half in-process on the steward's host: the mirror's worktree, the job's slot, the overlay and the
- * Orbit index, the MCP servers spawned over stdio, then `executeRun`. The worktree is removed afterwards, unless the run
+ * Orbit index, the MCP servers spawned over stdio, then `executeRun`. With `deps.channels`, the run's channel is open
+ * while it executes: the brain's redacted lines go through it to `hooks.onLine`, and its commands to the detached
+ * runner. Without, the lines go to `hooks.onLine` directly. The worktree is removed afterwards, unless the run
  * failed and `workspace.keepOnFailure` keeps it or it is a chat's session worktree. Rejects when the workspace could not be built.
  */
 export const localExecutor = (deps: PipelineDeps): RunExecutor => ({
-  execute: async (spec, signal = deps.signal) => {
+  execute: async (spec, signal = deps.signal, hooks = {}) => {
     const runDeps: PipelineDeps = signal === undefined ? deps : { ...deps, signal };
+    const { channels } = deps;
+    const onLine = hooks.onLine ?? (() => undefined);
+    channels?.open(spec.runId, onLine, spec.issueId);
+    const steering = channels === undefined ? null : drainChannel(channels, spec.runId);
     const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config), deps.config.implement?.commitAuthor);
     const workspace: { worktree: Worktree | null } = { worktree: null };
     let ok = false;
@@ -98,12 +105,16 @@ export const localExecutor = (deps: PipelineDeps): RunExecutor => ({
         denyPaths: input.denyPaths,
         ...(input.inlineSkills === undefined ? {} : { inlineSkills: input.inlineSkills }),
         redactor: deps.redactor,
+        onLine: channels === undefined ? onLine : (line) => channels.line(spec.runId, line),
+        ...(steering === null ? {} : { control: steering.control }),
         ...(signal === undefined ? {} : { signal }),
         ...(deps.runBrain === undefined ? {} : { runBrain: deps.runBrain }),
       });
       ok = report.ok;
       return { report, work: await workOf(runDeps, spec, worktree) };
     } finally {
+      steering?.end();
+      channels?.close(spec.runId);
       await cleanupWorkspace(runDeps, workspace.worktree, ok ? { status: "succeeded" } : { status: "failed", error: "the run failed", retryable: false });
     }
   },

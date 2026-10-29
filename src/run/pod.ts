@@ -5,7 +5,7 @@ import { connect, type AddressInfo } from "node:net";
 import { z } from "zod";
 import { buildWorkspaceEnv } from "../brain/env.js";
 import type { runBrainDetached } from "../brain/spawn.js";
-import { INTERRUPTED_ERROR, type McpServerSpec } from "../brain/types.js";
+import { INTERRUPTED_ERROR, type BrainControlSink, type McpServerSpec } from "../brain/types.js";
 import { MediaItemSchema, rejectAll, MediaUploadsSchema, type MediaUploads } from "../codehost/media.js";
 import type { BrainConfig } from "../config/schema.js";
 import { Redactor } from "../core/redact.js";
@@ -20,7 +20,8 @@ import { copyOverlay } from "../workspace/overlay.js";
 import { Mutex } from "../workspace/mutex.js";
 import { runSetup } from "../workspace/setup.js";
 import { copySkills } from "../workspace/skills.js";
-import { CALLBACK_REQUEST_TIMEOUT_MS, postCallback, REPORT_RETRY_MS } from "./callback.js";
+import { CALLBACK_REQUEST_TIMEOUT_MS, postCallback, REPORT_BACKOFF_MS, REPORT_RETRY_MS } from "./callback.js";
+import { applyCommands, MAX_STEER_WAIT_MS, type RunCommand } from "./channel.js";
 import { executeRun } from "./execute.js";
 import { RunReportSchema, type RunReport, type RunSpec } from "./protocol.js";
 
@@ -274,6 +275,201 @@ export const postReport = async (p: {
   });
 };
 
+/** How often the run pod sends the brain lines it has gathered. */
+export const EVENTS_FLUSH_MS = 500;
+/** The internal run API's limits for one batch (`MAX_EVENT_LINES`, `EVENTS_BODY_LIMIT`), with room for the envelope. */
+const EVENTS_BATCH_LINES = 200;
+const EVENTS_BATCH_BYTES = 900 * 1024;
+/** A line bigger than this (a huge tool result) is left out: the panel never shows tool output. */
+const MAX_EVENT_LINE_BYTES = 512 * 1024;
+/** Lines kept while the dispatcher is away; the oldest go first past it. */
+const MAX_PENDING_LINES = 2_000;
+/** What the last events get once the brain is done, before the run's report goes. */
+const EVENTS_FINAL_FLUSH_MS = 10_000;
+const EVENTS_REQUEST_TIMEOUT_MS = 10_000;
+/** A steering poll that came back empty this fast (no open channel yet) waits this long before the next. */
+const STEER_MIN_INTERVAL_MS = 1_000;
+
+/** The run pod's end of its run channel (`RunChannels` in the dispatcher). */
+export interface PodChannel {
+  /** Gathers a brain line (redacted in-pod) for the next batch to `/events`. */
+  onLine: (line: string) => void;
+  /** Once the brain runs, long-polls `/steer` and hands what comes to the brain. */
+  control: BrainControlSink;
+  /** Stops polling and sends the lines still gathered, for a short while. */
+  close: () => Promise<void>;
+}
+
+const CommandsSchema = z.object({
+  commands: z.array(z.discriminatedUnion("type", [z.object({ type: z.literal("steer"), message: z.string() }), z.object({ type: z.literal("stop") })])),
+});
+
+/** Waits `ms`, or less when `signal` aborts. */
+const pause = (ms: number, signal: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+
+/**
+ * The run pod's event and steering channel to the dispatcher, with the run's runner token: brain lines go in batches
+ * every `flushMs` to `POST …/internal/runs/<runId>/events`, and `GET …/steer` is long-polled while the brain runs.
+ * Both ride out the dispatcher's restarts with backoff (lines are kept, the oldest dropped past a limit); a 401 or
+ * another refusal ends that half, never the run.
+ */
+export const podChannel = (p: {
+  callbackUrl: string;
+  token: string;
+  runId: string;
+  fetchImpl: typeof fetch;
+  warn: (message: string) => void;
+  flushMs?: number;
+  steerWaitMs?: number;
+  backoffMs?: { first: number; max: number };
+}): PodChannel => {
+  const base = `${p.callbackUrl.replace(/\/+$/, "")}/internal/runs/${encodeURIComponent(p.runId)}`;
+  const backoff = p.backoffMs ?? REPORT_BACKOFF_MS;
+  const headers = { authorization: `Bearer ${p.token}` };
+  const closed = new AbortController();
+  const pending: string[] = [];
+  let dropped = 0;
+  let eventsRefused = false;
+  let eventsDelay = backoff.first;
+  let eventsRetryAt = 0;
+  let sending: Promise<void> | null = null;
+
+  /** Sends one batch; false when the dispatcher could not take it (the batch stays for the next try). */
+  const sendBatch = async (): Promise<boolean> => {
+    const batch: string[] = [];
+    let bytes = 0;
+    for (const line of pending) {
+      const size = Buffer.byteLength(JSON.stringify(line)) + 1;
+      if (batch.length >= EVENTS_BATCH_LINES || (batch.length > 0 && bytes + size > EVENTS_BATCH_BYTES)) break;
+      batch.push(line);
+      bytes += size;
+    }
+    if (batch.length === 0) return true;
+    let failure: string;
+    try {
+      const response = await p.fetchImpl(`${base}/events`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ lines: batch }),
+        redirect: "error",
+        signal: AbortSignal.timeout(EVENTS_REQUEST_TIMEOUT_MS),
+      });
+      await response.body?.cancel();
+      if (response.ok) {
+        pending.splice(0, batch.length);
+        return true;
+      }
+      if (response.status < 500 && response.status !== 408 && response.status !== 429) {
+        eventsRefused = true;
+        pending.length = 0;
+        p.warn(`the steward answered ${response.status} to the run's events; no more are sent`);
+        return true;
+      }
+      failure = `the steward answered ${response.status}`;
+    } catch (err) {
+      failure = errorMessage(err);
+    }
+    if (eventsDelay === backoff.first) p.warn(`the run's events were not delivered (${failure}); retrying`);
+    return false;
+  };
+
+  /** Sends what is gathered, batch by batch, unless the last failure's backoff has not passed. */
+  const flush = (): Promise<void> => {
+    if (sending !== null) return sending;
+    if (pending.length === 0 || eventsRefused || Date.now() < eventsRetryAt) return Promise.resolve();
+    const run = async (): Promise<void> => {
+      while (pending.length > 0 && !eventsRefused && Date.now() >= eventsRetryAt) {
+        if (await sendBatch()) {
+          eventsDelay = backoff.first;
+          continue;
+        }
+        eventsRetryAt = Date.now() + eventsDelay;
+        eventsDelay = Math.min(eventsDelay * 2, backoff.max);
+      }
+    };
+    // Cleared once settled: `finally` always runs after this assignment.
+    sending = run().finally(() => {
+      sending = null;
+    });
+    return sending;
+  };
+
+  const timer = setInterval(() => void flush(), p.flushMs ?? EVENTS_FLUSH_MS);
+  timer.unref();
+
+  const poll = async (apply: (commands: RunCommand[]) => void): Promise<void> => {
+    const waitMs = p.steerWaitMs ?? MAX_STEER_WAIT_MS;
+    let delay = backoff.first;
+    while (!closed.signal.aborted) {
+      const startedAt = Date.now();
+      let failure: string | null = null;
+      try {
+        const response = await p.fetchImpl(`${base}/steer?waitMs=${waitMs}`, {
+          headers,
+          redirect: "error",
+          signal: AbortSignal.any([AbortSignal.timeout(waitMs + EVENTS_REQUEST_TIMEOUT_MS), closed.signal]),
+        });
+        if (response.status === 401) {
+          await response.body?.cancel();
+          p.warn("the run's runner token was rejected for steering; no more steering is taken");
+          return;
+        }
+        if (response.ok) {
+          const { commands } = CommandsSchema.parse(await response.json());
+          apply(commands);
+          delay = backoff.first;
+          if (commands.length === 0 && Date.now() - startedAt < STEER_MIN_INTERVAL_MS) await pause(STEER_MIN_INTERVAL_MS, closed.signal);
+          continue;
+        }
+        await response.body?.cancel();
+        failure = `the steward answered ${response.status}`;
+      } catch (err) {
+        if (closed.signal.aborted) return;
+        failure = errorMessage(err);
+      }
+      if (delay === backoff.first) p.warn(`steering could not be read (${failure}); retrying`);
+      await pause(delay, closed.signal);
+      delay = Math.min(delay * 2, backoff.max);
+    }
+  };
+
+  return {
+    onLine: (line) => {
+      if (eventsRefused || closed.signal.aborted) return;
+      if (Buffer.byteLength(JSON.stringify(line)) > MAX_EVENT_LINE_BYTES) return;
+      pending.push(line);
+      if (pending.length > MAX_PENDING_LINES) {
+        pending.splice(0, pending.length - MAX_PENDING_LINES);
+        if (dropped++ === 0) p.warn("the steward is not taking the run's events; the oldest are dropped");
+      }
+    },
+    control: (handlers) => {
+      if (closed.signal.aborted) return;
+      poll((commands) => applyCommands(handlers, commands)).catch((err: unknown) => p.warn(`steering stopped: ${errorMessage(err)}`));
+    },
+    close: async () => {
+      closed.abort();
+      clearInterval(timer);
+      const deadline = Date.now() + EVENTS_FINAL_FLUSH_MS;
+      while (pending.length > 0 && !eventsRefused && Date.now() < deadline) {
+        await sending;
+        await flush();
+        if (pending.length > 0) await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(eventsRetryAt - Date.now(), deadline - Date.now()))));
+      }
+    },
+  };
+};
+
 /**
  * Leaves no credential in the clone's config: every `http.*.extraHeader` removed and origin set to `url` (without
  * credentials). Git reads only the repo's own file here; the global and system configs are not the clone's.
@@ -330,6 +526,8 @@ export interface PodRun {
   warn: (message: string) => void;
   signal?: AbortSignal;
   runBrain?: typeof runBrainDetached;
+  /** Overrides for the run channel's timing (tests). */
+  channel?: { flushMs?: number; steerWaitMs?: number; backoffMs?: { first: number; max: number } };
 }
 
 const failedReport = (spec: RunSpec, error: string): RunReport => ({
@@ -338,7 +536,8 @@ const failedReport = (spec: RunSpec, error: string): RunReport => ({
 
 /**
  * The agent container's run: waits for the sidecars, lays the overlay into the worktree that git-init cloned, serves the
- * check endpoint, runs `executeRun` with the pod's env and MCP servers, then has the tools sidecar attach the result's
+ * check endpoint, runs `executeRun` with the pod's env and MCP servers (its brain lines out and steering in through
+ * `podChannel`, unless the run is interactive), then has the tools sidecar attach the result's
  * media and post the work report, and posts the run report itself, retrying while the dispatcher is away. Rejects only when the report could not be
  * delivered.
  */
@@ -346,6 +545,10 @@ export const runPod = async (p: PodRun): Promise<RunReport> => {
   const { spec } = p;
   let report: RunReport;
   let checks: ChecksServer | null = null;
+  // A person at the session's terminal steers it there; only a brain run has the channel.
+  const channel = spec.interactive
+    ? null
+    : podChannel({ callbackUrl: p.callbackUrl, token: p.runnerToken, runId: spec.runId, fetchImpl: p.fetchImpl, warn: p.warn, ...p.channel });
   try {
     await waitForPod({ caFile: p.caFile, ports: p.waitPorts, timeoutMs: p.waitTimeoutMs });
     await mkdir(spec.artifactsDir, { recursive: true, mode: 0o700 });
@@ -360,12 +563,14 @@ export const runPod = async (p: PodRun): Promise<RunReport> => {
       denyPaths: POD_DENY_PATHS,
       // The agent container holds no secret to mask; placeholders are not secrets.
       redactor: new Redactor([]),
+      ...(channel === null ? {} : { onLine: channel.onLine, control: channel.control }),
       ...(p.signal === undefined ? {} : { signal: p.signal }),
       ...(p.runBrain === undefined ? {} : { runBrain: p.runBrain }),
     });
   } catch (err) {
     report = p.signal?.aborted === true ? { ...failedReport(spec, INTERRUPTED_ERROR), interrupted: true } : failedReport(spec, errorMessage(err));
   }
+  await channel?.close();
   if (report.ok) {
     const media = await attachMedia({ toolsUrl: p.toolsUrl, fetchImpl: p.fetchImpl, output: report.output, ...(p.signal === undefined ? {} : { signal: p.signal }) });
     if (media !== null) report = { ...report, media };

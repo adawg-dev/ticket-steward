@@ -1,6 +1,7 @@
 import { ApiException, type BatchV1Api, type CoreV1Api, type V1Job } from "@kubernetes/client-node";
 import type { KubernetesRuntime } from "../config/schema.js";
 import { logger } from "../log.js";
+import type { RunChannels } from "../run/channel.js";
 import type { RunExecutor } from "../run/executor.js";
 import { RunSpecSchema, type RunReport, type RunSpec, type WorkReport } from "../run/protocol.js";
 import type { Stores } from "../store/index.js";
@@ -90,7 +91,8 @@ const interruptedReport = (runId: string): RunReport => ({
 
 /**
  * Runs each spec as a Kubernetes Job (`buildRunJob`) and waits for the run pod's report and the tools sidecar's work
- * report, both posted to the internal run API with the run's own tokens. A Job that fails or disappears without a
+ * report, both posted to the internal run API with the run's own tokens. While it waits, the run's channel is open: the
+ * run pod posts its brain lines there and long-polls it for steering. A Job that fails or disappears without a
  * report resolves as interrupted. The tokens are revoked and the spec's ConfigMap deleted when the run ends; the Job is
  * left to its TTL, so the session sidecar finishes its last upload.
  */
@@ -100,6 +102,8 @@ export const kubernetesExecutor = (p: {
   core: ConfigMapsApi;
   watch?: JobWatch;
   stores: Pick<Stores, "jobs" | "attempts" | "runTokens">;
+  /** The channels the internal run API serves; without them a run pod's lines and polls find no open run. */
+  channels?: Pick<RunChannels, "open" | "close">;
   pollMs?: number;
   /** How long a run waits for the ticket's earlier run pods (still uploading their session) to end. */
   ticketIdleMs?: number;
@@ -285,18 +289,24 @@ export const kubernetesExecutor = (p: {
     });
 
   return {
-    execute: async (spec, signal) => {
+    execute: async (spec, signal, hooks = {}) => {
       let run = runs.get(spec.runId);
       if (run !== undefined && !run.adopted) throw new Error(`run ${spec.runId} is already executing`);
-      if (run !== undefined) run.adopted = false;
-      else run = await start(spec);
-      ensureWatch();
+      // Open before the pod exists: it may post lines, or someone steer it, as soon as it starts.
+      p.channels?.open(spec.runId, hooks.onLine ?? (() => undefined), spec.issueId);
       let result: { report: RunReport; work: WorkReport };
       try {
-        result = await waitFor(run, signal);
-      } catch (err) {
-        if (signal?.aborted === true) runs.delete(spec.runId);
-        throw err;
+        if (run !== undefined) run.adopted = false;
+        else run = await start(spec);
+        ensureWatch();
+        try {
+          result = await waitFor(run, signal);
+        } catch (err) {
+          if (signal?.aborted === true) runs.delete(spec.runId);
+          throw err;
+        }
+      } finally {
+        p.channels?.close(spec.runId);
       }
       await endRun(spec.runId);
       return result;

@@ -33,6 +33,7 @@ const internalServer = (runtime: Runtime, kubernetes: NonNullable<Runtime["kuber
   const { deps, stores } = runtime;
   return buildInternalServer({
     runs: kubernetes,
+    channels: runtime.channels,
     tokens: stores.runTokens,
     ledger: storeLedger(deps),
     remoteHead: (target) => {
