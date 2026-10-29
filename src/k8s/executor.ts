@@ -23,7 +23,10 @@ export interface RunCallbacks {
 }
 
 export interface KubernetesExecutor extends RunExecutor, RunCallbacks {
-  /** Deletes the run's Job (foreground: its pod goes first); the waiting `execute` resolves as interrupted. */
+  /**
+   * Deletes the run's Job (foreground: its pod goes first); the waiting `execute` resolves as interrupted. A run nobody
+   * waits on (one started before a restart) also loses its tokens and spec here.
+   */
   cancel(runId: string): Promise<void>;
   /**
    * After a restart, before the worker starts: running jobs whose run pod is still live are adopted, to be waited on by
@@ -291,7 +294,10 @@ export const kubernetesExecutor = (p: {
       return result;
     },
 
-    cancel: (runId) => deleteJob(runId),
+    cancel: async (runId) => {
+      await deleteJob(runId);
+      if (!runs.has(runId)) await endRun(runId);
+    },
 
     reattach: async () => {
       for (const job of p.stores.jobs.list({ status: "running", limit: ALL_ROWS })) {

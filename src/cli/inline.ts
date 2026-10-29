@@ -11,7 +11,8 @@ import { errorMessage, fail, println, type CliContext } from "./context.js";
 import { sleep } from "./probe.js";
 import type { Runtime } from "./runtime.js";
 
-const POLL_MS = 2_000;
+/** How often a tailed job is read again. */
+export const TAIL_POLL_MS = 2_000;
 const LOCK_HELD = "another steward process holds run.lock; if `steward serve` is running, let it pick the job up";
 
 const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
@@ -49,7 +50,8 @@ const execute = async (job: Job, ctx: RunContext, runtime: Runtime): Promise<Job
   }
 };
 
-const terminalOutcome = (status: JobStatus, error: string | null): JobOutcome | null => {
+/** The outcome a finished job ended with; null while it is queued or running. */
+export const terminalOutcome = (status: string, error: string | null): JobOutcome | null => {
   if (status === "succeeded") return { status };
   if (status === "publish_failed") return { status, error: error ?? status };
   if (status === "failed" || status === "skipped") return { status: "failed", error: error ?? status, retryable: false };
@@ -79,7 +81,7 @@ export const tailJob = async (stores: Stores, jobId: number, ctx: CliContext): P
       last = job.status;
       println(ctx, `job ${jobId} ${job.status}`);
     }
-    await sleep(POLL_MS);
+    await sleep(TAIL_POLL_MS);
   }
 };
 

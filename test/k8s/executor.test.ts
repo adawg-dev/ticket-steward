@@ -170,6 +170,16 @@ describe("kubernetesExecutor", () => {
     expect((await settles(executed)).report).toMatchObject({ interrupted: true, error: POD_ENDED_WITHOUT_REPORT });
   });
 
+  it("cancelling a run nobody waits on (started before a restart) also revokes its tokens and deletes its spec", async () => {
+    const spec = podSpecFor({ runId: "chat-3", jobId: 0, kind: "chat", interactive: true, push: null });
+    cluster.leave(spec);
+    const runner = stores.runTokens.issue(spec.runId, "runner");
+    await executor.cancel(spec.runId);
+    expect(cluster.jobs.has(jobNameOf(spec.runId))).toBe(false);
+    expect(cluster.configMaps.has(specConfigMapOf(spec.runId))).toBe(false);
+    expect(stores.runTokens.verify(spec.runId, "runner", runner)).toBe(false);
+  });
+
   it("keeps the report of a pod that ended before its work report arrived, and reads the work as unchecked", async () => {
     const { spec } = runningJob("API-1");
     const executed = executor.execute(spec);

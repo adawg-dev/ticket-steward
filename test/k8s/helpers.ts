@@ -16,6 +16,7 @@ export const RUNTIME: KubernetesRuntime = {
   egressAllowCidrs: [],
   serviceAccount: "steward-run",
   config: { configMap: "steward-config", path: "/etc/ticket-steward/steward.config.ts" },
+  runtimeDir: "/run/steward",
 };
 
 export const podSpecFor = (patch: Partial<RunSpec> = {}): RunSpec => ({

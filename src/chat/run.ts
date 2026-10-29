@@ -175,6 +175,44 @@ const prepareChat = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMr
   return { spec };
 };
 
+/**
+ * The spec of `steward chat`'s interactive run on Kubernetes: the session resumed in its worktree, in a run pod a person
+ * attaches to. No job runs it (job id 0); like the terminal chat, its pushes are recorded on the session's implement job.
+ */
+export const interactiveChatSpec = (
+  deps: Pick<PipelineDeps, "config" | "secrets" | "stores">,
+  p: { runId: string; ticket: { id: string; identifier: string }; session: AgentSession },
+): RunSpec => {
+  const { config } = deps;
+  const { session, ticket } = p;
+  const worktreePath = join(config.dataDir, "work", session.worktreeName);
+  const jobDir = join(config.dataDir, "jobs", `chat-${ticket.identifier}`);
+  const push = sessionPushTarget(deps, session, { path: worktreePath }, { jobId: session.jobId, identifier: ticket.identifier, issueId: ticket.id, port: jobPort({ config }) });
+  const checks = push === undefined || config.implement === undefined ? [] : stewardChecks(config.implement.checks, push.baseSha);
+  return {
+    version: 1,
+    runId: p.runId,
+    jobId: 0,
+    kind: "chat",
+    identifier: ticket.identifier,
+    issueId: ticket.id,
+    checkout: { ref: session.branch, sha: session.headSha },
+    baseSha: baseShaOf(deps, session) ?? session.headSha,
+    worktreePath,
+    artifactsDir: join(jobDir, "artifacts"),
+    transcriptPath: join(jobDir, "transcript.jsonl"),
+    prompt: "",
+    personCommits: null,
+    output: "chat",
+    resumeSessionId: session.sessionId,
+    limits: { timeoutMinutes: config.brain.timeoutMinutes, maxTurns: config.brain.maxTurns, setupTimeoutMinutes: config.workspace.setupTimeoutMinutes },
+    push: push ?? null,
+    setup: config.workspace.setup,
+    checks,
+    interactive: true,
+  };
+};
+
 /** The finish half, from the executor's report and the work it found: retry, or store and post the reply with what was left unpushed. */
 const finishChat = (
   ctx: RunContext,

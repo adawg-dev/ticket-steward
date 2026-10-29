@@ -155,6 +155,8 @@ const RuntimeSchema = z.discriminatedUnion("kind", [
     config: z
       .object({ configMap: z.string().min(1).default("steward-config"), path: z.string().startsWith("/").default("/etc/ticket-steward/steward.config.ts") })
       .prefault({}),
+    /** The dispatcher's in-memory runtime dir (an emptyDir `Memory`): `serve` writes the admin API's token there. */
+    runtimeDir: z.string().startsWith("/").default("/run/steward"),
   }),
 ]);
 

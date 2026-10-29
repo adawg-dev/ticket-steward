@@ -8,14 +8,16 @@ import { claudeMcpServer, CLEANUP_PERIOD_DAYS } from "../brain/claudeCode.js";
 import type { PolicyDecision } from "../brain/policy.js";
 import { buildBrainEnv } from "../brain/env.js";
 import { chatSettings, evaluateHook, HOOK_DENY_EXIT } from "../chat/hook.js";
-import { acquireLease, holdLease } from "../chat/lease.js";
+import { acquireLease, HEARTBEAT_MS, holdLease } from "../chat/lease.js";
 import { leftoverWork, sessionPushTarget } from "../chat/run.js";
 import { ensureWorktree, latestSession, type AgentSession } from "../chat/session.js";
-import { appPortOf } from "../config/schema.js";
+import { appPortOf, kubernetesRuntime } from "../config/schema.js";
 import { brainDenyPaths, brainInput, sessionsDir, type JobPaths } from "../core/workspace.js";
+import { attachTty } from "../k8s/cluster.js";
 import { freePort, isPortFree } from "../workspace/retention.js";
 import type { Slot } from "../workspace/slots.js";
-import { errorMessage, fail, loadFromProgram, println, type CliContext, type SpawnInteractive } from "./context.js";
+import { connectAdmin, type AdminClient, type ChatClosed } from "./client.js";
+import { errorMessage, exitWith, fail, loadFromProgram, println, type CliContext, type SpawnInteractive } from "./context.js";
 import { jobsDir, mirrorPath, workRoot } from "./paths.js";
 import { buildRuntime, type Runtime } from "./runtime.js";
 
@@ -128,6 +130,55 @@ const converse = async (ctx: CliContext, runtime: Runtime, ticket: { id: string;
   }
 };
 
+/** Exit codes of a chat ended by a signal, as a shell reports them. */
+const SIGNAL_EXIT: Partial<Record<NodeJS.Signals, number>> = { SIGHUP: 129, SIGINT: 130 };
+
+/**
+ * `steward chat` on Kubernetes, as the admin API's client: serve takes the lease and starts the ticket's interactive run
+ * pod, this terminal attaches to its agent container's TTY, and the lease is heartbeated until the person leaves Claude
+ * Code, or this process gets SIGINT or SIGHUP; then it is released, after serve has ended the run.
+ */
+const chatInRunPod = async (ctx: CliContext, client: AdminClient, namespace: string, key: string): Promise<void> => {
+  let opened;
+  try {
+    opened = await client.openChat(key, process.pid);
+  } catch (err) {
+    return fail(ctx, errorMessage(err));
+  }
+  println(ctx, `attaching to ${opened.pod} for ${key}'s agent session; leave Claude Code to end the chat`);
+  let closing: Promise<ChatClosed | null> | null = null;
+  const close = (): Promise<ChatClosed | null> =>
+    (closing ??= client.closeChat(key).catch((err: unknown) => {
+      ctx.stderr.write(`could not release ${key}: ${errorMessage(err)}\n`);
+      return null;
+    }));
+  const beat = setInterval(() => {
+    // A missed beat is retried at the next; the lease goes stale only after four.
+    client.heartbeat(key).catch(() => undefined);
+  }, HEARTBEAT_MS);
+  beat.unref();
+  const onSignal = (signal: NodeJS.Signals): void => {
+    void close().then(() => exitWith(ctx, SIGNAL_EXIT[signal] ?? 1));
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGHUP", onSignal);
+  let attachError: string | null = null;
+  try {
+    const attach = ctx.factories?.attachTty ?? attachTty;
+    await attach({ namespace, pod: opened.pod, container: opened.container, onWaiting: () => println(ctx, "waiting for the run pod: clone, overlay and session first") });
+  } catch (err) {
+    attachError = errorMessage(err);
+  } finally {
+    clearInterval(beat);
+    process.off("SIGINT", onSignal);
+    process.off("SIGHUP", onSignal);
+  }
+  const closed = await close();
+  if (closed !== null && closed.unpushed !== null && closed.unpushed !== "") println(ctx, `Left in the agent's worktree, not pushed:\n${closed.unpushed}`);
+  if (attachError !== null) return fail(ctx, `could not attach to ${opened.pod}: ${attachError}`);
+  if (closed?.ok === false) return fail(ctx, `the chat's run failed: ${closed.error ?? "no error given"}`);
+};
+
 export const registerChat = (program: Command, ctx: CliContext): void => {
   program
     .command("chat")
@@ -135,9 +186,16 @@ export const registerChat = (program: Command, ctx: CliContext): void => {
     .argument("<ticket>", "issue key or UUID")
     .option("--no-slot", "chat without slot services (the app's containers) instead of leasing a slot")
     .action(async (key: string, opts: { slot: boolean }) => {
-      const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);
-      const { config } = runtime.loaded;
+      const loaded = await loadFromProgram(program, ctx);
+      const { config } = loaded;
       if (config.brain.kind !== "claude-code") return fail(ctx, 'steward chat requires brain.kind "claude-code"');
+      const kubernetes = kubernetesRuntime(config);
+      if (kubernetes !== null) {
+        const client = await connectAdmin(ctx, config).catch((err: unknown) => fail(ctx, errorMessage(err)));
+        if (client === null) return fail(ctx, "steward chat on the kubernetes runtime goes through steward serve's admin API, which does not answer");
+        return chatInRunPod(ctx, client, kubernetes.namespace, key);
+      }
+      const runtime = await buildRuntime(loaded, ctx);
       const ticket = await runtime.tracker.resolveIssueId(key);
       const session = latestSession(runtime.stores, ticket.id);
       if (session === null) return fail(ctx, `no agent session for ${ticket.identifier}`);

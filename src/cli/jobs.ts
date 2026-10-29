@@ -3,13 +3,16 @@ import { readdir } from "node:fs/promises";
 import type { Command } from "commander";
 import { z } from "zod";
 import { retentionProtection } from "../chat/session.js";
-import { openStores, type Job, type JobStatus, type Loop } from "../store/index.js";
+import type { JobOutcome } from "../core/types.js";
 import { sessionsDir } from "../core/workspace.js";
+import { loopOfJob, retryMode } from "../server/admin.js";
+import { openStores, type JobStatus } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
-import { fail, loadFromProgram, println, type CliContext } from "./context.js";
-import { reportOutcome, runInline, tailJob, withRunLock } from "./inline.js";
+import { AdminError, connectAdmin, type AdminClient, type JobSummary, type LoopView } from "./client.js";
+import { errorMessage, fail, loadFromProgram, println, type CliContext } from "./context.js";
+import { reportOutcome, runInline, tailJob, terminalOutcome, TAIL_POLL_MS, withRunLock } from "./inline.js";
 import { artifactsDir, jobsDir, workRoot } from "./paths.js";
-import { answers, localHealthUrl } from "./probe.js";
+import { answers, localHealthUrl, sleep } from "./probe.js";
 import { buildRuntime } from "./runtime.js";
 
 const DEFAULT_LIMIT = 20;
@@ -30,40 +33,19 @@ const parseId = (value: string): number => {
   return id;
 };
 
-export const jobLine = (job: Job): string =>
+export const jobLine = (job: JobSummary): string =>
   [job.id, job.status, job.identifier, job.kind, `attempts=${job.attempts}`, job.createdAt].join("\t");
-
-/** What a retry will do, matching the worker's dispatch. */
-const retryMode = (job: Job): string => {
-  if (job.unreadable.length > 0) return `job ${job.id}: fails (stored ${job.unreadable.join(", ")} is unreadable)`;
-  if (job.kind === "await_review" || job.kind === "fix" || job.kind === "restart") return `job ${job.id}: ${job.kind} step of ${job.subject ?? "its loop"}`;
-  if (job.kind === "implement") {
-    const stored = job.implementResult;
-    if (stored === null) return `job ${job.id}: full run`;
-    if (stored.handback !== null) return `job ${job.id}: publish-only (hand-back stored; labels only, nothing to push)`;
-    if (job.pushedAt === null) return `job ${job.id}: publish-only (check whether ${job.branch ?? "?"} landed, then labels; never pushes)`;
-    return `job ${job.id}: publish-only (${job.branch ?? "?"} already pushed; labels only)`;
-  }
-  return `job ${job.id}: fails (${job.kind} was removed)`;
-};
 
 const pretty = (value: unknown): string => JSON.stringify(value, null, 2);
 
 /** One line per review round: `round 1: 3/5 ...`; an unscored round shows `?/5`. */
-export const roundLines = (loop: Loop): string[] =>
+export const roundLines = (loop: Pick<LoopView, "history">): string[] =>
   loop.history.map(
     (round) =>
       `round ${round.round}: ${round.score ?? "?"}/5 head ${round.headSha.slice(0, 7)} pipeline ${round.pipeline ?? "-"} fixed ${round.fixed} declined ${round.declined} ${round.outcome}`,
   );
 
-const loopHeader = (loop: Loop): string => `loop ${loop.id}: ${loop.state}, round ${loop.round}, ${loop.mrUrl ?? "no MR yet"}`;
-
-/** The loop a job belongs to: loop steps carry `loop:<id>` as subject, an implement job is the loop's origin. */
-const loopOf = (stores: ReturnType<typeof openStores>, job: Job): Loop | null => {
-  if (job.kind === "implement") return stores.loops.forImplementJob(job.id);
-  const id = job.subject?.startsWith("loop:") === true ? Number.parseInt(job.subject.slice("loop:".length), 10) : Number.NaN;
-  return Number.isInteger(id) ? stores.loops.get(id) : null;
-};
+const loopHeader = (loop: LoopView): string => `loop ${loop.id}: ${loop.state}, round ${loop.round}, ${loop.mrUrl ?? "no MR yet"}`;
 
 const listArtifacts = async (dir: string): Promise<string[]> => (existsSync(dir) ? (await readdir(dir)).sort() : []);
 
@@ -82,6 +64,35 @@ const runningLine = async (ctx: CliContext, port: number): Promise<string | null
   }
 };
 
+/** The admin API when `serve` answers it (Kubernetes); null sends the command to the DB (the Compose host). */
+const admin = (ctx: CliContext, config: Parameters<typeof connectAdmin>[1]): Promise<AdminClient | null> =>
+  connectAdmin(ctx, config).catch((err: unknown) => fail(ctx, errorMessage(err)));
+
+/** Prints each non-terminal status change of a job, read through the admin API, then returns its terminal outcome. */
+const tailOverApi = async (client: AdminClient, jobId: number, ctx: CliContext): Promise<JobOutcome> => {
+  let last: string | null = null;
+  for (;;) {
+    const detail = await client.job(jobId);
+    if (detail === null) return fail(ctx, `job ${jobId} disappeared`);
+    const { status, error } = detail.job;
+    const outcome = terminalOutcome(status, typeof error === "string" ? error : null);
+    if (outcome !== null) return outcome;
+    if (status !== last) {
+      last = status;
+      println(ctx, `job ${jobId} ${status}`);
+    }
+    await sleep(TAIL_POLL_MS);
+  }
+};
+
+const printDetail = async (ctx: CliContext, dataDir: string, id: number, detail: { job: unknown; attempts: Array<{ transcriptPath: string | null }>; loop: LoopView | null }): Promise<void> => {
+  println(ctx, `# job\n${pretty(detail.job)}`);
+  println(ctx, `# attempts\n${pretty(detail.attempts)}`);
+  println(ctx, `# transcripts\n${detail.attempts.map((attempt) => attempt.transcriptPath ?? "(none)").join("\n")}`);
+  println(ctx, `# artifacts (${artifactsDir(dataDir, id)})\n${(await listArtifacts(artifactsDir(dataDir, id))).join("\n")}`);
+  if (detail.loop !== null) println(ctx, [`# loop`, loopHeader(detail.loop), ...roundLines(detail.loop)].join("\n"));
+};
+
 export const registerJobs = (program: Command, ctx: CliContext): void => {
   const jobs = program
     .command("jobs")
@@ -90,7 +101,9 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .option("--limit <n>", "maximum rows", parseId, DEFAULT_LIMIT)
     .action(async (opts: { status?: JobStatus; limit: number }) => {
       const { config } = await loadFromProgram(program, ctx);
-      const rows = openStores(config.dataDir).jobs.list({ ...(opts.status === undefined ? {} : { status: opts.status }), limit: opts.limit });
+      const filter = { ...(opts.status === undefined ? {} : { status: opts.status }), limit: opts.limit };
+      const client = await admin(ctx, config);
+      const rows = client === null ? openStores(config.dataDir).jobs.list(filter) : await client.listJobs(filter);
       const running = await runningLine(ctx, config.server.port);
       if (running !== null) println(ctx, running);
       for (const job of rows) println(ctx, jobLine(job));
@@ -102,16 +115,16 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
       const { config } = await loadFromProgram(program, ctx);
+      const client = await admin(ctx, config);
+      if (client !== null) {
+        const detail = await client.job(id);
+        if (detail === null) return fail(ctx, `job ${id} not found`);
+        return printDetail(ctx, config.dataDir, id, detail);
+      }
       const stores = openStores(config.dataDir);
       const job = stores.jobs.get(id);
       if (job === null) return fail(ctx, `job ${id} not found`);
-      const attempts = stores.attempts.forJob(id);
-      println(ctx, `# job\n${pretty(job)}`);
-      println(ctx, `# attempts\n${pretty(attempts)}`);
-      println(ctx, `# transcripts\n${attempts.map((attempt) => attempt.transcriptPath ?? "(none)").join("\n")}`);
-      println(ctx, `# artifacts (${artifactsDir(config.dataDir, id)})\n${(await listArtifacts(artifactsDir(config.dataDir, id))).join("\n")}`);
-      const loop = loopOf(stores, job);
-      if (loop !== null) println(ctx, [`# loop`, loopHeader(loop), ...roundLines(loop)].join("\n"));
+      await printDetail(ctx, config.dataDir, id, { job, attempts: stores.attempts.forJob(id), loop: loopOfJob(stores, job) });
     });
 
   jobs
@@ -119,7 +132,18 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when an implement result is stored")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
-      const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx);
+      const loaded = await loadFromProgram(program, ctx);
+      const client = await admin(ctx, loaded.config);
+      if (client !== null) {
+        try {
+          println(ctx, await client.retry(id));
+        } catch (err) {
+          return fail(ctx, err instanceof AdminError ? err.message : errorMessage(err));
+        }
+        println(ctx, `steward serve is running; requeued job ${id}`);
+        return reportOutcome(ctx, id, await tailOverApi(client, id, ctx));
+      }
+      const runtime = await buildRuntime(loaded, ctx);
       const { jobs } = runtime.stores;
       const job = jobs.get(id);
       if (job === null) return fail(ctx, `job ${id} not found`);

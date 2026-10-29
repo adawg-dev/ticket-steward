@@ -6,6 +6,8 @@ import type { codehostMcpSpec } from "../codehost/server.js";
 import type { CodeHost } from "../codehost/types.js";
 import { loadConfig, type LoadedConfig } from "../config/load.js";
 import type { SecretFetcher } from "../config/secretSource.js";
+import type { PodsApi } from "../k8s/chat.js";
+import type { AttachTty } from "../k8s/cluster.js";
 import type { ConfigMapsApi, JobsApi, JobWatch } from "../k8s/executor.js";
 import type { OrbitExec } from "../orbit/run.js";
 import type { ObjectStore } from "../sessions/store.js";
@@ -44,8 +46,10 @@ export interface CliFactories {
   objectStore?: ObjectStore;
   /** Stands in for the interactive Claude Code process `steward chat` runs; resolves to its exit code. */
   spawnInteractive?: SpawnInteractive;
-  /** Stands in for the cluster on the Kubernetes runtime. */
-  cluster?: { batch: JobsApi; core: ConfigMapsApi; watch?: JobWatch };
+  /** Stands in for the cluster on the Kubernetes runtime; without `pods`, serve's admin API launches no chat. */
+  cluster?: { batch: JobsApi; core: ConfigMapsApi; pods?: PodsApi; watch?: JobWatch };
+  /** Stands in for `steward chat`'s attach to the run pod's TTY on the Kubernetes runtime. */
+  attachTty?: AttachTty;
 }
 
 export type SpawnInteractive = (command: string, args: string[], options: { cwd: string; env: Record<string, string> }) => Promise<number>;

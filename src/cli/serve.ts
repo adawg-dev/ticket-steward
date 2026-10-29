@@ -1,7 +1,10 @@
 import type { Command } from "commander";
+import type { FastifyInstance } from "fastify";
+import { kubernetesRuntime } from "../config/schema.js";
 import { settingsOf } from "../implement/pipeline.js";
 import { storeLedger } from "../push/ledger.js";
 import { remoteHeadOf } from "../push/service.js";
+import { ADMIN_HOST, ADMIN_PORT, buildAdminServer, writeAdminToken } from "../server/admin.js";
 import { buildServer } from "../server/app.js";
 import { buildInternalServer, INTERNAL_PORT } from "../server/internal.js";
 import { startWorker, type WorkerDeps } from "../worker/index.js";
@@ -41,14 +44,26 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       const { config, secrets } = runtime.loaded;
       const { kubernetes } = runtime;
       const internal = kubernetes === undefined ? null : internalServer(runtime, kubernetes);
+      let admin: FastifyInstance | null = null;
       let workerDeps: WorkerDeps = runtime.deps;
-      if (kubernetes !== undefined && internal !== null) {
+      const k8s = kubernetesRuntime(config);
+      if (kubernetes !== undefined && internal !== null && k8s !== null) {
         try {
           // Before the worker claims anything: a live run pod is waited on again, never started a second time.
           await kubernetes.reattach();
           await internal.listen({ port: INTERNAL_PORT, host: INTERNAL_HOST });
         } catch (err) {
           return fail(ctx, `could not reattach to the run pods: ${errorMessage(err)}`);
+        }
+        try {
+          // The CLI in this pod is the admin API's client; a new token each start, in memory only.
+          const token = await writeAdminToken(k8s.runtimeDir);
+          const { stores, tracker, chat } = runtime;
+          admin = buildAdminServer({ token, stores, resolveTicket: (key) => tracker.resolveIssueId(key), ...(chat === undefined ? {} : { chat }) });
+          await admin.listen({ port: ADMIN_PORT, host: ADMIN_HOST });
+        } catch (err) {
+          await internal.close();
+          return fail(ctx, `could not start the admin API: ${errorMessage(err)}`);
         }
         workerDeps = { ...workerDeps, resume: { specs: kubernetes.adopted(), release: (runId) => kubernetes.release(runId) } };
       }
@@ -57,6 +72,7 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
         worker = startWorker(workerDeps);
       } catch (err) {
         await internal?.close();
+        await admin?.close();
         return fail(ctx, errorMessage(err));
       }
       const gitlab = runtime.deps.gitlab;
@@ -64,12 +80,14 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       await app.listen({ port: config.server.port, host: listenHost(process.env) });
       println(ctx, `listening on http://localhost:${config.server.port} (public ${config.server.publicUrl})`);
       if (internal !== null) println(ctx, `run callbacks on ${INTERNAL_HOST}:${INTERNAL_PORT}`);
+      if (admin !== null) println(ctx, `admin API on ${ADMIN_HOST}:${ADMIN_PORT}`);
 
       const shutdown = async (): Promise<void> => {
         println(ctx, "shutting down: waiting for in-flight jobs");
         await worker.stop();
         await app.close();
         await internal?.close();
+        await admin?.close();
         kubernetes?.close();
         exitWith(ctx, 0);
       };

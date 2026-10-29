@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { INTERRUPTED_ERROR, type BrainInput, type BrainRun } from "../../src/brain/types.js";
 import { latestSession } from "../../src/chat/session.js";
 import { CHAT_MARKER } from "../../src/chat/result.js";
-import { runChat } from "../../src/chat/run.js";
+import { interactiveChatSpec, runChat } from "../../src/chat/run.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
@@ -433,5 +433,25 @@ describe("runChat through an executor", () => {
 
     expect(outcome).toEqual({ status: "succeeded", warning: "the agent's run failed: No conversation found with session ID: session-1" });
     expect(gitlab.replies[0]?.body).toBe(`The agent's session could not be resumed.\n\n${CHAT_MARKER}`);
+  });
+});
+
+describe("interactiveChatSpec", () => {
+  it("resumes the loop's session in its worktree as an interactive run of no job, pushing onto the loop's branch", () => {
+    const loopId = createLoop();
+    const deps = makeDeps(new FakeBrain());
+    const session = latestSession(stores, "issue-1");
+    if (session === null) throw new Error("no session");
+
+    const spec = interactiveChatSpec(deps, { runId: "chat-4", ticket: { id: "issue-1", identifier: "API-1" }, session });
+
+    expect(RunSpecSchema.parse(spec)).toEqual(spec);
+    expect(spec).toMatchObject({
+      runId: "chat-4", jobId: 0, kind: "chat", interactive: true, prompt: "", resumeSessionId: "session-1",
+      checkout: { ref: BRANCH, sha: headSha }, baseSha,
+      worktreePath: join(repo.dataDir, "work", "ticket-API-1"),
+      artifactsDir: join(repo.dataDir, "jobs", "chat-API-1", "artifacts"),
+      push: { jobId: session.jobId, branch: BRANCH, mode: "fastForward", loopId },
+    });
   });
 });
