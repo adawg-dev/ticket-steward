@@ -38,7 +38,10 @@ export const ASSIGN_ME_REPLY = "Assign me to the ticket to start work.";
 type SessionEvent = Extract<LinearEvent, { kind: "session.created" | "session.prompted" }>;
 
 const enqueue = (stores: Stores, event: SessionEvent, run: "implement" | "chat", message: string | null): number =>
-  stores.jobs.enqueue({ kind: "linear", run, issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, sessionId: event.sessionId, message });
+  stores.jobs.enqueue({
+    kind: "linear", run, issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, sessionId: event.sessionId, message,
+    ...(event.kind === "session.prompted" ? { author: event.authorName } : {}),
+  });
 
 /** A queued or running implement: the ticket's work has started, though it has left no session yet. */
 const implementPending = (stores: Stores, issueId: string): boolean => {

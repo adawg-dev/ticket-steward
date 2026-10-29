@@ -24,6 +24,7 @@ import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr, fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
+import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
@@ -774,5 +775,51 @@ describe("runFix through an executor", () => {
 
     const failing: RunExecutor = { execute: () => Promise.reject(new Error("cannot create the run's Job")) };
     expect(await runFix(claim(id), { ...makeDeps(new FakeBrain()), executor: failing })).toEqual({ status: "failed", error: "cannot create the run's Job", retryable: true });
+  });
+});
+
+describe("runFix in the ticket's agent session", () => {
+  const thoughtLine = (text: string): string => JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  /** An executor whose brain says `thought`, then reports `patch`. */
+  const thinking = (thought: string, patch: Partial<RunReport> = {}): RunExecutor => ({
+    execute: async (spec, _signal, hooks) => {
+      hooks?.onLine?.(thoughtLine(thought));
+      const report: RunReport = {
+        runId: spec.runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-x", output: declined(finding), usage: null, ...patch,
+      };
+      return { report, work: { runId: spec.runId, unpushed: "", pushedSha: null } };
+    },
+  });
+  let linear: RecordingLinear;
+
+  beforeEach(() => {
+    linear = new RecordingLinear();
+    stores.agentSessions.record("lin-1", "issue-1", "API-1");
+  });
+
+  it("shows the round's lines, then its summary as a response", async () => {
+    const id = createLoop();
+    expect(await runFix(claim(id), { ...makeDeps(new FakeBrain()), linear, executor: thinking("Looking at the null check.") })).toEqual({ status: "succeeded" });
+    expect(linear.activities().map((call) => call.content)).toEqual([
+      { type: "thought", body: "Looking at the null check." },
+      { type: "response", body: `This review round: ${declined(finding).summary}` },
+    ]);
+  });
+
+  it("says where a stopped round got to, and why the loop was handed back only that once", async () => {
+    const id = createLoop();
+    const outcome = await runFix(claim(id), { ...makeDeps(new FakeBrain()), linear, executor: thinking("Halfway there.", { ok: false, error: "stopped", stopped: true, output: null }) });
+    expect(outcome).toEqual({ status: "succeeded", warning: `handed back: ${STOPPED_JOB_ERROR}` });
+    expect(linear.activities().filter((call) => call.content.type !== "thought").map((call) => call.content)).toEqual([
+      { type: "response", body: "Stopped. Where I got to: Halfway there." },
+    ]);
+  });
+
+  it("says why it handed the merge request back, and moves no workflow state", async () => {
+    const id = createLoop();
+    const outcome = await runFix(claim(id), { ...makeDeps(new FakeBrain()), linear, executor: thinking("Trying.", { ok: false, error: "boom", output: null }) });
+    expect(outcome).toMatchObject({ status: "succeeded", warning: "handed back: the agent's run failed: boom" });
+    expect(linear.activities().at(-1)?.content).toEqual({ type: "response", body: "I handed the merge request back to a person: the agent's run failed: boom." });
+    expect(linear.calls.filter((call) => call.kind === "state")).toEqual([]);
   });
 });

@@ -86,10 +86,11 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       const { kubernetes } = runtime;
       const internal = kubernetes === undefined ? null : internalServer(runtime, kubernetes);
       let admin: FastifyInstance | null = null;
-      let workerDeps: WorkerDeps = runtime.deps;
+      const settings = new SettingsStore(runtime.stores.db, seedSettings(config));
+      const linear = runtime.linearToken === undefined ? undefined : createLinearAgentApi(runtime.linearToken, fetch);
+      let workerDeps: WorkerDeps = { ...runtime.deps, settings, ...(linear === undefined ? {} : { linear }) };
       let stopReaping = (): void => undefined;
       const k8s = kubernetesRuntime(config);
-      const settings = new SettingsStore(runtime.stores.db, seedSettings(config));
       if (kubernetes !== undefined && internal !== null && k8s !== null) {
         try {
           // Before the worker claims anything: a live run pod is waited on again, never started a second time.
@@ -133,7 +134,6 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
         return fail(ctx, errorMessage(err));
       }
       const gitlab = runtime.deps.gitlab;
-      const linear = runtime.linearToken === undefined ? undefined : createLinearAgentApi(runtime.linearToken, fetch);
       // Read now, so the first webhook does not wait on Linear for it; a failure here is retried by that webhook.
       await runtime.tracker.appUserId().catch((err: unknown) => logger.warn({ err: errorMessage(err) }, "the app's Linear user could not be read yet"));
       const app = buildServer({
@@ -143,6 +143,8 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
         tracker: runtime.tracker,
         settings,
         workerState: worker.state,
+        channels: runtime.channels,
+        redactor: runtime.deps.redactor,
         ...(gitlab === undefined ? {} : { gitlab }),
         ...(linear === undefined ? {} : { linear }),
       });

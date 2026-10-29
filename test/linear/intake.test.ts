@@ -234,7 +234,7 @@ describe("linearIntake", () => {
       expect(result.action).toBe("resume_implement");
       const job = stores.jobs.get(result.jobId ?? -1);
       expect(job?.kind).toBe("implement");
-      expect(job?.trigger).toEqual({ kind: "linear", run: "implement", ...ISSUE, sessionId: "session-1", message: "The S3 adapter." });
+      expect(job?.trigger).toEqual({ kind: "linear", run: "implement", ...ISSUE, sessionId: "session-1", message: "The S3 adapter.", author: "Ada" });
     });
 
     it("waits for a terminal session's lease, its chat queued", async () => {

@@ -1,16 +1,19 @@
 import Fastify, { type FastifyInstance } from "fastify";
+import { z } from "zod";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
 import { chatIntake, type ChatAction } from "../chat/intake.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import { parseGitlabEvent, verifyGitlabWebhook, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
 import { errorMessage } from "../core/workspace.js";
-import { ASSIGN_ME_REPLY, linearIntake, type LinearIntakeResult } from "../linear/intake.js";
+import { linearIntake } from "../linear/intake.js";
+import { answerLinearIntake, type IntakeAnswerDeps } from "../linear/session.js";
 import { logger } from "../log.js";
 import type { Settings } from "../settings/schema.js";
+import type { RunChannels } from "../run/channel.js";
 import { loopSubject, type Job, type Loop, type Stores } from "../store/index.js";
 import type { LinearAgentApi } from "../tracker/linear/agent.js";
-import { parseLinearEvent, verifySignature, type LinearEvent } from "../tracker/linear/webhook.js";
+import { parseLinearEvent, verifySignature } from "../tracker/linear/webhook.js";
 import type { Tracker } from "../tracker/types.js";
 import type { WorkerState } from "../worker/index.js";
 
@@ -26,6 +29,10 @@ export interface ServerDeps {
   linear?: LinearAgentApi;
   /** Set with `greptile` or `chat` on GitLab: chat intake checks a note author's access and answers notes it cannot serve. */
   gitlab?: GitLabMrApi;
+  /** The open runs' channels: a Linear prompt steers the ticket's open run, and its stop stops it. */
+  channels?: Pick<RunChannels, "active" | "steer" | "stop">;
+  /** Scrubs what the panel is told; the run redactor in `serve`. */
+  redactor?: { redact(text: string): string };
 }
 
 export interface HealthReport {
@@ -68,15 +75,39 @@ const healthReport = (deps: ServerDeps): HealthReport => {
   };
 };
 
-/** What intake decided that Linear must hear: run after the webhook is answered, so Linear's 5 s deadline never waits on it. */
-const answerInPanel = async (deps: ServerDeps, event: LinearEvent, result: LinearIntakeResult): Promise<void> => {
-  if (result.action !== "assign_me" || event.kind === "issue.undelegated") return;
-  if (deps.linear === undefined) {
-    logger.warn({ identifier: event.identifier, action: result.action }, "linear: no agent API to answer in the panel");
+const PermissionChangeSchema = z.object({
+  action: z.string(),
+  addedTeamIds: z.array(z.string()).nullish(),
+  removedTeamIds: z.array(z.string()).nullish(),
+  canAccessAllPublicTeams: z.boolean().nullish(),
+});
+
+/**
+ * An admin changed which teams the app can see. Logged: a team it lost stops sending its tickets' events, and runs on
+ * them fail on their next Linear read (which the panel cannot show, since the app can no longer post there).
+ */
+const logPermissionChange = (delivery: string | undefined, body: unknown): void => {
+  const parsed = PermissionChangeSchema.safeParse(body);
+  if (!parsed.success) {
+    logger.warn({ delivery }, "linear: an unreadable permission change");
     return;
   }
-  await deps.linear.createActivity(event.sessionId, { type: "response", body: ASSIGN_ME_REPLY });
+  const { action, addedTeamIds, removedTeamIds, canAccessAllPublicTeams } = parsed.data;
+  const fields = { delivery, action, addedTeamIds: addedTeamIds ?? [], removedTeamIds: removedTeamIds ?? [], canAccessAllPublicTeams };
+  if ((removedTeamIds ?? []).length > 0) logger.warn(fields, "linear: the app lost access to teams");
+  else logger.info(fields, "linear: the app's team access changed");
 };
+
+const unredacted = { redact: (text: string): string => text };
+
+/** The panel's view of the server's deps. */
+const panelDeps = (deps: ServerDeps): IntakeAnswerDeps => ({
+  stores: deps.stores,
+  settings: deps.settings,
+  redactor: deps.redactor ?? unredacted,
+  ...(deps.linear === undefined ? {} : { linear: deps.linear }),
+  ...(deps.channels === undefined ? {} : { channels: deps.channels }),
+});
 
 /**
  * Agent-session events (delegation, mention, prompt) and the steward losing a delegation. Intake records the delivery
@@ -102,12 +133,17 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
       logger.warn({ delivery, err: errorMessage(err) }, "webhook: the app's Linear user could not be read");
       return reply.code(503).send({ ok: false });
     }
-    const event = parseLinearEvent({ event: header(request.headers["linear-event"]), delivery }, body, appUserId);
+    const kind = header(request.headers["linear-event"]);
+    if (kind === "PermissionChange") {
+      logPermissionChange(delivery, body);
+      return { ok: true, action: "logged" };
+    }
+    const event = parseLinearEvent({ event: kind, delivery }, body, appUserId);
     if (event === null) return { ok: true, action: "ignored" };
 
     const result = await linearIntake(deps, event);
     logger.info({ delivery, kind: event.kind, identifier: event.identifier, action: result.action, jobId: result.jobId }, "webhook received");
-    answerInPanel(deps, event, result).catch((err: unknown) =>
+    answerLinearIntake(panelDeps(deps), event, result).catch((err: unknown) =>
       logger.warn({ delivery, identifier: event.identifier, err: errorMessage(err) }, "linear: the panel answer failed"),
     );
     return { ok: true, action: result.action };

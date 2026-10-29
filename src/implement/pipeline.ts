@@ -12,6 +12,7 @@ import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, stableWorktreeName, type JobPaths } from "../core/workspace.js";
 import { isLinearImplement, startLoop } from "../greptile/start.js";
+import { implementFinish, linearSessionFor, NO_SESSION, stoppedResponse, type LinearSession } from "../linear/session.js";
 import type { PushTarget } from "../push/target.js";
 import { setupTailOf, STOPPED_JOB_ERROR } from "../run/execute.js";
 import { localExecutor } from "../run/local.js";
@@ -69,9 +70,29 @@ export const lsRemoteSite = async (paths: Pick<JobPaths, "jobDir">, remote: Remo
 /** With `greptile`, a label-triggered implement starts a fix loop once it pushes. */
 const startsLoop = (ctx: RunContext, deps: PipelineDeps): boolean => deps.config.greptile !== undefined && isLinearImplement(ctx.trigger);
 
-/** A loop-starting implement runs on the ticket's stable worktree, where its fix rounds resume the brain session. */
-const implementPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths =>
-  jobPaths(ctx, deps, startsLoop(ctx, deps) ? { worktreeName: stableWorktreeName(ctx.identifier) } : {});
+/** The person's answer a Linear implement carries: the reply to an earlier implement's questions. */
+const replyOf = (ctx: RunContext): string | null => (ctx.trigger.kind === "linear" && ctx.trigger.run === "implement" ? ctx.trigger.message : null);
+
+/**
+ * The earlier implement a reply continues: the ticket's latest one with a session, when it ended asking questions. Its
+ * session is resumed in its worktree (sessions are keyed by path).
+ */
+export const answeredImplement = (ctx: RunContext, deps: Pick<PipelineDeps, "stores">): Job | null => {
+  if (replyOf(ctx) === null) return null;
+  const earlier = deps.stores.jobs.latestImplementSession(ctx.issueId);
+  if (earlier === null || earlier.id === ctx.jobId || earlier.implementResult?.result?.outcome !== "needs_info") return null;
+  return earlier;
+};
+
+/**
+ * A loop-starting implement runs on the ticket's stable worktree, where its fix rounds resume the brain session; one that
+ * answers an earlier implement's questions runs in that implement's worktree.
+ */
+const implementPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths => {
+  if (startsLoop(ctx, deps)) return jobPaths(ctx, deps, { worktreeName: stableWorktreeName(ctx.identifier) });
+  const answered = answeredImplement(ctx, deps);
+  return jobPaths(ctx, deps, answered?.worktreeName === null || answered === null ? {} : { worktreeName: answered.worktreeName });
+};
 
 /** Starts the fix loop for the pushed job, re-read so the loop sees its push, commit and session. */
 const startLoopFor = (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, baseSha: string): void => {
@@ -150,6 +171,7 @@ const implementPrompt = async (
     branchTypes: settings.branchTypes.join(", "),
     hasChecks: settings.checks.length > 0,
     checks: stewardChecks(settings.checks, baseSha).map((command) => `- \`${command}\``).join("\n"),
+    reply: replyOf(ctx) ?? "",
   }, await readRepoPartial(deps.configPath));
 };
 
@@ -224,7 +246,8 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
     prompt,
     personCommits: null,
     output: "implement",
-    resumeSessionId: null,
+    // An answer to the agent's questions continues the session that asked them.
+    resumeSessionId: answeredImplement(ctx, deps)?.sessionId ?? null,
     limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns, setupTimeoutMinutes: deps.config.workspace.setupTimeoutMinutes },
     push,
     setup: deps.config.workspace.setup,
@@ -293,12 +316,13 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
   return publishImplement({ ctx, tracker: deps.tracker, stored });
 };
 
-const executeImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
+const executeImplement = async (ctx: RunContext, deps: PipelineDeps, panel: { session: LinearSession }): Promise<JobOutcome> => {
   const prepared = await prepareImplement(ctx, deps);
   if ("outcome" in prepared) return prepared.outcome;
+  if (!ctx.dryRun) panel.session = linearSessionFor(deps, ctx.issueId, { workspacePath: prepared.spec.worktreePath });
   let executed: { report: RunReport; work: WorkReport };
   try {
-    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal);
+    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal, panel.session.hooks);
   } catch (err) {
     if (err instanceof SetupError) patchAttempt(ctx, deps, { setupTail: err.tail });
     return prepareFailed(deps, err);
@@ -306,14 +330,42 @@ const executeImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<Jo
   return finishImplement(ctx, deps, prepared.spec, executed);
 };
 
-/** Prepare, execute (in-process or in a run pod), finish. */
-export const runImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => redactOutcome(await executeImplement(ctx, deps).catch(crashed), deps.redactor);
+/**
+ * The implement's last word in its agent session: where a stopped run got to, or what a finished one stored (questions,
+ * hand-back or the pushed change). A failure is said by the worker once it is final, not on each retried attempt.
+ */
+const answerInPanel = async (ctx: RunContext, deps: PipelineDeps, session: LinearSession, outcome: JobOutcome): Promise<void> => {
+  if (ctx.dryRun) return;
+  const job = deps.stores.jobs.get(ctx.jobId);
+  if (outcome.status === "failed" && outcome.error === STOPPED_JOB_ERROR) {
+    const pushed = job !== null && job.pushedAt !== null ? job.commitSha : null;
+    await session.finish(stoppedResponse(session.lastThought(), pushed));
+    return;
+  }
+  if (outcome.status !== "succeeded") return;
+  const content = implementFinish(job?.implementResult ?? null);
+  if (content !== null) await session.finish(content);
+};
+
+/** Prepare, execute (in-process or in a run pod), finish, and say how it went in the ticket's agent session. */
+export const runImplement = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
+  const panel = { session: ctx.dryRun ? NO_SESSION : linearSessionFor(deps, ctx.issueId) };
+  const outcome = redactOutcome(await executeImplement(ctx, deps, panel).catch(crashed), deps.redactor);
+  await answerInPanel(ctx, deps, panel.session, outcome);
+  return outcome;
+};
 
 /**
  * Retry path: settles a push recorded but not marked (landed on the remote → pushed; otherwise hand back), starts the
  * loop if a crash stopped it, then labels. Never runs the brain and never pushes: only the agent's push tool pushes.
  */
 export const publishImplementOnly = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
+  const outcome = await republish(ctx, deps);
+  await answerInPanel(ctx, deps, linearSessionFor(deps, ctx.issueId), outcome);
+  return outcome;
+};
+
+const republish = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   const configured = settingsOf(deps);
   if (configured === null) return notConfigured;
   const job = deps.stores.jobs.get(ctx.jobId);

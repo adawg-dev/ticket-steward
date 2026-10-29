@@ -10,7 +10,7 @@ import { renderImplementPrompt, type ImplementPromptVars } from "../../src/imple
 const implementVars: ImplementPromptVars = {
   identifier: "API-1", teamKey: "API", teamName: "API", ticket: "# API-1: Adapter drops the last chunk", workspacePath: "/work/1-1",
   baseBranch: "dev", sha: "a".repeat(40), artifactsDir: "/jobs/1/artifacts", stewardPort: 4100, hasBrief: false, brief: "",
-  branchTypes: "feature, fix, chore, refactor", hasChecks: false, checks: "",
+  branchTypes: "feature, fix, chore, refactor", hasChecks: false, checks: "", reply: "",
 };
 const fixInput: FixPromptInput = {
   identifier: "ENG-1", round: 2, maxRounds: 5, score: 3, summary: "Confidence Score: 3/5", findings: [], ciFailures: [], personCommits: [],

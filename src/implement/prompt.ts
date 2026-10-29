@@ -18,6 +18,8 @@ export interface ImplementPromptVars {
   hasChecks: boolean;
   /** implement.checks with `{{baseSha}}` filled in, one per line as a Markdown list. */
   checks: string;
+  /** A person's answer to the questions an earlier run asked (`{{#reply}}`); empty on a fresh implement. */
+  reply: string;
 }
 
 /** Fill the implement prompt template, with the repo's own section (`readRepoPartial`) as `{{> repo}}`. */

@@ -4,7 +4,9 @@ import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { CodeHost } from "../codehost/types.js";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
+import type { Settings } from "../settings/schema.js";
 import type { Stores } from "../store/index.js";
+import type { LinearAgentApi } from "../tracker/linear/agent.js";
 import type { Tracker } from "../tracker/types.js";
 import type { RunChannels } from "../run/channel.js";
 import type { RunExecutor } from "../run/executor.js";
@@ -38,4 +40,8 @@ export interface PipelineDeps {
   executor?: RunExecutor;
   /** The open runs' event and steering channels, shared by the executors and whatever steers them (the dispatcher's). */
   channels?: RunChannels;
+  /** The dispatcher's Linear agent API: runs show their work in the ticket's agent session. Absent, nothing is posted. */
+  linear?: LinearAgentApi;
+  /** The runtime settings, read on each use; absent, their defaults apply. */
+  settings?: { get(): Settings };
 }

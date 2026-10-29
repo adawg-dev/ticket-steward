@@ -20,6 +20,7 @@ import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr, fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
+import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
@@ -501,6 +502,78 @@ describe("runChat through an executor", () => {
 
     expect(outcome).toEqual({ status: "succeeded", warning: "the agent's run failed: No conversation found with session ID: session-1" });
     expect(gitlab.replies[0]?.body).toBe(`The agent's session could not be resumed.\n\n${CHAT_MARKER}`);
+  });
+});
+
+describe("runChat in the ticket's agent session", () => {
+  const thoughtLine = (text: string): string => JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  /** An executor whose brain says `thought`, then reports `patch`. */
+  const thinking = (thought: string, patch: Partial<RunReport> = {}): RunExecutor => ({
+    execute: async (spec, _signal, hooks) => {
+      hooks?.onLine?.(thoughtLine(thought));
+      const report: RunReport = {
+        runId: spec.runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-x", output: { reply: "Answer." }, usage: null, ...patch,
+      };
+      return { report, work: { runId: spec.runId, unpushed: "", pushedSha: null } };
+    },
+  });
+  const claimLinear = (message = "can you keep the retry?"): RunContext => {
+    const trigger: TriggerEvent = { kind: "linear", run: "chat", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "lin-1", message, author: "Ada" };
+    const jobId = stores.jobs.enqueue(trigger);
+    stores.jobs.claimById(jobId);
+    const attempt = stores.attempts.start(jobId);
+    return { jobId, attempt: attempt.number, issueId: "issue-1", identifier: "API-1", teamKey: "API", trigger, dryRun: false };
+  };
+  let linear: RecordingLinear;
+
+  beforeEach(() => {
+    linear = new RecordingLinear();
+    stores.agentSessions.record("lin-1", "issue-1", "API-1");
+  });
+
+  it("answers a Linear prompt by resuming the session, its lines and reply in the panel and nothing on the MR", async () => {
+    const loopId = createLoop();
+    const specs: RunSpec[] = [];
+    const executor = thinking("Looking at the retry.", { output: { reply: "Kept it." } });
+    const recording: RunExecutor = {
+      execute: (spec, signal, hooks) => {
+        specs.push(spec);
+        return executor.execute(spec, signal, hooks);
+      },
+    };
+
+    expect(await runChat(claimLinear(), { ...makeDeps(new FakeBrain()), linear, executor: recording })).toEqual({ status: "succeeded" });
+
+    expect(specs[0]).toMatchObject({ resumeSessionId: "session-1" });
+    expect(specs[0]?.prompt).toContain("Ada wrote to you in the ticket's Linear agent session");
+    expect(specs[0]?.prompt).toContain("can you keep the retry?");
+    expect(specs[0]?.prompt).toContain(gitlab.mr.webUrl);
+    expect(stores.loops.get(loopId)?.sessionId).toBe("session-x");
+    expect(linear.activities().map((call) => [call.sessionId, call.content])).toEqual([
+      ["lin-1", { type: "thought", body: "Looking at the retry." }],
+      ["lin-1", { type: "response", body: "Kept it." }],
+    ]);
+    expect(gitlab.replies).toEqual([]);
+  });
+
+  it("answers a Linear prompt on a ticket with no brain session in the panel", async () => {
+    const outcome = await runChat(claimLinear(), { ...makeDeps(new FakeBrain()), linear });
+    expect(outcome).toEqual({ status: "succeeded", warning: "the ticket has no agent session" });
+    expect(linear.activities().map((call) => call.content.type)).toEqual(["response"]);
+  });
+
+  it("puts an MR note's reply in the ticket's agent session too, once it is on the MR", async () => {
+    const loopId = createLoop();
+    expect(await runChat(claim(loopId), { ...makeDeps(new FakeBrain()), linear, executor: thinking("Checking.", { output: { reply: "On purpose." } }) })).toEqual({ status: "succeeded" });
+    expect(gitlab.replies.map((reply) => reply.body)).toEqual([`On purpose.\n\n${CHAT_MARKER}`]);
+    expect(linear.activities().at(-1)?.content).toEqual({ type: "response", body: "On purpose." });
+  });
+
+  it("says where a stopped chat got to", async () => {
+    createLoop();
+    const stopped = thinking("Reading the retry code.", { ok: false, error: "stopped", stopped: true, output: null });
+    expect(await runChat(claimLinear(), { ...makeDeps(new FakeBrain()), linear, executor: stopped })).toEqual({ status: "failed", error: STOPPED_JOB_ERROR, retryable: false });
+    expect(linear.activities().at(-1)?.content).toEqual({ type: "response", body: "Stopped. Where I got to: Reading the retry code." });
   });
 });
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import type { StewardConfig } from "../../src/config/schema.js";
+import { RunChannels } from "../../src/run/channel.js";
 import { buildServer } from "../../src/server/app.js";
 import { seedSettings } from "../../src/settings/schema.js";
 import { openStores, type Stores } from "../../src/store/index.js";
@@ -215,6 +216,43 @@ describe("buildServer", () => {
       const response = await post("Issue", "delivery-1", update);
 
       expect(response.json()).toEqual({ ok: true, action: "unassign" });
+    });
+
+    it("posts the first thought after the reply, while the implement is still queued", async () => {
+      await post("AgentSessionEvent", "delivery-1", sessionCreated());
+
+      expect(linear.activities[0]).toEqual({ sessionId: "session-1", content: { type: "thought", body: "Picked this up; reading the ticket" } });
+      expect(stores.jobs.list({ limit: 10 })[0]?.status).toBe("queued");
+    });
+
+    it("steers the ticket's open run with a prompt, naming its author", async () => {
+      const channels = new RunChannels();
+      await app.close();
+      app = buildServer({ ...serverDeps(), channels });
+      const jobId = stores.jobs.enqueue({ kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-1", message: null });
+      stores.jobs.claimById(jobId);
+      channels.open(`${jobId}-1`, () => undefined, "issue-1");
+      const prompt = JSON.stringify({
+        action: "prompted",
+        type: "AgentSessionEvent",
+        appUserId: APP_USER,
+        agentSession: { id: "session-1", issue: { id: "issue-1", identifier: "API-1", team: { key: "API" } } },
+        agentActivity: { content: { body: "use v2" }, userId: "user-9", user: { name: "Ada" } },
+      });
+
+      const response = await post("AgentSessionEvent", "delivery-1", prompt);
+
+      expect(response.json()).toEqual({ ok: true, action: "steer" });
+      expect(await channels.next(`${jobId}-1`, 0)).toEqual([{ type: "steer", message: "Message from Ada in Linear while you were working:\nuse v2" }]);
+    });
+
+    it("logs a permission change and acts on nothing", async () => {
+      const change = JSON.stringify({ type: "PermissionChange", action: "teamAccessChanged", addedTeamIds: [], removedTeamIds: ["team-9"], organizationId: "org-1" });
+
+      const response = await post("PermissionChange", "delivery-1", change);
+
+      expect(response.json()).toEqual({ ok: true, action: "logged" });
+      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
     it("answers 503, recording nothing, while the app's own user cannot be read", async () => {

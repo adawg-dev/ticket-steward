@@ -2,6 +2,8 @@ import { renderMedia, type MediaUploads } from "../codehost/media.js";
 import type { PipelineDeps } from "../core/deps.js";
 import type { JobOutcome } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
+import { linearSessionFor } from "../linear/session.js";
+import { STOPPED_JOB_ERROR } from "../run/execute.js";
 import type { Loop, LoopPatch } from "../store/loops.js";
 import type { FixResult } from "./result.js";
 import type { GreptileSummary } from "./summary.js";
@@ -33,8 +35,11 @@ export const noteOnce = async (deps: Pick<PipelineDeps, "gitlab" | "redactor">, 
 
 type Step = { what: string; run: () => Promise<void> };
 
-/** Runs each publish step; the loop state is written only once every step succeeded, so a retry publishes again. */
-const publish = async (deps: PipelineDeps, loop: Loop, steps: Step[], patch: LoopPatch, done: JobOutcome): Promise<JobOutcome> => {
+/**
+ * Runs each publish step; the loop state is written only once every step succeeded, so a retry publishes again. Then
+ * the ticket's agent session hears `panel`, if any (best effort: a failed post is logged, never retried).
+ */
+const publish = async (deps: PipelineDeps, loop: Loop, steps: Step[], patch: LoopPatch, done: JobOutcome, panel: string | null = null): Promise<JobOutcome> => {
   for (const step of steps) {
     try {
       await step.run();
@@ -43,6 +48,7 @@ const publish = async (deps: PipelineDeps, loop: Loop, steps: Step[], patch: Loo
     }
   }
   deps.stores.loops.update(loop.id, patch);
+  if (panel !== null) await linearSessionFor(deps, loop.issueId).finish({ type: "response", body: panel });
   return done;
 };
 
@@ -63,6 +69,7 @@ export const publishPassed = (deps: PipelineDeps, loop: Loop, summary: GreptileS
     ],
     { state: "passed" },
     { status: "succeeded" },
+    `Greptile scored ${summary.score}/5 after ${loop.round} fix rounds; the merge request is ready for a person's review.`,
   );
 };
 
@@ -84,6 +91,8 @@ export const publishHandback = (deps: PipelineDeps, loop: Loop, reason: string, 
     ],
     { state: "handed_back", handedBackAt: deps.now().toISOString() },
     { status: "succeeded", warning: `handed back: ${reason}` },
+    // A stopped run says where it got to itself.
+    reason === STOPPED_JOB_ERROR ? null : `I handed the merge request back to a person: ${reason}.`,
   );
 };
 
@@ -96,6 +105,7 @@ export const publishStop = (deps: PipelineDeps, loop: Loop, reason: string, note
     note ? [{ what: "merge request note", run: () => noteOnce(deps, loop, LOOP_MARKER(loop.id, "stop"), text) }] : [],
     { state: "stopped" },
     { status: "succeeded", warning: `stopped: ${reason}` },
+    `I stopped working on the merge request: ${reason}.`,
   );
 };
 

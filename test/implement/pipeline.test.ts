@@ -23,6 +23,7 @@ import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
+import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
@@ -611,6 +612,74 @@ describe("runImplement through an executor", () => {
     const ctx = claim();
 
     expect(await runImplement(ctx, { ...makeDeps(undefined), executor })).toEqual({ status: "failed", error: "cannot create the run's Job", retryable: true });
+  });
+});
+
+describe("runImplement in the ticket's agent session", () => {
+  const thoughtLine = (text: string): string => JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  const reportOf = (spec: RunSpec, patch: Partial<RunReport> = {}): RunReport => ({
+    runId: spec.runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-x", output: implemented, usage: { inputTokens: 1, outputTokens: 1 }, ...patch,
+  });
+  /** An executor whose brain says `thought`, then reports `patch`; the specs it was given are kept. */
+  const thinking = (thought: string, patch: Partial<RunReport>, specs: RunSpec[] = []): RunExecutor => ({
+    execute: async (spec, _signal, hooks) => {
+      specs.push(spec);
+      hooks?.onLine?.(thoughtLine(thought));
+      return { report: reportOf(spec, patch), work: { runId: spec.runId, unpushed: "", pushedSha: null } };
+    },
+  });
+  const questions = { ...implemented, outcome: "needs_info" as const, questions: ["Which adapter, S3 or GCS?"] };
+  let linear: RecordingLinear;
+
+  beforeEach(() => {
+    linear = new RecordingLinear();
+    stores.agentSessions.record("session-1", "issue-1", "API-1");
+  });
+
+  it("shows the brain's lines in the panel, then asks its questions as an elicitation", async () => {
+    const ctx = claim();
+    const outcome = await runImplement(ctx, { ...makeDeps(undefined), linear, executor: thinking("Reading the adapter.", { output: questions, sessionId: "session-q" }) });
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: the ticket needs more information" });
+    expect(linear.activities().map((call) => [call.sessionId, call.content.type])).toEqual([["session-1", "thought"], ["session-1", "elicitation"]]);
+    expect(linear.activities()[1]?.content).toMatchObject({ body: expect.stringContaining("- Which adapter, S3 or GCS?") });
+  });
+
+  it("continues the implement that asked, in its session and worktree, with the person's reply in the prompt", async () => {
+    const asked = claim();
+    await runImplement(asked, { ...makeDeps(undefined), linear, executor: thinking("Reading.", { output: questions, sessionId: "session-q" }) });
+    stores.jobs.finish(asked.jobId, { status: "succeeded" });
+
+    const specs: RunSpec[] = [];
+    const answered = claim({ ...trigger, message: "The S3 adapter.", author: "Ada" });
+    await runImplement(answered, { ...makeDeps(undefined), linear, executor: thinking("Implementing.", { sessionId: "session-q" }, specs) });
+
+    expect(specs[0]).toMatchObject({ resumeSessionId: "session-q", worktreePath: join(repo.dataDir, "work", `${asked.jobId}-1`) });
+    expect(specs[0]?.prompt).toContain("The S3 adapter.");
+    expect(stores.jobs.get(answered.jobId)?.worktreeName).toBe(`${asked.jobId}-1`);
+  });
+
+  it("says where a stopped run got to, once, as a response", async () => {
+    const ctx = claim();
+    const outcome = await runImplement(ctx, { ...makeDeps(undefined), linear, executor: thinking("Halfway through the adapter.", { ok: false, error: "stopped", stopped: true, output: null }) });
+
+    expect(outcome).toEqual({ status: "failed", error: STOPPED_JOB_ERROR, retryable: false });
+    const finals = linear.activities().filter((call) => call.content.type !== "thought");
+    expect(finals.map((call) => call.content)).toEqual([{ type: "response", body: "Stopped. Where I got to: Halfway through the adapter." }]);
+  });
+
+  it("answers a pushed change with its summary", async () => {
+    const brain = agentBrain(implemented);
+    const ctx = claim();
+    expect(await runImplement(ctx, { ...depsFor(brain), linear })).toEqual({ status: "succeeded" });
+    expect(linear.activities().at(-1)?.content).toEqual({ type: "response", body: "Flush the buffer before closing the stream.\n\n**Checks I ran**\n- tsc: ok" });
+  });
+
+  it("makes no Linear call for a ticket with no agent session", async () => {
+    const ctx = claim({ ...trigger, issueId: "issue-2", identifier: "API-2" });
+    tracker.addIssue({ ...issue, id: "issue-2", identifier: "API-2" });
+    await runImplement(ctx, { ...makeDeps(undefined), linear, executor: thinking("Reading.", { output: questions }) });
+    expect(linear.calls).toEqual([]);
   });
 });
 

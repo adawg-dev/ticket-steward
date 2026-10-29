@@ -12,6 +12,7 @@ import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, 
 import { runIdOf, settingsOf, stewardChecks } from "../implement/pipeline.js";
 import type { PushTarget } from "../push/target.js";
 import { PERSON_COMMITS_MARKER, setupTailOf, STOPPED_JOB_ERROR } from "../run/execute.js";
+import { linearSessionFor, NO_SESSION, stoppedResponse, type LinearSession } from "../linear/session.js";
 import { localExecutor } from "../run/local.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store/index.js";
@@ -345,14 +346,15 @@ const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: 
   return handleResult(fix, work, facts, validated.result, findings.length, mr, attach);
 };
 
-/** A fresh round: prepare, execute (in-process or in a run pod), finish. */
-const runRound = async (fix: Fix, observed: Observed): Promise<JobOutcome> => {
+/** A fresh round: prepare, execute (in-process or in a run pod) with its lines in the agent panel, finish. */
+const runRound = async (fix: Fix, observed: Observed, panel: { session: LinearSession }): Promise<JobOutcome> => {
   const prepared = await prepareFix(fix, observed);
   if ("outcome" in prepared) return prepared.outcome;
   const { ctx, deps } = fix;
+  panel.session = linearSessionFor(deps, ctx.issueId, { workspacePath: prepared.spec.worktreePath });
   let executed: { report: RunReport; work: WorkReport };
   try {
-    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal);
+    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal, panel.session.hooks);
   } catch (err) {
     if (err instanceof SetupError) patchAttempt(ctx, deps, { setupTail: err.tail });
     return prepareFailed(deps, err);
@@ -360,7 +362,7 @@ const runRound = async (fix: Fix, observed: Observed): Promise<JobOutcome> => {
   return finishFix(fix, prepared, executed, observed.mr);
 };
 
-const executeFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
+const executeFix = async (ctx: RunContext, deps: PipelineDeps, panel: { session: LinearSession }): Promise<JobOutcome> => {
   if (ctx.trigger.kind !== "loop") return fail("fix needs a loop trigger");
   const configured = settingsOf(deps);
   const greptile = deps.config.greptile;
@@ -391,8 +393,29 @@ const executeFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutco
   // A rerun after the agent pushed (the attempt was interrupted later) never runs the brain again over its own push.
   const earlier = ctx.resume === undefined ? deps.stores.pushes.latest(ctx.jobId) : null;
   if (earlier !== null) return publishHandback(deps, reload(fix), "an earlier attempt stopped after the agent pushed", earlier.sha);
-  return runRound(fix, observed);
+  return runRound(fix, observed, panel);
+};
+
+/**
+ * The round's word in the ticket's agent session once it is published: its summary, or where a stopped run got to. A
+ * hand-back says why itself (`publishHandback`).
+ */
+const answerInPanel = async (ctx: RunContext, deps: PipelineDeps, session: LinearSession, outcome: JobOutcome): Promise<void> => {
+  if (outcome.status !== "succeeded") return;
+  const stored = deps.stores.jobs.get(ctx.jobId)?.fixResult ?? null;
+  if (stored === null) return;
+  const panel = session === NO_SESSION ? linearSessionFor(deps, ctx.issueId) : session;
+  if (stored.handback?.reason === STOPPED_JOB_ERROR) {
+    await panel.finish(stoppedResponse(panel.lastThought(), deps.stores.pushes.latestPushed(ctx.jobId)?.sha ?? null));
+    return;
+  }
+  if (stored.handback === null && stored.result !== null) await panel.finish({ type: "response", body: `This review round: ${stored.result.summary.trim()}` });
 };
 
 /** The fix job: resumes the loop's brain session on the review's findings with the push tool, then replies and resolves, or hands back. */
-export const runFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => redactOutcome(await executeFix(ctx, deps).catch(crashed), deps.redactor);
+export const runFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
+  const panel = { session: NO_SESSION };
+  const outcome = redactOutcome(await executeFix(ctx, deps, panel).catch(crashed), deps.redactor);
+  await answerInPanel(ctx, deps, panel.session, outcome);
+  return outcome;
+};

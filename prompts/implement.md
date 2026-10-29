@@ -21,6 +21,16 @@ Nobody has triaged this ticket. Before changing anything, find the code involved
 If the ticket is too vague to implement responsibly (no clear expected behaviour, several plausible readings, or a product decision nobody has made), do not change any code. Return `outcome: "needs_info"` with specific questions for the reporter.
 {{/hasBrief}}
 
+{{#reply}}
+## Your questions were answered
+
+Earlier in this conversation you stopped to ask questions about this ticket. A person answered in Linear:
+
+{{reply}}
+
+Carry on from where you stopped and implement the ticket with this answer. If it still leaves the ticket unclear, return `outcome: "needs_info"` again with what is still open.
+
+{{/reply}}
 ## Codebase graph
 
 Orbit indexed this checkout before you started. To find code, prefer `orbit grep '<words>'` (it ignores case, `_` and `-`; `a|b` matches either) and `orbit context <path:start-end or name>` in the shell over grep: they return definitions with their callers and the tests that cover them. For merge requests, issues, pipelines, job logs and questions across GitLab, use the `orbit_context`, `orbit_query` and `orbit_schema` tools. Either may be unavailable; when one fails, fall back to plain search and `recent_changes` and do not retry it.

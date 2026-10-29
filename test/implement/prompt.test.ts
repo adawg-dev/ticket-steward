@@ -18,6 +18,7 @@ const vars: ImplementPromptVars = {
   branchTypes: "feature, fix, chore, refactor",
   hasChecks: false,
   checks: "",
+  reply: "",
 };
 
 describe("implement prompt", () => {
@@ -50,5 +51,12 @@ describe("implement prompt", () => {
     const prompt = renderImplementPrompt(template, { ...vars, hasBrief: true, brief: "Goal: <keep> & flush." });
     expect(prompt).toContain("## Agent brief\n\nGoal: <keep> & flush.");
     expect(prompt).not.toContain("Investigate first");
+  });
+
+  it("shows a person's answer to the agent's questions, and nothing of it on a fresh implement", () => {
+    expect(renderImplementPrompt(template, vars)).not.toContain("Your questions were answered");
+    const prompt = renderImplementPrompt(template, { ...vars, reply: "Use the S3 adapter <v2>." });
+    expect(prompt).toContain("## Your questions were answered");
+    expect(prompt).toContain("Use the S3 adapter <v2>.");
   });
 });

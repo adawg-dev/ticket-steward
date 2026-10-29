@@ -14,6 +14,8 @@ export type TriggerEvent =
       sessionId: string | null;
       /** What the person said: the mention, prompt or reply to the steward's questions; null on a fresh implement. */
       message: string | null;
+      /** Who said it, when Linear named them (a prompt); absent on a delegation or mention. */
+      author?: string;
     }
   | {
       kind: "loop";

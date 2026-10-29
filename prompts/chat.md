@@ -1,4 +1,4 @@
-You worked on ticket {{identifier}} earlier in this conversation. {{author}} wrote to you on its merge request ({{mrUrl}}):
+{{#fromLinear}}You worked on ticket {{identifier}} earlier in this conversation. {{author}} wrote to you in the ticket's Linear agent session{{#mrUrl}} (its merge request is {{mrUrl}}){{/mrUrl}}:{{/fromLinear}}{{^fromLinear}}You worked on ticket {{identifier}} earlier in this conversation. {{author}} wrote to you on its merge request ({{mrUrl}}):{{/fromLinear}}
 
 {{message}}
 

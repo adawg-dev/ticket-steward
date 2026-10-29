@@ -19,11 +19,18 @@ import { logger } from "../log.js";
 import type { Worktree } from "../workspace/worktree.js";
 import { CHAT_MARKER, NO_SESSION_REPLY, validateChatResult, type StoredChat } from "./result.js";
 import { latestSession, type AgentSession } from "./session.js";
+import { linearSessionFor, stoppedResponse, type LinearSession } from "../linear/session.js";
 
 /** The SDK's errors for a session it cannot load or resume. */
 const SESSION_ERROR = /no conversation found|resume/i;
 
-type ChatTrigger = Extract<TriggerEvent, { kind: "chat" }>;
+type MrTrigger = Extract<TriggerEvent, { kind: "chat" }>;
+type LinearChatTrigger = Extract<TriggerEvent, { kind: "linear" }>;
+type ChatTrigger = MrTrigger | LinearChatTrigger;
+
+/** Who wrote, and what, whichever surface the chat came from. */
+const requestOf = (trigger: ChatTrigger): { author: string; message: string } =>
+  trigger.kind === "chat" ? { author: trigger.author, message: trigger.message } : { author: trigger.author ?? "Someone", message: trigger.message ?? "" };
 
 const fail = (error: string): JobOutcome => ({ status: "failed", error, retryable: false });
 
@@ -31,7 +38,10 @@ export interface ChatPromptInput {
   identifier: string;
   author: string;
   message: string;
+  /** The ticket's merge request; empty when a Linear chat's ticket has none yet. */
   mrUrl: string;
+  /** The person wrote in Linear's agent panel, not on the merge request. */
+  fromLinear?: boolean;
   workspacePath: string;
   headSha: string;
   stewardPort: number;
@@ -48,24 +58,50 @@ export interface ChatPromptInput {
 
 /** Fill the chat prompt template (mustache, unescaped, like the other prompts), with the repo's own section as `{{> repo}}`. */
 export const renderChatPrompt = (template: string, input: ChatPromptInput, repo = ""): string =>
-  renderPrompt(template, { ...input, hasDecisions: input.decisions.length > 0 }, repo);
+  renderPrompt(template, { ...input, fromLinear: input.fromLinear ?? false, hasDecisions: input.decisions.length > 0 }, repo);
 
-/** Posts the stored reply with the marker, in the note's discussion (or on the MR when GitLab gave no discussion). */
-const postReply = async (deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, stored: StoredChat): Promise<JobOutcome> => {
-  const body = deps.redactor.redact(`${stored.reply}\n\n${CHAT_MARKER}`);
-  try {
-    if (trigger.discussionId === null) await gitlab.createNote(trigger.projectId, trigger.mrIid, body);
-    else await gitlab.replyToDiscussion(trigger.projectId, trigger.mrIid, trigger.discussionId, body);
-  } catch (err) {
-    return { status: "publish_failed", error: `chat reply: ${errorMessage(err)}` };
+/** Where a chat answers: the note's discussion on the MR (and the ticket's agent session), or the agent session alone. */
+interface Answer {
+  trigger: ChatTrigger;
+  gitlab: GitLabMrApi | undefined;
+  panel: LinearSession;
+}
+
+/**
+ * Posts the stored reply: on the MR with the marker, in the note's discussion (or on the MR when GitLab gave no
+ * discussion), for an MR note; then, once that is posted, as a response in the ticket's agent session. A Linear chat's
+ * reply goes to the agent session only.
+ */
+const postReply = async (deps: PipelineDeps, answer: Answer, stored: StoredChat): Promise<JobOutcome> => {
+  const { trigger, gitlab } = answer;
+  if (trigger.kind === "chat") {
+    if (gitlab === undefined) return { status: "publish_failed", error: "chat reply: no GitLab client" };
+    const body = deps.redactor.redact(`${stored.reply}\n\n${CHAT_MARKER}`);
+    try {
+      if (trigger.discussionId === null) await gitlab.createNote(trigger.projectId, trigger.mrIid, body);
+      else await gitlab.replyToDiscussion(trigger.projectId, trigger.mrIid, trigger.discussionId, body);
+    } catch (err) {
+      return { status: "publish_failed", error: `chat reply: ${errorMessage(err)}` };
+    }
   }
+  await answer.panel.finish({ type: "response", body: stored.reply });
   return stored.warning === null ? { status: "succeeded" } : { status: "succeeded", warning: stored.warning };
 };
 
 /** Stores the reply before it is posted, then posts it; a retry of the job posts the stored one. */
-const decide = (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, stored: StoredChat): Promise<JobOutcome> => {
+const decide = (ctx: RunContext, deps: PipelineDeps, answer: Answer, stored: StoredChat): Promise<JobOutcome> => {
   deps.stores.jobs.saveChatResult(ctx.jobId, stored);
-  return postReply(deps, gitlab, trigger, stored);
+  return postReply(deps, answer, stored);
+};
+
+/** The ticket's MR for the prompt: the note's, or for a Linear chat the session's loop's, if it found one. */
+const mrUrlOf = async (deps: PipelineDeps, answer: Answer, session: AgentSession): Promise<string> => {
+  const { trigger, gitlab } = answer;
+  if (trigger.kind === "chat") {
+    if (gitlab === undefined) throw new Error("no GitLab client");
+    return (await gitlab.getMergeRequest(trigger.projectId, trigger.mrIid)).webUrl;
+  }
+  return session.loopId === null ? "" : (deps.stores.loops.get(session.loopId)?.mrUrl ?? "");
 };
 
 /** The original base the session's branch grew from: the loop's, else the implement job's. */
@@ -120,7 +156,7 @@ const withLeftover = (reply: string, leftover: string): string =>
  * The prepare half: the MR, the push target and the prompt, and a spec that resumes the session in its worktree, on the
  * pushed branch head (else the implement job's base). Either a spec to execute, or the job's outcome.
  */
-const prepareChat = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, session: AgentSession): Promise<{ spec: RunSpec } | { outcome: JobOutcome }> => {
+const prepareChat = async (ctx: RunContext, deps: PipelineDeps, answer: Answer, session: AgentSession): Promise<{ spec: RunSpec } | { outcome: JobOutcome }> => {
   if (ctx.resume !== undefined) return { spec: ctx.resume };
   const port = jobPort(deps);
   const paths = jobPaths(ctx, deps, { worktreeName: session.worktreeName });
@@ -132,12 +168,13 @@ const prepareChat = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMr
   const checks = push === undefined || settings === undefined ? [] : stewardChecks(settings.checks, push.baseSha);
   let prompt: string;
   try {
-    const mr = await gitlab.getMergeRequest(trigger.projectId, trigger.mrIid);
+    const { author, message } = requestOf(answer.trigger);
     prompt = renderChatPrompt(await readFile(chatPromptPath, "utf8"), {
       identifier: ctx.identifier,
-      author: trigger.author,
-      message: trigger.message,
-      mrUrl: mr.webUrl,
+      author,
+      message,
+      mrUrl: await mrUrlOf(deps, answer, session),
+      fromLinear: answer.trigger.kind === "linear",
       workspacePath: worktreePath,
       headSha: session.headSha,
       stewardPort: port,
@@ -242,8 +279,7 @@ const withMedia = (reply: string, media: string[]): string => (media.length === 
 const finishChat = async (
   ctx: RunContext,
   deps: PipelineDeps,
-  gitlab: GitLabMrApi,
-  trigger: ChatTrigger,
+  answer: Answer,
   session: AgentSession,
   spec: RunSpec,
   executed: { report: RunReport; work: WorkReport },
@@ -262,49 +298,67 @@ const finishChat = async (
     else deps.stores.jobs.recordSession(session.jobId, report.sessionId);
     deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
   }
-  // A person stopped it from Linear: nothing to reply, and the next message resumes the recorded session.
-  if (report.stopped) return { status: "failed", error: STOPPED_JOB_ERROR, retryable: false };
+  // A person stopped it from Linear: no reply but where it got to, and the next message resumes the recorded session.
+  if (report.stopped) {
+    await answer.panel.finish(stoppedResponse(answer.panel.lastThought(), work.pushedSha));
+    return { status: "failed", error: STOPPED_JOB_ERROR, retryable: false };
+  }
   const leftover = deps.redactor.redact(work.unpushed);
   if (!report.ok) {
     const error = report.error ?? "brain run failed";
     const reply = SESSION_ERROR.test(error) ? "The agent's session could not be resumed." : "The agent could not answer: its run failed.";
-    return decide(ctx, deps, gitlab, trigger, { reply: withLeftover(reply, leftover), warning: `the agent's run failed: ${deps.redactor.redact(error)}` });
+    return decide(ctx, deps, answer, { reply: withLeftover(reply, leftover), warning: `the agent's run failed: ${deps.redactor.redact(error)}` });
   }
   const validated = validateChatResult(report.output);
   if (!validated.ok) {
-    return decide(ctx, deps, gitlab, trigger, { reply: withLeftover("The agent's answer could not be read.", leftover), warning: `the agent's result was invalid: ${validated.error}` });
+    return decide(ctx, deps, answer, { reply: withLeftover("The agent's answer could not be read.", leftover), warning: `the agent's result was invalid: ${validated.error}` });
   }
   recordDecisions(deps, session, validated.result.decisions);
-  const media = renderMedia(await attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab, project: trigger.projectId }));
+  const media = renderMedia(await attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab: answer.gitlab, project: mediaProject(deps, answer, session) }));
   const reply = withLeftover(withMedia(validated.result.reply, media), leftover);
-  return decide(ctx, deps, gitlab, trigger, { reply, warning: leftover === "" ? null : "the agent left unpushed work" });
+  return decide(ctx, deps, answer, { reply, warning: leftover === "" ? null : "the agent left unpushed work" });
 };
 
-/** The brain run: prepare, execute (in-process or in a run pod), finish. */
-const converse = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, session: AgentSession): Promise<JobOutcome> => {
-  const prepared = await prepareChat(ctx, deps, gitlab, trigger, session);
+/** Where the run's media is attached: the note's project, else the loop's MR project, else the configured one. */
+const mediaProject = (deps: PipelineDeps, answer: Answer, session: AgentSession): number | string | null => {
+  if (answer.trigger.kind === "chat") return answer.trigger.projectId;
+  const loopProject = session.loopId === null ? null : (deps.stores.loops.get(session.loopId)?.projectId ?? null);
+  return loopProject ?? (deps.config.codehost.kind === "gitlab" ? deps.config.codehost.project : null);
+};
+
+/** The brain run: prepare, execute (in-process or in a run pod) with its lines in the agent panel, finish. */
+const converse = async (ctx: RunContext, deps: PipelineDeps, answer: Answer, session: AgentSession): Promise<JobOutcome> => {
+  const prepared = await prepareChat(ctx, deps, answer, session);
   if ("outcome" in prepared) return prepared.outcome;
+  const live: Answer = { ...answer, panel: linearSessionFor(deps, ctx.issueId, { workspacePath: prepared.spec.worktreePath }) };
   let executed: { report: RunReport; work: WorkReport };
   try {
-    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal);
+    executed = await (deps.executor ?? localExecutor(deps)).execute(prepared.spec, deps.signal, live.panel.hooks);
   } catch (err) {
     if (err instanceof SetupError) patchAttempt(ctx, deps, { setupTail: err.tail });
     return prepareFailed(deps, err);
   }
-  return finishChat(ctx, deps, gitlab, trigger, session, prepared.spec, executed);
+  return finishChat(ctx, deps, live, session, prepared.spec, executed);
 };
 
+/** A Linear chat on a ticket with no brain session to resume. */
+export const NO_LINEAR_SESSION_REPLY = "I have no session on this ticket to continue. Assign me to the ticket to start work.";
+
 const executeChat = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
-  if (ctx.trigger.kind !== "chat") return fail("chat needs a chat trigger");
   const trigger = ctx.trigger;
+  if (trigger.kind !== "chat" && !(trigger.kind === "linear" && trigger.run === "chat")) return fail("chat needs a chat trigger");
   const gitlab = deps.gitlab;
-  if (gitlab === undefined || deps.config.codehost.kind !== "gitlab") return fail("chat needs a GitLab code host and GITLAB_TOKEN");
+  if (trigger.kind === "chat" && (gitlab === undefined || deps.config.codehost.kind !== "gitlab")) return fail("chat needs a GitLab code host and GITLAB_TOKEN");
+  const answer: Answer = { trigger, gitlab, panel: linearSessionFor(deps, ctx.issueId) };
   const stored = deps.stores.jobs.get(ctx.jobId)?.chatResult ?? null;
-  if (stored !== null) return postReply(deps, gitlab, trigger, stored);
+  if (stored !== null) return postReply(deps, answer, stored);
   if (deps.config.brain.kind !== "claude-code") return fail('chat requires brain.kind "claude-code"');
   const session = latestSession(deps.stores, ctx.issueId);
-  if (session === null) return decide(ctx, deps, gitlab, trigger, { reply: NO_SESSION_REPLY, warning: "the ticket has no agent session" });
-  return converse(ctx, deps, gitlab, trigger, session);
+  if (session === null) {
+    const reply = trigger.kind === "chat" ? NO_SESSION_REPLY : NO_LINEAR_SESSION_REPLY;
+    return decide(ctx, deps, answer, { reply, warning: "the ticket has no agent session" });
+  }
+  return converse(ctx, deps, answer, session);
 };
 
 /**

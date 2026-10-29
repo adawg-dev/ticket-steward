@@ -16,11 +16,13 @@ import { SlotClient } from "../../src/workspace/slots.js";
 import type { publishImplementOnly, runImplement } from "../../src/implement/pipeline.js";
 import { startWorker, type WorkerDeps, type WorkerHandle } from "../../src/worker/loop.js";
 import type { ResourceSample } from "../../src/worker/resources.js";
+import { STOPPED_JOB_ERROR } from "../../src/run/execute.js";
 import type { RunSpec } from "../../src/run/protocol.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
+import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { podSpecFor, RUNTIME } from "../k8s/helpers.js";
 
@@ -565,6 +567,31 @@ describe("startWorker", () => {
 
     expect(runImplementMock).toHaveBeenCalledTimes(1);
     expect(stores.jobs.get(jobId)?.attempts).toBe(1);
+  });
+
+  it("says in the ticket's agent session when a run failed for good, once, and not on the attempts it retried", async () => {
+    const linear = new RecordingLinear();
+    stores.agentSessions.record("session-1", "issue-1", "API-1");
+    runImplementMock.mockResolvedValueOnce(RETRYABLE).mockResolvedValue({ status: "failed", error: "invalid output\nraw tail", retryable: false });
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    start({ linear });
+
+    await waitForStatus(jobId, "failed");
+    await vi.waitFor(() => {
+      expect(linear.activities().map((call) => call.content)).toEqual([{ type: "error", body: "The run failed: invalid output" }]);
+    });
+  });
+
+  it("posts no error for a run a person stopped", async () => {
+    const linear = new RecordingLinear();
+    stores.agentSessions.record("session-1", "issue-1", "API-1");
+    runImplementMock.mockResolvedValue({ status: "failed", error: STOPPED_JOB_ERROR, retryable: false });
+    const jobId = stores.jobs.enqueue(createdTrigger);
+    start({ linear });
+
+    await waitForStatus(jobId, "failed");
+    await sleep(20);
+    expect(linear.calls).toEqual([]);
   });
 
   it("resumes at publish for a job whose result is stored after a publish failure", async () => {

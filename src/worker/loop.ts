@@ -12,7 +12,9 @@ import { runFix } from "../greptile/fix.js";
 import { runRestart } from "../greptile/start.js";
 import { handBackStranded } from "../greptile/stranded.js";
 import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
+import { failureContent, linearSessionFor } from "../linear/session.js";
 import { logger } from "../log.js";
+import { STOPPED_JOB_ERROR } from "../run/execute.js";
 import type { RunSpec } from "../run/protocol.js";
 import { RETIRED_KIND_ERROR, unreadableOutcome, type Attempt, type AttemptPatch, type Job } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
@@ -75,6 +77,9 @@ const DEFAULT_BACKOFF_MS = [60_000, 300_000];
 const DEFAULT_SWEEP_MS = 60 * 60 * 1000;
 const DEFAULT_STRANDED_MS = 5 * 60 * 1000;
 const DELIVERY_RETENTION_DAYS = 7;
+
+/** Jobs whose runs show in Linear's agent panel. */
+const PANEL_KINDS: readonly Job["kind"][] = ["implement", "fix", "chat"];
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -376,8 +381,18 @@ class Worker {
       return;
     }
     jobs.finish(job.id, outcome);
+    if (outcome.status !== "succeeded") await this.failInPanel(job, outcome.error);
     // A loop step that ended for good leaves its loop with nothing to move it: hand it back now, not at the next timer.
     if (outcome.status !== "succeeded" && (job.kind === "await_review" || job.kind === "fix")) void this.rescueStranded();
+  }
+
+  /**
+   * A run that failed for good says so in the ticket's agent session; a retried attempt does not, and a stop was already
+   * answered by the run ("Stopped. Where I got to: …").
+   */
+  private async failInPanel(job: Job, error: string): Promise<void> {
+    if (!PANEL_KINDS.includes(job.kind) || error === STOPPED_JOB_ERROR) return;
+    await linearSessionFor(this.deps, job.issueId).finish(failureContent(error));
   }
 
   private failBestEffort(job: Job, error: string): void {
