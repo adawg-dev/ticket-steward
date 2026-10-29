@@ -81,8 +81,8 @@ export const fail = (ctx: CliContext, message: string, code = 1): never => {
 
 export const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-/** Loads the config named by the root `--config` option, or the one in the current directory. */
-export const loadFromProgram = (program: Command, ctx: CliContext): Promise<LoadedConfig> => {
+/** Loads the config named by the root `--config` option, or the one in the current directory; `withoutSecrets` reads none. */
+export const loadFromProgram = (program: Command, ctx: CliContext, opts: { withoutSecrets?: boolean } = {}): Promise<LoadedConfig> => {
   const { config } = program.opts<{ config?: string }>();
-  return ctx.loadConfig(config === undefined ? {} : { configPath: config });
+  return ctx.loadConfig({ ...(config === undefined ? {} : { configPath: config }), ...(opts.withoutSecrets === true ? { withoutSecrets: true } : {}) });
 };

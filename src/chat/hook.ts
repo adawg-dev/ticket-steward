@@ -34,13 +34,23 @@ export const evaluateHook = (raw: string, scope: { workspacePath: string; artifa
 
 /**
  * `--settings` for the interactive CLI: the brain's tool rules as a PreToolUse command hook (`steward chat-hook`), and the
- * brain's transcript retention. The command carries paths only, never a secret. The CLI also loads the worktree's project
- * settings, which the agent can write; flag settings win only for the keys they set, so these pin the ones that would
- * turn the hook off (`disableAllHooks`) or skip the owner's prompts (bypass mode). A project allow rule still only skips
- * the prompt: the hook runs, and blocks, either way.
+ * brain's transcript retention. The command carries paths only, never a secret. `denyPaths` names the denied paths on the
+ * command itself (a run pod, whose agent container cannot load the config's secrets); without it the hook derives them
+ * from the config. The CLI also loads the worktree's project settings, which the agent can write; flag settings win only
+ * for the keys they set, so these pin the ones that would turn the hook off (`disableAllHooks`) or skip the owner's
+ * prompts (bypass mode). A project allow rule still only skips the prompt: the hook runs, and blocks, either way.
  */
-export const chatSettings = (p: { nodePath: string; binPath: string; configPath: string; workspacePath: string; artifactsDir: string; cleanupPeriodDays: number }): Record<string, unknown> => {
-  const command = [p.nodePath, p.binPath, "--config", p.configPath, "chat-hook", "--workspace", p.workspacePath, "--artifacts", p.artifactsDir].map(quote).join(" ");
+export const chatSettings = (p: {
+  nodePath: string;
+  binPath: string;
+  configPath: string;
+  workspacePath: string;
+  artifactsDir: string;
+  cleanupPeriodDays: number;
+  denyPaths?: string[];
+}): Record<string, unknown> => {
+  const deny = (p.denyPaths ?? []).flatMap((path) => ["--deny", path]);
+  const command = [p.nodePath, p.binPath, "--config", p.configPath, "chat-hook", "--workspace", p.workspacePath, "--artifacts", p.artifactsDir, ...deny].map(quote).join(" ");
   return {
     cleanupPeriodDays: p.cleanupPeriodDays,
     disableAllHooks: false,

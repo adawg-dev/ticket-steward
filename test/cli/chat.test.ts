@@ -316,6 +316,20 @@ describe("steward chat-hook", () => {
     expect(context.stderr()).toContain("the policy hook failed");
   });
 
+  it("with --deny (a run pod), denies those paths without loading the config, whose secrets it could not read", async () => {
+    const run = (tool: string, input: Record<string, unknown>) => {
+      const context = makeContext({ factories: { tracker: new FakeTracker([]), codehost: new FakeCodeHost(), brain: new FakeBrain() } });
+      context.ctx.stdin = Readable.from([hookInput(tool, input)]);
+      const missing = join(repo.dataDir, "missing.config.ts");
+      return { context, parse: () => buildProgram(context.ctx).parseAsync(["node", "steward", "--config", missing, "chat-hook", "--workspace", "/work/ticket-API-1", "--artifacts", "/a", "--deny", "/run/egress-ca"]) };
+    };
+
+    const denied = run("Read", { file_path: "/run/egress-ca/ca.pem" });
+    await expect(denied.parse()).rejects.toEqual(new ExitSignal(2));
+    expect(denied.context.stderr()).not.toContain("the policy hook failed");
+    await run("Read", { file_path: "/work/ticket-API-1/a.ts" }).parse();
+  });
+
   it("denies input that is not a hook payload", async () => {
     const { parse, stderr } = hook("not json");
 

@@ -39,7 +39,7 @@ export const claudeExecutable = (): string => {
  * Runs the CLI attached to this terminal. Ctrl-C belongs to Claude Code while it runs: the steward ignores SIGINT until it
  * exits, so it can still release the lease and the slot.
  */
-const spawnInteractive: SpawnInteractive = (command, args, options) =>
+export const spawnInteractive: SpawnInteractive = (command, args, options) =>
   new Promise((resolve, reject) => {
     const ignore = (): void => undefined;
     process.on("SIGINT", ignore);
@@ -163,12 +163,16 @@ export const registerChat = (program: Command, ctx: CliContext): void => {
     .description("internal: PreToolUse hook enforcing the agent's tool rules for steward chat; needs the global --config")
     .requiredOption("--workspace <path>", "the session's worktree")
     .requiredOption("--artifacts <path>", "the session's artifacts directory")
-    .action(async (opts: { workspace: string; artifacts: string }) => {
+    .option("--deny <path...>", "the paths the agent may not touch, in place of those derived from the config (a run pod)")
+    .action(async (opts: { workspace: string; artifacts: string; deny?: string[] }) => {
       // Claude Code blocks only on exit 2; any other failure would let the tool run unchecked, so every error denies.
       let decision: PolicyDecision;
       try {
-        const loaded = await loadFromProgram(program, ctx);
-        const denyPaths = brainDenyPaths(loaded.config, loaded.configPath, mirrorPath(loaded.config.dataDir));
+        let denyPaths = opts.deny;
+        if (denyPaths === undefined) {
+          const loaded = await loadFromProgram(program, ctx);
+          denyPaths = brainDenyPaths(loaded.config, loaded.configPath, mirrorPath(loaded.config.dataDir));
+        }
         decision = evaluateHook(await readAll(ctx.stdin ?? process.stdin), { workspacePath: opts.workspace, artifactsDir: opts.artifacts, denyPaths });
       } catch (err) {
         decision = { allow: false, reason: `the policy hook failed: ${errorMessage(err)}` };

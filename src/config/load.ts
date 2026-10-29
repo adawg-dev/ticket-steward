@@ -41,8 +41,11 @@ const checkOverlayTemplate = async (templateDir: string): Promise<void> => {
   if (issues.length > 0) throw new Error(issues.map((issue) => `workspace.overlayTemplateDir: ${issue}`).join("\n"));
 };
 
-/** `secretFetcher` stands in for Secrets Manager when `secrets.source` is "aws" (tests). */
-export const loadConfig = async (opts: { configPath?: string; cwd?: string; secretFetcher?: SecretFetcher }): Promise<LoadedConfig> => {
+/**
+ * `secretFetcher` stands in for Secrets Manager when `secrets.source` is "aws" (tests). `withoutSecrets` reads no secret
+ * at all and returns none: a run pod's agent container holds no credential and has no identity to read one with.
+ */
+export const loadConfig = async (opts: { configPath?: string; cwd?: string; secretFetcher?: SecretFetcher; withoutSecrets?: boolean }): Promise<LoadedConfig> => {
   const configPath = resolve(opts.configPath ?? join(opts.cwd ?? process.cwd(), CONFIG_FILENAME));
   const configDir = dirname(configPath);
   const jiti = createJiti(import.meta.url, { alias: { [PACKAGE_ALIAS]: packageEntryPath }, moduleCache: false });
@@ -64,6 +67,7 @@ export const loadConfig = async (opts: { configPath?: string; cwd?: string; secr
     ...(parsed.greptile === undefined ? {} : { greptile: { ...parsed.greptile, prompt: resolveFromConfigDir(configDir, parsed.greptile.prompt) } }),
   };
   if (config.workspace.overlayTemplateDir !== undefined) await checkOverlayTemplate(config.workspace.overlayTemplateDir);
+  if (opts.withoutSecrets === true) return { config, secrets: {}, configPath, configDir };
   const secretsConfig = config.secrets ?? { source: "file" };
   const secrets = await loadSecretsFrom(secretsConfig, configDir, opts.secretFetcher);
   if (config.implement !== undefined && (secrets.GITLAB_PUSH_TOKEN ?? "") === "") {

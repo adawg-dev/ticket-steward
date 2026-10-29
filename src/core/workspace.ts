@@ -77,7 +77,8 @@ export const patchAttempt = (ctx: RunContext, deps: PipelineDeps, patch: Attempt
   if (current !== undefined) deps.stores.attempts.patch(current.id, patch);
 };
 
-const playwrightMcpSpec = (): StdioMcpServerSpec => {
+/** Playwright's MCP server over stdio: it drives the browser in the agent's own process tree, so it never runs in a sidecar. */
+export const playwrightMcpSpec = (): StdioMcpServerSpec => {
   const packagePath = createRequire(import.meta.url).resolve("@playwright/mcp/package.json");
   const { bin } = PlaywrightPackage.parse(JSON.parse(readFileSync(packagePath, "utf8")));
   const relative = typeof bin === "string" ? bin : Object.values(bin)[0];
