@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
 import type { SpawnInteractive } from "../../src/cli/context.js";
 import type { RunSpec } from "../../src/run/protocol.js";
-import { buildPodBrainEnv, EGRESS_CA_DIR, podMcpServers, scrubRemoteCredentials, startChecksServer, waitForPod, type ChecksServer } from "../../src/run/pod.js";
+import { buildPodBrainEnv, EGRESS_CA_DIR, podMcpServers, postReport, scrubRemoteCredentials, startChecksServer, waitForPod, type ChecksServer } from "../../src/run/pod.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { makeContext, writeConfig } from "../cli/helpers.js";
 import { commitFile, git, makeSourceRepo, removeDir, serveGitHttp, tmpDir, type GitHttpServer } from "../workspace/helpers.js";
@@ -54,8 +54,8 @@ interface Received {
   body: string;
 }
 
-/** A local HTTP server that records every request and answers 200 with `answer`'s JSON. */
-const recorder = async (answer: (req: Received) => unknown): Promise<{ url: string; port: number; received: Received[]; server: Server }> => {
+/** A local HTTP server that records every request and answers `status` (200 by default) with `answer`'s JSON. */
+const recorder = async (answer: (req: Received) => unknown, status: (req: Received) => number = () => 200): Promise<{ url: string; port: number; received: Received[]; server: Server }> => {
   const received: Received[] = [];
   const server = createServer((req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
@@ -63,7 +63,7 @@ const recorder = async (answer: (req: Received) => unknown): Promise<{ url: stri
     req.on("end", () => {
       const entry = { method: req.method ?? "", path: req.url ?? "", authorization: req.headers.authorization ?? "", body: Buffer.concat(chunks).toString("utf8") };
       received.push(entry);
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(status(entry), { "content-type": "application/json" });
       res.end(JSON.stringify(answer(entry)));
     });
   });
@@ -189,6 +189,45 @@ describe("startChecksServer", () => {
 
     expect((await post(checks.url, JSON.stringify({ commands: ["true"] }), "evil.example")).status).toBe(403);
     expect((await post(checks.url, JSON.stringify({ commands: "true" }))).status).toBe(400);
+  });
+});
+
+describe("postReport", () => {
+  const report = { runId: "7-1", ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-2", output: null, usage: null };
+  const quick = { retryForMs: 5_000, backoffMs: { first: 10, max: 20 } };
+
+  it("keeps trying while the dispatcher refuses connections or answers 503, and delivers the report once it is back", async () => {
+    const refused = `http://127.0.0.1:${await freePort()}`;
+    const callback = await recorder(() => ({ ok: true }), (req) => (callback.received.indexOf(req) === 0 ? 503 : 200));
+    servers.push(callback.server);
+    let calls = 0;
+    // The first attempt finds no dispatcher listening: a real connection refused.
+    const fetchImpl: typeof fetch = (input, init) => (calls++ === 0 ? fetch(`${refused}/internal/runs/7-1/report`, init) : fetch(input, init));
+    const warnings: string[] = [];
+
+    await postReport({ callbackUrl: callback.url, token: RUNNER_TOKEN, report, fetchImpl, warn: (message) => warnings.push(message), ...quick });
+
+    expect(calls).toBe(3);
+    expect(callback.received.map((r) => `${r.method} ${r.path}`)).toEqual(["POST /internal/runs/7-1/report", "POST /internal/runs/7-1/report"]);
+    expect(JSON.parse(callback.received[1]?.body ?? "")).toEqual(report);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toContain("503");
+  });
+
+  it("fails at once on 401 and on another 4xx", async () => {
+    for (const [status, message] of [[401, "runner token was rejected"], [404, "answered 404"]] as const) {
+      const callback = await recorder(() => ({ error: "no" }), () => status);
+      servers.push(callback.server);
+      await expect(postReport({ callbackUrl: callback.url, token: RUNNER_TOKEN, report, fetchImpl: fetch, ...quick })).rejects.toThrow(message);
+      expect(callback.received).toHaveLength(1);
+    }
+  });
+
+  it("gives up when the dispatcher stays away past the limit", async () => {
+    const callback = await recorder(() => ({ error: "restarting" }), () => 503);
+    servers.push(callback.server);
+    await expect(postReport({ callbackUrl: callback.url, token: RUNNER_TOKEN, report, fetchImpl: fetch, retryForMs: 100, backoffMs: { first: 10, max: 20 } })).rejects.toThrow(/not delivered in 0\.1 s .*503/);
+    expect(callback.received.length).toBeGreaterThan(1);
   });
 });
 

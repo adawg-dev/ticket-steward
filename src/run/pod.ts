@@ -204,18 +204,63 @@ export const finishTools = async (p: { toolsUrl: string; fetchImpl: typeof fetch
   if (!response.ok) throw new Error(`the tools sidecar answered ${response.status} to /finish`);
 };
 
-/** Delivers the run's report to the dispatcher (`POST …/internal/runs/<runId>/report`) with the run's runner token. */
-export const postReport = async (p: { callbackUrl: string; token: string; report: RunReport; fetchImpl: typeof fetch }): Promise<void> => {
+/**
+ * How long the run report is retried: longer than a dispatcher restart (one replica, Recreate), and well inside the
+ * margin the Job's deadline leaves after the run. A report lost here fails the Job, and the dispatcher requeues the run.
+ */
+export const REPORT_RETRY_MS = 5 * 60_000;
+export const REPORT_BACKOFF_MS = { first: 1_000, max: 15_000 };
+
+/** The dispatcher refused the report itself (a bad token or body): another attempt would be refused as well. */
+class ReportRefusedError extends Error {}
+
+/** Answers worth another attempt: the dispatcher restarting, overloaded or behind a proxy that has no upstream yet. */
+const retryableStatus = (status: number): boolean => status >= 500 || status === 408 || status === 429;
+
+/**
+ * Delivers the run's report to the dispatcher (`POST …/internal/runs/<runId>/report`) with the run's runner token.
+ * Connection errors, timeouts and 5xx are retried with backoff for `retryForMs` (the dispatcher may be restarting); a
+ * 401 or another 4xx fails at once.
+ */
+export const postReport = async (p: {
+  callbackUrl: string;
+  token: string;
+  report: RunReport;
+  fetchImpl: typeof fetch;
+  retryForMs?: number;
+  backoffMs?: { first: number; max: number };
+  warn?: (message: string) => void;
+}): Promise<void> => {
   const url = `${p.callbackUrl.replace(/\/+$/, "")}/internal/runs/${encodeURIComponent(p.report.runId)}/report`;
-  const response = await p.fetchImpl(url, {
-    method: "POST",
-    headers: { authorization: `Bearer ${p.token}`, "content-type": "application/json" },
-    body: JSON.stringify(RunReportSchema.parse(p.report)),
-    redirect: "error",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (response.status === 401) throw new Error("the run's runner token was rejected");
-  if (!response.ok) throw new Error(`the steward answered ${response.status} to the run report`);
+  const body = JSON.stringify(RunReportSchema.parse(p.report));
+  const retryForMs = p.retryForMs ?? REPORT_RETRY_MS;
+  const backoff = p.backoffMs ?? REPORT_BACKOFF_MS;
+  const deadline = Date.now() + retryForMs;
+  let delay = backoff.first;
+  for (let attempt = 1; ; attempt += 1) {
+    let failure: string;
+    try {
+      const response = await p.fetchImpl(url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${p.token}`, "content-type": "application/json" },
+        body,
+        redirect: "error",
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      if (response.ok) return;
+      await response.body?.cancel();
+      if (response.status === 401) throw new ReportRefusedError("the run's runner token was rejected");
+      if (!retryableStatus(response.status)) throw new ReportRefusedError(`the steward answered ${response.status} to the run report`);
+      failure = `the steward answered ${response.status}`;
+    } catch (err) {
+      if (err instanceof ReportRefusedError) throw err;
+      failure = errorMessage(err);
+    }
+    if (Date.now() + delay > deadline) throw new Error(`the run report was not delivered in ${retryForMs / 1000} s (${attempt} attempts): ${failure}`);
+    p.warn?.(`the run report was not delivered (${failure}); retrying in ${delay / 1000} s`);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, backoff.max);
+  }
 };
 
 /**
@@ -270,7 +315,7 @@ export interface PodRun {
   callbackUrl: string;
   runnerToken: string;
   fetchImpl: typeof fetch;
-  /** Problems after the run that do not change its report (the tools sidecar's finish). */
+  /** Problems after the run that do not change its report (the tools sidecar's finish, a report attempt that failed). */
   warn: (message: string) => void;
   signal?: AbortSignal;
   runBrain?: typeof runBrainDetached;
@@ -283,7 +328,8 @@ const failedReport = (spec: RunSpec, error: string): RunReport => ({
 /**
  * The agent container's run: waits for the sidecars, lays the overlay into the worktree that git-init cloned, serves the
  * check endpoint, runs `executeRun` with the pod's env and MCP servers, then has the tools sidecar post the work report
- * and posts the run report itself. Rejects only when the report could not be delivered.
+ * and posts the run report itself, retrying while the dispatcher is away. Rejects only when the report could not be
+ * delivered.
  */
 export const runPod = async (p: PodRun): Promise<RunReport> => {
   const { spec } = p;
@@ -316,6 +362,6 @@ export const runPod = async (p: PodRun): Promise<RunReport> => {
   } finally {
     await checks?.close();
   }
-  await postReport({ callbackUrl: p.callbackUrl, token: p.runnerToken, report, fetchImpl: p.fetchImpl });
+  await postReport({ callbackUrl: p.callbackUrl, token: p.runnerToken, report, fetchImpl: p.fetchImpl, warn: p.warn });
   return report;
 };
