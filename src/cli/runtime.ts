@@ -63,7 +63,7 @@ export const adminTracker = (client: Pick<AdminClient, "ticketBundle">): Pick<Tr
   readDescription: async (issueId) => (await client.ticketBundle(issueId)).description,
 });
 
-export const NO_ADMIN_API = "the CLI reaches Linear only through steward serve's admin API (the kubernetes runtime), which does not answer here";
+export const NO_ADMIN_API = "the CLI reaches Linear only through steward serve's admin API, which only the kubernetes runtime serves and which does not answer here";
 
 /** A CLI command's tracker: reads through the admin API, connected on first use; it holds no token and writes nothing. */
 const cliTracker = (loaded: LoadedConfig, ctx: CliContext): Tracker => {
@@ -137,7 +137,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
           });
     return { loaded, stores, tracker, ...linear, deps: { ...deps, executor }, kubernetes: executor, ...(chat === undefined ? {} : { chat }) };
   }
-  // serve gives each worker loop its own slot; inline runs (implement KEY, jobs retry) use slot 1 under run.lock.
+  // serve gives each worker loop its own slot; `steward chat` leases one of its own.
   const slot = config.slots === undefined ? {} : { slot: { n: 1, client: new SlotClient(config.slots, ctx.factories?.slotRunner) } };
   return { loaded, stores, tracker, ...linear, deps: { ...deps, ...slot } };
 };

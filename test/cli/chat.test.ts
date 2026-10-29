@@ -8,34 +8,14 @@ import { acquireLease } from "../../src/chat/lease.js";
 import type { SpawnInteractive } from "../../src/cli/context.js";
 import { buildProgram } from "../../src/cli/program.js";
 import { openStores, type Stores } from "../../src/store/index.js";
-import type { TicketBundle } from "../../src/tracker/types.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
-import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { ExitSignal, makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
 
 const IMPLEMENT_PROMPT = fileURLToPath(new URL("../../prompts/implement.md", import.meta.url));
 const BRANCH = "fix/API-1-adapter";
-
-const issue: TicketBundle = {
-  id: "issue-1",
-  identifier: "API-1",
-  url: "https://linear.app/acme/issue/API-1",
-  title: "Adapter drops the last chunk",
-  description: "The adapter loses the final chunk.",
-  team: { id: "team-1", key: "API", name: "API" },
-  state: { name: "In Review", type: "started" },
-  labels: ["agent-implemented"],
-  priority: 2,
-  creator: { name: "Ada", isBot: false },
-  createdAt: "2026-10-27T00:00:00.000Z",
-  comments: [],
-  attachments: [],
-  appliedTemplate: null,
-  templates: [],
-};
 
 const McpConfig = z.object({ mcpServers: z.record(z.string(), z.object({ type: z.literal("stdio"), command: z.string(), args: z.array(z.string()) })) });
 const Settings = z.object({
@@ -82,9 +62,9 @@ const seedSession = (pushed: boolean): number =>
   });
 
 const run = (args: string[], spawnInteractive?: SpawnInteractive, stdin?: string, slotRunner?: FakeSlotRunner) => {
+  // No tracker: on the local runtime the CLI holds no Linear token and no admin API answers, so chat reads only the store.
   const context = makeContext({
     factories: {
-      tracker: new FakeTracker([structuredClone(issue)]),
       codehost: new FakeCodeHost(),
       brain: new FakeBrain(),
       ...(spawnInteractive === undefined ? {} : { spawnInteractive }),
@@ -135,6 +115,17 @@ describe("steward chat", () => {
     await expect(parse()).rejects.toEqual(new ExitSignal(1));
     expect(stderr()).toContain("no agent session for API-1");
     expect(spawned).toEqual([]);
+  });
+
+  it("finds the ticket by its UUID or its key in any case in the steward's own records, without Linear", async () => {
+    seedSession(false);
+    for (const key of ["issue-1", "api-1"]) {
+      const { spawn, spawned } = recorder();
+      const { parse, stdout } = run(["chat", key, "--no-slot"], spawn);
+      await parse();
+      expect(spawned.map((call) => argAfter(call.args, "--resume"))).toEqual(["session-1"]);
+      expect(stdout()).toContain("resuming API-1's agent session");
+    }
   });
 
   it("refuses while a job on the ticket runs, naming it", async () => {
@@ -306,7 +297,7 @@ describe("steward chat-hook", () => {
   });
 
   it("denies with exit 2 when its config cannot be loaded", async () => {
-    const context = makeContext({ factories: { tracker: new FakeTracker([]), codehost: new FakeCodeHost(), brain: new FakeBrain() } });
+    const context = makeContext({ factories: { codehost: new FakeCodeHost(), brain: new FakeBrain() } });
     context.ctx.stdin = Readable.from([hookInput("Read", { file_path: "/work/ticket-API-1/a.ts" })]);
     const missing = join(repo.dataDir, "missing.config.ts");
 
@@ -318,7 +309,7 @@ describe("steward chat-hook", () => {
 
   it("with --deny (a run pod), denies those paths without loading the config, whose secrets it could not read", async () => {
     const run = (tool: string, input: Record<string, unknown>) => {
-      const context = makeContext({ factories: { tracker: new FakeTracker([]), codehost: new FakeCodeHost(), brain: new FakeBrain() } });
+      const context = makeContext({ factories: { codehost: new FakeCodeHost(), brain: new FakeBrain() } });
       context.ctx.stdin = Readable.from([hookInput(tool, input)]);
       const missing = join(repo.dataDir, "missing.config.ts");
       return { context, parse: () => buildProgram(context.ctx).parseAsync(["node", "steward", "--config", missing, "chat-hook", "--workspace", "/work/ticket-API-1", "--artifacts", "/a", "--deny", "/run/egress-ca"]) };

@@ -485,6 +485,8 @@ ticket's latest agent session in the Claude Code terminal UI, in its worktree (r
 the brain's credentials, `CLAUDE_CONFIG_DIR`, MCP servers (`push` only when the ticket has a pushed steward branch) and
 tool rules (a `PreToolUse` hook, `steward chat-hook`: no writes outside the worktree, no mirror, DB, config or sessions,
 no `docker`/`sudo`/`git push`; commits are allowed). It needs no `chat` block, only the claude-code brain.
+It reads no Linear: the ticket (key in any case, or UUID) is the one the steward's own jobs recorded, so it works
+without serve and holds no Linear token. A ticket whose key changed in Linear is found by its UUID or its old key.
 
 - It refuses while a job for the ticket runs, naming the job, and while another `steward chat` holds the ticket.
 - While open it holds a lease (`chat_leases` in the DB, heartbeated every 30 s, ignored after 120 s without one): jobs
@@ -624,7 +626,7 @@ instance itself is capped at 300 s), create the worktree, copy the overlay with 
 brain with `STEWARD_PORT` set to the slot's app port, publish, and `down` the slot. A slot that does not
 come up fails the job as retryable with `setup failed: slot <n>: …` and the helper's output tail in the
 attempt's `setupTail`. `steward serve` brings every slot down when it starts and when it stops;
-retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward jobs retry ID` without serve runs on slot 1.
+retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward chat` leases a slot of its own; jobs run only under serve (`steward jobs retry ID` refuses without it).
 
 **Resource guard.** On by default, with or without `slots`. Before a lane claims a heavy job (implement,
 fix, restart) the worker checks the host: available memory (`MemAvailable`) must be at least
@@ -1006,7 +1008,7 @@ running the brain again. Between automatic attempts the job shows as `queued` wi
 retry.
 
 ```bash
-steward jobs retry 42     # requeues for serve when it is running, otherwise runs inline; publish-only when an implement result is stored
+steward jobs retry 42     # requeues for serve, which must be running (the CLI runs no job); publish-only when an implement result is stored
 steward jobs gc           # run retention now: worktrees, artifacts, transcripts, deliveries
 ```
 

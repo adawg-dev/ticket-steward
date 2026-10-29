@@ -169,7 +169,7 @@ const jobColumns = (event: TriggerEvent): JobColumns => {
   return { ...ticket, kind: "implement", subject: null };
 };
 
-/** The slot inline runs (`steward implement`, `fix` and `jobs retry` without serve) claim on. */
+/** The slot a job claimed by id (`claimById`) runs on. */
 export const INLINE_SLOT = 1;
 
 const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, wake_requested = 0, started_at = ?, slot = ?";
@@ -193,6 +193,7 @@ export class JobStore {
   private readonly storeRun;
   private readonly selectLatestSession;
   private readonly selectImplementForBranch;
+  private readonly selectLatestForTicket;
   private readonly selectSessionWorktrees;
   private readonly complete;
   private readonly deferRetry;
@@ -268,6 +269,7 @@ export class JobStore {
        ORDER BY id DESC LIMIT 1`,
     );
     this.selectImplementForBranch = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE kind = 'implement' AND branch = ? ORDER BY id DESC LIMIT 1");
+    this.selectLatestForTicket = db.prepare<[string, string], JobRow>("SELECT * FROM jobs WHERE issue_id = ? OR identifier = ? COLLATE NOCASE ORDER BY id DESC LIMIT 1");
     // A session's last activity is its ticket's: any later job on the ticket (a fix round, a chat) may have resumed it.
     this.selectSessionWorktrees = db.prepare<[string], { worktree_name: string }>(
       `SELECT DISTINCT j.worktree_name FROM jobs j
@@ -395,6 +397,12 @@ export class JobStore {
   latestImplementForBranch(branch: string): Job | null {
     const row = this.selectImplementForBranch.get(branch);
     return row === undefined ? null : toJob(row);
+  }
+
+  /** The ticket (issue UUID or key, the key in any case) as the steward's newest job on it recorded it; null when none did. */
+  ticketOf(idOrKey: string): { issueId: string; identifier: string } | null {
+    const row = this.selectLatestForTicket.get(idOrKey, idOrKey);
+    return row === undefined ? null : { issueId: row.issue_id, identifier: row.identifier };
   }
 
   /** Worktree names of job sessions whose ticket saw activity at or after `since`; retention keeps their session dirs. */

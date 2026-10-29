@@ -10,13 +10,17 @@ import { openStores, type JobStatus } from "../store/index.js";
 import { sweep } from "../workspace/retention.js";
 import { AdminError, connectAdmin, type AdminClient, type JobSummary, type LoopView } from "./client.js";
 import { errorMessage, fail, loadFromProgram, println, type CliContext } from "./context.js";
-import { reportOutcome, runInline, tailJob, terminalOutcome, TAIL_POLL_MS, withRunLock } from "./inline.js";
+import { reportOutcome, tailJob, terminalOutcome, TAIL_POLL_MS, withRunLock } from "./inline.js";
 import { artifactsDir, jobsDir, workRoot } from "./paths.js";
 import { answers, localHealthUrl, sleep } from "./probe.js";
-import { buildRuntime } from "./runtime.js";
 
 const DEFAULT_LIMIT = 20;
 const HEALTH_TIMEOUT_MS = 2_000;
+
+/** Jobs run only in the dispatcher, which alone holds the Linear token; the CLI runs none itself. */
+export const SERVE_DOWN = (id: number): string =>
+  `steward serve does not answer: jobs run only in the dispatcher, which alone reads Linear, so job ${id} is left as it is; start serve, then run \`steward jobs retry ${id}\` again`;
+
 const DELIVERY_RETENTION_DAYS = 7;
 const STATUSES: JobStatus[] = ["queued", "running", "succeeded", "failed", "publish_failed", "skipped"];
 
@@ -129,10 +133,10 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
 
   jobs
     .command("retry")
-    .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when an implement result is stored")
+    .description("run the job again: requeue it for steward serve, which must be running; publish-only when an implement result is stored")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
-      const loaded = await loadFromProgram(program, ctx);
+      const loaded = await loadFromProgram(program, ctx, { withoutSecrets: true });
       const client = await admin(ctx, loaded.config);
       if (client !== null) {
         try {
@@ -143,17 +147,14 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
         println(ctx, `steward serve is running; requeued job ${id}`);
         return reportOutcome(ctx, id, await tailOverApi(client, id, ctx));
       }
-      const runtime = await buildRuntime(loaded, ctx);
-      const { jobs } = runtime.stores;
-      const job = jobs.get(id);
+      const stores = openStores(loaded.config.dataDir);
+      const job = stores.jobs.get(id);
       if (job === null) return fail(ctx, `job ${id} not found`);
+      if (!(await answers(ctx.fetchImpl, localHealthUrl(loaded.config.server.port), HEALTH_TIMEOUT_MS))) return fail(ctx, SERVE_DOWN(id));
       println(ctx, retryMode(job));
-      if (await answers(ctx.fetchImpl, localHealthUrl(runtime.loaded.config.server.port), HEALTH_TIMEOUT_MS)) {
-        if (!jobs.requeue(id)) return fail(ctx, `job ${id} is already running`);
-        println(ctx, `steward serve is running; requeued job ${id}`);
-        return reportOutcome(ctx, id, await tailJob(runtime.stores, id, ctx));
-      }
-      reportOutcome(ctx, id, await runInline(runtime, id, ctx));
+      if (!stores.jobs.requeue(id)) return fail(ctx, `job ${id} is already running`);
+      println(ctx, `steward serve is running; requeued job ${id}`);
+      reportOutcome(ctx, id, await tailJob(stores, id, ctx));
     });
 
   jobs

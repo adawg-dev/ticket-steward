@@ -1,54 +1,13 @@
-import { runChat } from "../chat/run.js";
 import { acquireRunLock } from "../core/lock.js";
-import type { JobOutcome, RunContext } from "../core/types.js";
-import { redactOutcome } from "../core/workspace.js";
-import { runAwaitReview } from "../greptile/await.js";
-import { runFix } from "../greptile/fix.js";
-import { runRestart } from "../greptile/start.js";
-import { publishImplementOnly, runImplement } from "../implement/pipeline.js";
-import { INLINE_SLOT, RETIRED_KIND_ERROR, unreadableOutcome, type AttemptPatch, type Job, type JobStatus, type Stores } from "../store/index.js";
-import { errorMessage, fail, println, type CliContext } from "./context.js";
+import type { JobOutcome } from "../core/types.js";
+import type { JobStatus, Stores } from "../store/index.js";
+import { fail, println, type CliContext } from "./context.js";
 import { sleep } from "./probe.js";
 import type { Runtime } from "./runtime.js";
 
 /** How often a tailed job is read again. */
 export const TAIL_POLL_MS = 2_000;
 const LOCK_HELD = "another steward process holds run.lock; if `steward serve` is running, let it pick the job up";
-
-const attemptPatch = (outcome: JobOutcome): AttemptPatch => {
-  if (outcome.status === "deferred") return {};
-  if (outcome.status === "succeeded") return outcome.warning === undefined ? {} : { error: outcome.warning };
-  return { error: outcome.error };
-};
-
-/** Dispatches the way the worker does: implement and loop jobs go to their pipelines, a stored implement result means publish-only. */
-const dispatch = (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutcome> => {
-  const unreadable = unreadableOutcome(job);
-  if (unreadable !== null) return Promise.resolve(unreadable);
-  switch (job.kind) {
-    case "enrich":
-      return Promise.resolve({ status: "failed", error: RETIRED_KIND_ERROR, retryable: false });
-    case "implement":
-      return job.implementResult === null ? runImplement(ctx, runtime.deps) : publishImplementOnly(ctx, runtime.deps);
-    case "await_review":
-      return runAwaitReview(ctx, runtime.deps);
-    case "fix":
-      return runFix(ctx, runtime.deps);
-    case "restart":
-      return runRestart(ctx, runtime.deps);
-    case "chat":
-      return runChat(ctx, runtime.deps);
-  }
-};
-
-const execute = async (job: Job, ctx: RunContext, runtime: Runtime): Promise<JobOutcome> => {
-  try {
-    const outcome = await dispatch(job, ctx, runtime);
-    return redactOutcome(outcome, runtime.deps.redactor);
-  } catch (err) {
-    return redactOutcome({ status: "failed", error: errorMessage(err), retryable: false }, runtime.deps.redactor);
-  }
-};
 
 /** The outcome a finished job ended with; null while it is queued or running. */
 export const terminalOutcome = (status: string, error: string | null): JobOutcome | null => {
@@ -85,47 +44,7 @@ export const tailJob = async (stores: Stores, jobId: number, ctx: CliContext): P
   }
 };
 
-/**
- * Why an inline claim of the job is refused when a `steward chat` lease holds its ticket or the inline slot; null when no
- * lease does (the job is running, or gone). The job stays queued, so serve or a later retry runs it once the chat ends.
- */
-const chatHolding = (stores: Stores, jobId: number): string | null => {
-  const job = stores.jobs.get(jobId);
-  if (job === null) return null;
-  const leases = stores.leases.active();
-  const onTicket = leases.find((lease) => lease.issueId === job.issueId);
-  const onSlot = leases.find((lease) => lease.slot === INLINE_SLOT);
-  const queued = `job ${jobId} stays queued for \`steward serve\`, or run \`steward jobs retry ${jobId}\` once the chat ends`;
-  if (onTicket !== undefined) return `steward chat (pid ${onTicket.pid}) holds ${job.identifier}; ${queued}`;
-  if (onSlot !== undefined) return `steward chat (pid ${onSlot.pid}) holds slot ${INLINE_SLOT}, which inline runs use; ${queued}`;
-  return null;
-};
-
-/** Claims the job and runs it in this process under run.lock, the way the worker would. */
-export const runInline = (runtime: Runtime, jobId: number, ctx: CliContext): Promise<JobOutcome> =>
-  withRunLock(runtime, ctx, async () => {
-    const { stores } = runtime;
-    const job = stores.jobs.claimById(jobId);
-    if (job === null) return fail(ctx, chatHolding(stores, jobId) ?? `job ${jobId} is already running`);
-    const attempt = stores.attempts.start(jobId);
-    println(ctx, `job ${jobId} running (attempt ${attempt.number})`);
-    const outcome = await execute(
-      job,
-      { jobId, attempt: attempt.number, issueId: job.issueId, identifier: job.identifier, teamKey: job.teamKey, trigger: job.trigger, dryRun: false },
-      runtime,
-    );
-    if (outcome.status === "deferred") {
-      stores.attempts.finish(attempt.id, {});
-      stores.jobs.defer(jobId, outcome.until);
-      println(ctx, `job ${jobId} waiting until ${outcome.until.toISOString()}`);
-      return outcome;
-    }
-    stores.jobs.finish(jobId, outcome);
-    stores.attempts.finish(attempt.id, attemptPatch(outcome));
-    return outcome;
-  });
-
-/** Prints the outcome and exits non-zero unless the job succeeded or is waiting (deferred, already reported by `runInline`). */
+/** Prints the outcome and exits non-zero unless the job succeeded or is waiting (deferred). */
 export const reportOutcome = (ctx: CliContext, jobId: number, outcome: JobOutcome): void => {
   if (outcome.status === "deferred") return;
   if (outcome.status === "succeeded") {

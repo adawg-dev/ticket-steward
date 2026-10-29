@@ -2,7 +2,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { buildProgram } from "../../src/cli/program.js";
 import { acquireRunLock } from "../../src/core/lock.js";
-import { jobLine } from "../../src/cli/jobs.js";
+import { jobLine, SERVE_DOWN } from "../../src/cli/jobs.js";
 import { localHealthUrl } from "../../src/cli/probe.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { CliFactories } from "../../src/cli/context.js";
@@ -213,6 +213,21 @@ describe("steward jobs", () => {
         "publish-only (hand-back stored; labels only, nothing to push)",
       );
     });
+  });
+
+  it("retry without serve runs nothing in the CLI, which holds no Linear token, and leaves the job as it was", async () => {
+    const id = stores.jobs.enqueue(createdEvent);
+    stores.jobs.claimById(id);
+    stores.jobs.finish(id, { status: "failed", error: "linear 502", retryable: false });
+    // No tracker, brain or code host injected: a run the CLI started would have to reach them.
+    const context = makeContext();
+    const done = buildProgram(context.ctx).parseAsync(["node", "steward", "--config", configPath, "jobs", "retry", String(id)]);
+
+    await expect(done).rejects.toEqual(new ExitSignal(1));
+    expect(context.stderr()).toContain(SERVE_DOWN(id));
+    expect(context.stdout()).toBe("");
+    expect(stores.jobs.get(id)).toMatchObject({ status: "failed", attempts: 1, error: "linear 502" });
+    expect(stores.attempts.forJob(id)).toHaveLength(0);
   });
 
   it("retry exits 1 when the job is running under the worker", async () => {

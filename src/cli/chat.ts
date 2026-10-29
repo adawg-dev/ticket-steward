@@ -196,7 +196,10 @@ export const registerChat = (program: Command, ctx: CliContext): void => {
         return chatInRunPod(ctx, client, kubernetes.namespace, key);
       }
       const runtime = await buildRuntime(loaded, ctx);
-      const ticket = await runtime.tracker.resolveIssueId(key);
+      // The CLI holds no Linear token and the local runtime has no admin API: the ticket is the one the steward's jobs recorded.
+      const recorded = runtime.stores.jobs.ticketOf(key);
+      if (recorded === null) return fail(ctx, `no agent session for ${key}`);
+      const ticket = { id: recorded.issueId, identifier: recorded.identifier };
       const session = latestSession(runtime.stores, ticket.id);
       if (session === null) return fail(ctx, `no agent session for ${ticket.identifier}`);
       const lease = acquireLease(runtime.stores, { issueId: ticket.id, identifier: ticket.identifier, worktreeName: session.worktreeName }, opts.slot ? (config.slots?.count ?? 1) : 0);
