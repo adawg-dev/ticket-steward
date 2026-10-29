@@ -303,20 +303,35 @@ describe("JobStore", () => {
 });
 
 describe("implement jobs", () => {
-  const implementEvent: TriggerEvent = {
-    kind: "issue.labeled",
-    action: "implement",
-    issueId: "issue-1",
-    identifier: "API-1",
-    teamKey: "API",
-    deliveryId: "delivery-1",
-    description: "A bug report",
-    stateType: null,
-  };
+  const implementEvent: TriggerEvent = { kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-1", message: null };
 
   it("stores an implement trigger as kind implement", () => {
     const id = stores.jobs.enqueue(implementEvent);
     expect(stores.jobs.get(id)?.kind).toBe("implement");
+  });
+
+  it("stores a Linear chat trigger as kind chat", () => {
+    const id = stores.jobs.enqueue({ ...implementEvent, run: "chat", message: "why?" });
+    expect(stores.jobs.get(id)?.kind).toBe("chat");
+  });
+
+  it("reads a stored label trigger (from before assignment replaced labels) as a Linear implement with no agent session", () => {
+    const id = stores.jobs.enqueue(implementEvent);
+    const legacy = { kind: "issue.labeled", action: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: null };
+    stores.db.prepare("UPDATE jobs SET trigger = ? WHERE id = ?").run(JSON.stringify(legacy), id);
+
+    const job = stores.jobs.get(id);
+
+    expect(job?.trigger).toEqual({ kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: null, message: null });
+    expect(job?.unreadable).toEqual([]);
+  });
+
+  it("reads a stored label trigger without the implement action as a CLI trigger", () => {
+    const id = stores.jobs.enqueue(implementEvent);
+    const legacy = { kind: "issue.created", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: null };
+    stores.db.prepare("UPDATE jobs SET trigger = ? WHERE id = ?").run(JSON.stringify(legacy), id);
+
+    expect(stores.jobs.get(id)?.trigger).toEqual({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API" });
   });
 
   it("scopes findQueued and hasSucceeded by kind, implement by default", () => {
@@ -361,16 +376,7 @@ describe("implement jobs", () => {
 });
 
 describe("claimNext with running jobs", () => {
-  const implementIssue1: TriggerEvent = {
-    kind: "issue.labeled",
-    action: "implement",
-    issueId: "issue-1",
-    identifier: "API-1",
-    teamKey: "API",
-    deliveryId: "delivery-3",
-    description: "A bug report",
-    stateType: null,
-  };
+  const implementIssue1: TriggerEvent = { kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-3", message: null };
 
   it("skips a job whose ticket has a running job, takes the next one, and takes the skipped one once the ticket is free", () => {
     const heavy = stores.jobs.enqueue(createdEvent);

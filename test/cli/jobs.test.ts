@@ -13,14 +13,13 @@ import { FakeTracker } from "../fakes/fakeTracker.js";
 import { ExitSignal, makeContext, tmpConfigDir, waitFor, writeConfig } from "./helpers.js";
 
 const createdEvent: TriggerEvent = {
-  kind: "issue.created",
+  kind: "linear",
+  run: "implement",
   issueId: "issue-1",
   identifier: "API-1",
   teamKey: "API",
-  deliveryId: "delivery-1",
-  description: "A bug report",
-  stateType: null,
-  action: "implement",
+  sessionId: "session-1",
+  message: null,
 };
 
 const cliEvent: TriggerEvent = { kind: "cli", issueId: "issue-2", identifier: "API-2", teamKey: "API", action: "implement" };
@@ -170,7 +169,7 @@ describe("steward jobs", () => {
   });
 
   describe("retry of an implement job", () => {
-    const implementEvent: TriggerEvent = { ...createdEvent, kind: "issue.labeled", action: "implement" };
+    const implementEvent: TriggerEvent = createdEvent;
     const result = { outcome: "implemented" as const, summary: "s", reviewNotes: [], checksRun: [], questions: [], failureDetail: null, media: [] };
     const retryLine = async (setup: (id: number) => void): Promise<string> => {
       const id = stores.jobs.enqueue(implementEvent);

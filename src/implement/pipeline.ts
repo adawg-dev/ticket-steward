@@ -11,7 +11,7 @@ import { readRepoPartial } from "../core/prompt.js";
 import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, stableWorktreeName, type JobPaths } from "../core/workspace.js";
-import { isLabelImplement, startLoop } from "../greptile/start.js";
+import { isLinearImplement, startLoop } from "../greptile/start.js";
 import type { PushTarget } from "../push/target.js";
 import { setupTailOf } from "../run/execute.js";
 import { localExecutor } from "../run/local.js";
@@ -67,7 +67,7 @@ export const lsRemoteSite = async (paths: Pick<JobPaths, "jobDir">, remote: Remo
 };
 
 /** With `greptile`, a label-triggered implement starts a fix loop once it pushes. */
-const startsLoop = (ctx: RunContext, deps: PipelineDeps): boolean => deps.config.greptile !== undefined && isLabelImplement(ctx.trigger);
+const startsLoop = (ctx: RunContext, deps: PipelineDeps): boolean => deps.config.greptile !== undefined && isLinearImplement(ctx.trigger);
 
 /** A loop-starting implement runs on the ticket's stable worktree, where its fix rounds resume the brain session. */
 const implementPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths =>

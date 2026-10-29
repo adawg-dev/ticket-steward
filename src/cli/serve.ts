@@ -13,6 +13,7 @@ import { SettingsStore } from "../settings/store.js";
 import { buildServer } from "../server/app.js";
 import { buildInternalServer, INTERNAL_PORT } from "../server/internal.js";
 import type { Stores } from "../store/index.js";
+import { createLinearAgentApi } from "../tracker/linear/agent.js";
 import { listIssueTemplates } from "../tracker/linear/index.js";
 import { startWorker, type WorkerDeps } from "../worker/index.js";
 import { errorMessage, exitWith, fail, loadFromProgram, println, type CliContext, type TemplateLister } from "./context.js";
@@ -87,6 +88,7 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
       let workerDeps: WorkerDeps = runtime.deps;
       let stopReaping = (): void => undefined;
       const k8s = kubernetesRuntime(config);
+      const settings = new SettingsStore(runtime.stores.db, seedSettings(config));
       if (kubernetes !== undefined && internal !== null && k8s !== null) {
         try {
           // Before the worker claims anything: a live run pod is waited on again, never started a second time.
@@ -102,7 +104,6 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
           // The CLI in this pod is the admin API's client; a new token each start, in memory only.
           const token = await writeAdminToken(k8s.runtimeDir);
           const { stores, tracker, chat } = runtime;
-          const settings = new SettingsStore(stores.db, seedSettings(config));
           const templates = templateLister(runtime, ctx);
           admin = buildAdminServer({
             token,
@@ -131,7 +132,19 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
         return fail(ctx, errorMessage(err));
       }
       const gitlab = runtime.deps.gitlab;
-      const app = buildServer({ config, secrets, stores: runtime.stores, tracker: runtime.tracker, workerState: worker.state, ...(gitlab === undefined ? {} : { gitlab }) });
+      const linear = runtime.linearToken === undefined ? undefined : createLinearAgentApi(runtime.linearToken, fetch);
+      // Read now, so the first webhook does not wait on Linear for it; a failure here is retried by that webhook.
+      await runtime.tracker.appUserId().catch((err: unknown) => logger.warn({ err: errorMessage(err) }, "the app's Linear user could not be read yet"));
+      const app = buildServer({
+        config,
+        secrets,
+        stores: runtime.stores,
+        tracker: runtime.tracker,
+        settings,
+        workerState: worker.state,
+        ...(gitlab === undefined ? {} : { gitlab }),
+        ...(linear === undefined ? {} : { linear }),
+      });
       await app.listen({ port: config.server.port, host: listenHost(process.env) });
       println(ctx, `listening on http://localhost:${config.server.port} (public ${config.server.publicUrl})`);
       if (internal !== null) println(ctx, `run callbacks on ${INTERNAL_HOST}:${INTERNAL_PORT}`);

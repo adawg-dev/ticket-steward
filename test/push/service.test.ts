@@ -35,7 +35,7 @@ const issue: TicketBundle = {
   templates: [],
 };
 
-const trigger: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: issue.description, stateType: "started", action: "implement" };
+const trigger: TriggerEvent = { kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-1", message: null };
 
 let repo: TmpRepo;
 let stores: Stores;

@@ -32,7 +32,7 @@ const implemented: ImplementResult = {
   media: [],
 };
 
-const labeled: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: "started", action: "implement" };
+const labeled: TriggerEvent = { kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-1", message: null };
 
 const ctxFor = (trigger: TriggerEvent): RunContext => ({ jobId: 3, attempt: 1, issueId: "issue-1", identifier: "API-1", teamKey: "API", trigger, dryRun: false });
 

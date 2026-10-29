@@ -92,14 +92,24 @@ interface JobRow {
   run_id: string | null;
 }
 
-const TRIGGER_KINDS = new Set<string>(["issue.created", "issue.labeled", "cli", "loop", "chat"]);
+const TRIGGER_KINDS = new Set<string>(["cli", "linear", "loop", "chat"]);
+
+/** Kinds of the label trigger, removed when assignment in Linear replaced it; their jobs still read and run. */
+const LEGACY_LABEL_KINDS = new Set<string>(["issue.created", "issue.labeled"]);
+
+/** A stored label trigger as today's: its implement as a Linear implement with no agent session, anything else as a bare CLI trigger. */
+const fromLabelTrigger = (row: JobRow, value: object): TriggerEvent => {
+  const ticket = { issueId: row.issue_id, identifier: row.identifier, teamKey: row.team_key };
+  return "action" in value && value.action === "implement" ? { kind: "linear", run: "implement", ...ticket, sessionId: null, message: null } : { kind: "cli", ...ticket };
+};
 
 /** The stored trigger, or (noted in `unreadable`) a stand-in from the row's own columns when it is not a trigger object. */
 const readTrigger = (row: JobRow, unreadable: StoredColumn[]): TriggerEvent => {
   try {
     const value: unknown = JSON.parse(row.trigger);
-    if (typeof value === "object" && value !== null && "kind" in value && typeof value.kind === "string" && TRIGGER_KINDS.has(value.kind)) {
-      return value as TriggerEvent;
+    if (typeof value === "object" && value !== null && "kind" in value && typeof value.kind === "string") {
+      if (TRIGGER_KINDS.has(value.kind)) return value as TriggerEvent;
+      if (LEGACY_LABEL_KINDS.has(value.kind)) return fromLabelTrigger(row, value);
     }
   } catch {
     // Falls through to the stand-in below.
@@ -166,6 +176,8 @@ const jobColumns = (event: TriggerEvent): JobColumns => {
   const ticket = { issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey };
   if (event.kind === "loop") return { ...ticket, kind: event.step === "await" ? "await_review" : event.step, subject: loopSubject(event.loopId) };
   if (event.kind === "chat") return { ...ticket, kind: "chat", subject: event.loopId === null ? null : loopSubject(event.loopId) };
+  // A Linear chat, like an implement, is serialized by its ticket (issue_id).
+  if (event.kind === "linear" && event.run === "chat") return { ...ticket, kind: "chat", subject: null };
   return { ...ticket, kind: "implement", subject: null };
 };
 
@@ -194,6 +206,7 @@ export class JobStore {
   private readonly selectLatestSession;
   private readonly selectImplementForBranch;
   private readonly selectLatestForTicket;
+  private readonly selectLatestOfKind;
   private readonly selectSessionWorktrees;
   private readonly complete;
   private readonly deferRetry;
@@ -269,6 +282,7 @@ export class JobStore {
        ORDER BY id DESC LIMIT 1`,
     );
     this.selectImplementForBranch = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE kind = 'implement' AND branch = ? ORDER BY id DESC LIMIT 1");
+    this.selectLatestOfKind = db.prepare<[string, JobKind], JobRow>("SELECT * FROM jobs WHERE issue_id = ? AND kind = ? ORDER BY id DESC LIMIT 1");
     this.selectLatestForTicket = db.prepare<[string, string], JobRow>("SELECT * FROM jobs WHERE issue_id = ? OR identifier = ? COLLATE NOCASE ORDER BY id DESC LIMIT 1");
     // A session's last activity is its ticket's: any later job on the ticket (a fix round, a chat) may have resumed it.
     this.selectSessionWorktrees = db.prepare<[string], { worktree_name: string }>(
@@ -390,6 +404,12 @@ export class JobStore {
   /** The ticket's newest implement job that left a brain session in a recorded worktree. */
   latestImplementSession(issueId: string): Job | null {
     const row = this.selectLatestSession.get(issueId);
+    return row === undefined ? null : toJob(row);
+  }
+
+  /** The ticket's newest job of `kind`, whatever its status. */
+  latestOfKind(issueId: string, kind: JobKind): Job | null {
+    const row = this.selectLatestOfKind.get(issueId, kind);
     return row === undefined ? null : toJob(row);
   }
 

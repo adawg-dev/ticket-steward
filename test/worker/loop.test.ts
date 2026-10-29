@@ -30,14 +30,13 @@ const RETRYABLE: JobOutcome = { status: "failed", error: "mirror fetch failed", 
 const INTERRUPTED: JobOutcome = { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
 
 const createdTrigger: TriggerEvent = {
-  kind: "issue.created",
+  kind: "linear",
+  run: "implement",
   issueId: "issue-1",
   identifier: "API-1",
   teamKey: "API",
-  deliveryId: "delivery-1",
-  description: "The adapter loses the final chunk.",
-  stateType: null,
-  action: "implement",
+  sessionId: "session-1",
+  message: null,
 };
 
 
@@ -443,7 +442,7 @@ describe("startWorker", () => {
     const handle = start();
 
     await waitForStatus(jobId, "failed");
-    const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2" });
     await waitForStatus(laterJobId, "succeeded");
 
     expect(finishSpy).toHaveBeenCalledTimes(3);
@@ -453,9 +452,9 @@ describe("startWorker", () => {
   it("fails a job with an unreadable stored implement_result without re-running it, and keeps processing", async () => {
     const runImplement = vi.fn<typeof runImplementMock>().mockResolvedValue(SUCCEEDED);
     const publishImplementOnly = vi.fn(async () => ({ status: "succeeded" }) as const);
-    const badId = stores.jobs.enqueue({ ...createdTrigger, action: "implement" });
+    const badId = stores.jobs.enqueue({ ...createdTrigger });
     stores.db.prepare("UPDATE jobs SET implement_result = ? WHERE id = ?").run('{"handback":"x"}', badId);
-    const laterId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    const laterId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2" });
     const handle = start({ runImplement, publishImplementOnly });
 
     await waitForStatus(laterId, "succeeded");
@@ -471,7 +470,7 @@ describe("startWorker", () => {
   it("fails a job with an unreadable stored trigger instead of leaving it running", async () => {
     const badId = stores.jobs.enqueue(createdTrigger);
     stores.db.prepare("UPDATE jobs SET trigger = ? WHERE id = ?").run("{not json", badId);
-    const laterId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    const laterId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2" });
     const handle = start();
 
     await waitForStatus(laterId, "succeeded");
@@ -505,7 +504,7 @@ describe("startWorker", () => {
     await vi.waitFor(() => {
       expect(handle.state()).toEqual({ running: [{ slot: 1, jobId }] });
     });
-    const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2" });
 
     process.emit("SIGTERM");
 
@@ -600,7 +599,7 @@ describe("startWorker", () => {
     });
 
     const stopping = handle.stop();
-    const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    const laterJobId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2" });
     finish(SUCCEEDED);
     await stopping;
 
@@ -624,7 +623,7 @@ describe("startWorker", () => {
   it("requeues an interrupted running job on start and fails one out of attempts", async () => {
     const interruptedId = stores.jobs.enqueue(createdTrigger);
     stores.jobs.claimById(interruptedId);
-    const exhaustedId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-9" });
+    const exhaustedId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2" });
     stores.jobs.claimById(exhaustedId);
     stores.jobs.finish(exhaustedId, RETRYABLE);
     stores.jobs.claimById(exhaustedId);
@@ -656,7 +655,7 @@ describe("startWorker", () => {
       return { status: "failed", error: "Linear rejected the steward's app credentials", retryable: true };
     });
     const firstId = stores.jobs.enqueue(createdTrigger);
-    const secondId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2", deliveryId: "delivery-2" });
+    const secondId = stores.jobs.enqueue({ ...createdTrigger, issueId: "issue-2", identifier: "API-2" });
     start();
 
     await vi.waitFor(() => {
@@ -726,7 +725,7 @@ describe("startWorker", () => {
     const held = heldRuns();
     runImplementMock.mockImplementation(held.impl);
     const first = stores.jobs.enqueue(createdTrigger);
-    const second = stores.jobs.enqueue({ ...createdTrigger, deliveryId: "delivery-2" });
+    const second = stores.jobs.enqueue({ ...createdTrigger });
     const handle = start(onSlots(fakeSlotRunner()));
 
     await vi.waitFor(() => expect(handle.state().running.map((entry) => entry.jobId)).toEqual([first]));

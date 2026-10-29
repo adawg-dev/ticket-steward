@@ -6,23 +6,21 @@ import type { TriggerEvent } from "../../src/tracker/types.js";
 export const freshDataDir = (): string => mkdtempSync(join(tmpdir(), "steward-store-"));
 
 export const createdEvent: TriggerEvent = {
-  kind: "issue.created",
+  kind: "linear",
+  run: "implement",
   issueId: "issue-1",
   identifier: "API-1",
   teamKey: "API",
-  deliveryId: "delivery-1",
-  description: "A bug report",
-  stateType: null,
-  action: "implement",
+  sessionId: "session-1",
+  message: null,
 };
 
 export const secondEvent: TriggerEvent = {
-  kind: "issue.created",
+  kind: "linear",
+  run: "implement",
   issueId: "issue-2",
   identifier: "API-2",
   teamKey: "API",
-  deliveryId: "delivery-2",
-  description: "Another bug report",
-  stateType: null,
-  action: "implement",
+  sessionId: "session-2",
+  message: null,
 };

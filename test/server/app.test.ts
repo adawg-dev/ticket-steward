@@ -5,9 +5,11 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { buildServer } from "../../src/server/app.js";
+import { seedSettings } from "../../src/settings/schema.js";
 import { openStores, type Stores } from "../../src/store/index.js";
+import type { ActivityContent, LinearAgentApi } from "../../src/tracker/linear/agent.js";
 import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
-import { FakeTracker } from "../fakes/fakeTracker.js";
+import { FAKE_APP_USER_ID, FakeTracker } from "../fakes/fakeTracker.js";
 
 const WEBHOOK_SECRET = "webhook-secret-value";
 const WORKER_IDLE = { running: [] };
@@ -48,14 +50,59 @@ const makeConfig = (implement: typeof IMPLEMENT | null = IMPLEMENT): StewardConf
   ...(implement === null ? {} : { implement }),
 });
 
-const AGENT_LABEL = { id: "label-agent", name: "ready-for-agent" };
+const APP_USER = FAKE_APP_USER_ID;
 
-const issueCreatePayload = (teamKey = "API", description = "The adapter loses the final chunk.", labels = [AGENT_LABEL]) =>
+const sessionCreated = (over: { teamKey?: string; comment?: { id: string; body: string; userId: string } } = {}) =>
   JSON.stringify({
-    action: "create",
-    type: "Issue",
-    data: { id: "issue-1", identifier: `${teamKey}-1`, description, team: { key: teamKey }, labels },
+    action: "created",
+    type: "AgentSessionEvent",
+    appUserId: APP_USER,
+    agentSession: {
+      id: "session-1",
+      appUserId: APP_USER,
+      issueId: "issue-1",
+      issue: { id: "issue-1", identifier: "API-1", title: "Adapter", url: "https://linear.app/x/API-1", teamId: "t", team: { id: "t", key: over.teamKey ?? "API", name: "API" } },
+      ...(over.comment === undefined ? {} : { comment: over.comment, commentId: over.comment.id }),
+    },
+    promptContext: "<issue/>",
   });
+
+/** A Linear agent API whose calls are recorded and never answer, as when Linear is slow. */
+class HangingLinear implements LinearAgentApi {
+  readonly activities: Array<{ sessionId: string; content: ActivityContent }> = [];
+  private readonly never = new Promise<never>(() => undefined);
+  createActivity(sessionId: string, content: ActivityContent): Promise<void> {
+    this.activities.push({ sessionId, content });
+    return this.never;
+  }
+  setExternalUrls(): Promise<void> {
+    return this.never;
+  }
+  setPlan(): Promise<void> {
+    return this.never;
+  }
+  setDelegate(): Promise<void> {
+    return this.never;
+  }
+  moveToState(): Promise<"moved"> {
+    return this.never;
+  }
+  issueState(): Promise<{ type: string; name: string }> {
+    return this.never;
+  }
+}
+
+let linear: HangingLinear;
+
+const serverDeps = (config: StewardConfig = makeConfig()) => ({
+  config,
+  secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_CLIENT_SECRET: "lin-secret-test" },
+  stores,
+  tracker,
+  settings: { get: () => seedSettings(config) },
+  linear,
+  workerState: () => WORKER_IDLE,
+});
 
 const sign = (body: string): string => createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
 
@@ -78,13 +125,8 @@ describe("buildServer", () => {
     dataDir = await mkdtemp(join(tmpdir(), "steward-server-"));
     stores = openStores(dataDir);
     tracker = new FakeTracker();
-    app = buildServer({
-      config: makeConfig(),
-      secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_CLIENT_SECRET: "lin-secret-test" },
-      stores,
-      tracker,
-      workerState: () => WORKER_IDLE,
-    });
+    linear = new HangingLinear();
+    app = buildServer(serverDeps());
   });
 
   afterEach(async () => {
@@ -95,141 +137,93 @@ describe("buildServer", () => {
 
   describe("POST /webhooks/linear", () => {
     it("rejects an unsigned delivery and stores nothing", async () => {
-      const response = await post("Issue", "delivery-1", issueCreatePayload(), "");
+      const response = await post("AgentSessionEvent", "delivery-1", sessionCreated(), "");
 
       expect(response.statusCode).toBe(401);
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
     it("rejects a tampered body", async () => {
-      const response = await post("Issue", "delivery-1", issueCreatePayload("API", "tampered"), sign(issueCreatePayload()));
+      const response = await post("AgentSessionEvent", "delivery-1", sessionCreated({ teamKey: "OPS" }), sign(sessionCreated()));
 
       expect(response.statusCode).toBe(401);
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
-    it("no longer starts work from the implement label on a signed Issue create", async () => {
-      const response = await post("Issue", "delivery-1", issueCreatePayload());
+    it("enqueues an implement when the steward is delegated a ticket", async () => {
+      const response = await post("AgentSessionEvent", "delivery-1", sessionCreated());
 
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ ok: true, action: "skip" });
-      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+      expect(response.json()).toEqual({ ok: true, action: "implement" });
+      expect(stores.jobs.list({ limit: 10 }).map((job) => job.trigger)).toEqual([
+        { kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-1", message: null },
+      ]);
     });
 
-    it("skips a signed Issue create without the implement label", async () => {
-      const response = await post("Issue", "delivery-1", issueCreatePayload("API", "The adapter loses the final chunk.", [{ id: "label-triage", name: "needs-triage" }]));
-
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ ok: true, action: "skip" });
-      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
-    });
-
-    it("answers 200 for a repeated delivery and reports it as a duplicate", async () => {
-      await post("Issue", "delivery-1", issueCreatePayload());
-      const response = await post("Issue", "delivery-1", issueCreatePayload());
+    it("acts on a redelivery once", async () => {
+      await post("AgentSessionEvent", "delivery-1", sessionCreated());
+      const response = await post("AgentSessionEvent", "delivery-1", sessionCreated());
 
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ ok: true, action: "duplicate" });
-      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+      expect(stores.jobs.list({ limit: 10 })).toHaveLength(1);
     });
 
-    it("ignores an Issue create for a team outside the allowlist", async () => {
-      const response = await post("Issue", "delivery-1", issueCreatePayload("OPS"));
+    it("answers 200 before Linear does: a mention on an unknown ticket gets its reply posted after the response", async () => {
+      const response = await post("AgentSessionEvent", "delivery-1", sessionCreated({ comment: { id: "c-1", body: "@steward hi", userId: "user-9" } }));
 
       expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ok: true, action: "assign_me" });
+      expect(linear.activities).toEqual([{ sessionId: "session-1", content: { type: "response", body: "Assign me to the ticket to start work." } }]);
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
-    it("ignores an Issue update", async () => {
-      const body = JSON.stringify({ action: "update", type: "Issue", data: { id: "issue-1", identifier: "API-1", team: { key: "API" } } });
-      const response = await post("Issue", "delivery-1", body);
+    it("ignores a session started from the steward's own comment", async () => {
+      const response = await post("AgentSessionEvent", "delivery-1", sessionCreated({ comment: { id: "c-1", body: "Done.", userId: APP_USER } }));
 
-      expect(response.statusCode).toBe(200);
-      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+      expect(response.json()).toEqual({ ok: true, action: "ignored" });
+      expect(linear.activities).toEqual([]);
     });
 
-    it("skips a labelled ticket when implement is not configured", async () => {
-      await app.close();
-      app = buildServer({
-        config: makeConfig(null),
-        secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, LINEAR_CLIENT_SECRET: "lin-secret-test" },
-        stores,
-        tracker,
-        workerState: () => WORKER_IDLE,
-      });
-      const response = await post("Issue", "delivery-1", issueCreatePayload());
+    it("ignores a ticket of a team outside the allowlist", async () => {
+      const response = await post("AgentSessionEvent", "delivery-1", sessionCreated({ teamKey: "OPS" }));
 
-      expect(response.json()).toEqual({ ok: true, action: "skip" });
-      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
-    });
-
-    describe("when a label is added", () => {
-      const labelUpdate = (stateType: string, labels: Array<{ id: string; name: string }>, previousLabelIds: string[]) =>
-        JSON.stringify({
-          action: "update",
-          type: "Issue",
-          data: {
-            id: "issue-1",
-            identifier: "API-1",
-            description: "The adapter loses the final chunk.",
-            team: { key: "API" },
-            state: { name: "Todo", type: stateType },
-            labels,
-          },
-          updatedFrom: { labelIds: previousLabelIds },
-        });
-
-      const readyForAgentUpdate = (stateType = "unstarted") => labelUpdate(stateType, [AGENT_LABEL], []);
-
-      it("ignores ready-for-agent being added: assigning the steward starts work now", async () => {
-        const response = await post("Issue", "delivery-9", readyForAgentUpdate());
-
-        expect(response.json()).toEqual({ ok: true, action: "ignored" });
-        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
-      });
-
-      it("ignores a label other than ready-for-agent", async () => {
-        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", [{ id: "label-triage", name: "needs-triage" }], []));
-
-        expect(response.json()).toEqual({ ok: true, action: "ignored" });
-        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
-      });
-
-      it("does not restart a handed-back loop when ready-for-agent is added", async () => {
-        const jobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
-        stores.jobs.claimById(jobId);
-        stores.jobs.finish(jobId, { status: "succeeded" });
-        const id = stores.loops.create({
-          issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: jobId, branch: "feature/api-1", baseSha: "a".repeat(40), headSha: "b".repeat(40),
-          worktreeName: "api-1", labelDriven: false, sessionId: null,
-        });
-        stores.loops.update(id, { state: "handed_back" });
-
-        const response = await post("Issue", "delivery-9", readyForAgentUpdate());
-
-        expect(response.json()).toEqual({ ok: true, action: "ignored" });
-        expect(stores.jobs.list({ status: "queued", limit: 10 })).toEqual([]);
-      });
-
-      it("ignores an update to a ticket that already had the label", async () => {
-        const response = await post("Issue", "delivery-1", labelUpdate("unstarted", [AGENT_LABEL], [AGENT_LABEL.id]));
-
-        expect(response.json()).toEqual({ ok: true, action: "ignored" });
-        expect(stores.jobs.list({ limit: 10 })).toEqual([]);
-      });
-    });
-
-    it("ignores an AgentSessionEvent delivery", async () => {
-      const body = JSON.stringify({
-        action: "created",
-        type: "AgentSessionEvent",
-        agentSession: { id: "session-1", issueId: "issue-1", issue: { identifier: "API-1", team: { key: "API" } } },
-      });
-      const response = await post("AgentSessionEvent", "delivery-1", body);
-
-      expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ ok: true, action: "ignored" });
       expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+    });
+
+    it("ignores an Issue update that is not the steward losing the delegation, and the old label trigger", async () => {
+      const update = JSON.stringify({
+        action: "update",
+        type: "Issue",
+        data: { id: "issue-1", identifier: "API-1", team: { key: "API" }, labels: [{ id: "label-agent", name: "ready-for-agent" }] },
+        updatedFrom: { labelIds: [] },
+      });
+      const response = await post("Issue", "delivery-1", update);
+
+      expect(response.json()).toEqual({ ok: true, action: "ignored" });
+      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+    });
+
+    it("unassigns when the steward is removed as the delegate", async () => {
+      const update = JSON.stringify({
+        action: "update",
+        type: "Issue",
+        data: { id: "issue-1", identifier: "API-1", team: { key: "API" }, delegateId: null },
+        updatedFrom: { delegateId: APP_USER },
+      });
+      const response = await post("Issue", "delivery-1", update);
+
+      expect(response.json()).toEqual({ ok: true, action: "unassign" });
+    });
+
+    it("answers 503, recording nothing, while the app's own user cannot be read", async () => {
+      vi.spyOn(tracker, "appUserId").mockRejectedValue(new Error("Linear down"));
+
+      const response = await post("AgentSessionEvent", "delivery-1", sessionCreated());
+
+      expect(response.statusCode).toBe(503);
+      expect(stores.deliveries.seen("delivery-1")).toBe(false);
     });
   });
 
@@ -301,6 +295,7 @@ describe("buildServer", () => {
         secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, GITLAB_WEBHOOK_SIGNING_TOKEN: SIGNING_TOKEN },
         stores,
         tracker,
+        settings: { get: () => seedSettings({}) },
         workerState: () => WORKER_IDLE,
       });
     });
@@ -357,6 +352,7 @@ describe("buildServer", () => {
         secrets: { GITLAB_WEBHOOK_SECRET: "gitlab-secret-value" },
         stores,
         tracker,
+        settings: { get: () => seedSettings({}) },
         workerState: () => WORKER_IDLE,
       });
       const { jobId } = waitingLoop("awaiting_mr");
@@ -499,6 +495,7 @@ describe("buildServer", () => {
           secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, GITLAB_WEBHOOK_SIGNING_TOKEN: SIGNING_TOKEN },
           stores,
           tracker,
+          settings: { get: () => seedSettings({}) },
           workerState: () => WORKER_IDLE,
           gitlab,
         });
@@ -657,7 +654,7 @@ describe("buildServer", () => {
     it("lists every running slot", async () => {
       await app.close();
       const running = { running: [{ slot: 1, jobId: 12 }, { slot: 2, jobId: 14 }] };
-      app = buildServer({ config: makeConfig(), secrets: {}, stores, tracker, workerState: () => running });
+      app = buildServer({ config: makeConfig(), secrets: {}, stores, tracker, settings: { get: () => seedSettings({}) }, workerState: () => running });
 
       expect((await app.inject({ method: "GET", url: "/health" })).json().worker).toEqual(running);
     });

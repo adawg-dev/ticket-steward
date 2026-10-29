@@ -20,9 +20,7 @@ const GREPTILE: GreptileConfig = {
   reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 60, ciLogLines: 200,
 };
 
-const labeled: TriggerEvent = {
-  kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: "unstarted", action: "implement",
-};
+const labeled: TriggerEvent = { kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-1", message: null };
 
 let dataDir: string;
 let stores: Stores;
@@ -91,8 +89,8 @@ describe("startLoop", () => {
     expect(stores.jobs.list({ limit: 50 }).filter((row) => row.kind === "await_review")).toHaveLength(1);
   });
 
-  it("starts from a new-ticket implement trigger too", () => {
-    const job = implementJob({ ...labeled, kind: "issue.created" });
+  it("starts from a legacy implement with no agent session too", () => {
+    const job = implementJob({ ...labeled, sessionId: null });
 
     expect(startLoop(depsWith(GREPTILE), job, start)).not.toBeNull();
   });
@@ -109,9 +107,9 @@ describe("startLoop", () => {
     expect(stores.loops.latestForIssue("issue-1")).toBeNull();
   });
 
-  it("returns null for a label trigger that is not implement", () => {
-    const unlabeled: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: "unstarted" };
-    expect(startLoop(depsWith(GREPTILE), implementJob(unlabeled), start)).toBeNull();
+  it("returns null for a Linear chat trigger", () => {
+    const chat: TriggerEvent = { ...labeled, run: "chat", message: "why?" };
+    expect(startLoop(depsWith(GREPTILE), implementJob(chat), start)).toBeNull();
   });
 
   it("returns null before the push", () => {
@@ -217,8 +215,9 @@ describe("runRestart", () => {
     expect(loopOf(id).labelDriven).toBe(false);
   });
 
-  it("with no open MR, says so on the loop's last MR and queues a fresh implement from the label", async () => {
+  it("with no open MR, says so on the loop's last MR and queues a fresh Linear implement in the ticket's current agent session", async () => {
     const id = handedBackLoop();
+    stores.agentSessions.record("session-9", "issue-1", "API-1");
 
     const outcome = await runRestart(claimRestart(id, true), restartDeps());
 
@@ -228,7 +227,7 @@ describe("runRestart", () => {
     expect(gitlab.notes[0]).toContain("<!-- ticket-steward:loop");
     const implement = queued("implement");
     expect(implement).toHaveLength(1);
-    expect(implement[0]?.trigger).toMatchObject({ kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
+    expect(implement[0]?.trigger).toEqual({ kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-9", message: null });
     expect(loopOf(id).state).toBe("handed_back");
   });
 

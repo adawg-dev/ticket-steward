@@ -12,19 +12,18 @@ export interface LoopStart {
   worktreeName: string;
 }
 
-/** A trigger from the implement label (on a new ticket or added later), as opposed to the CLI or a loop step. */
-export const isLabelImplement = (trigger: TriggerEvent): boolean =>
-  (trigger.kind === "issue.created" || trigger.kind === "issue.labeled") && trigger.action === "implement";
+/** An implement from Linear (delegation, or the label trigger before it), as opposed to the CLI or a loop step. */
+export const isLinearImplement = (trigger: TriggerEvent): boolean => trigger.kind === "linear" && trigger.run === "implement";
 
 /**
- * Starts the Greptile fix loop for a pushed, label-triggered implement job: creates the loop at round 0 and enqueues its
+ * Starts the Greptile fix loop for a pushed implement job from Linear: creates the loop at round 0 and enqueues its
  * first await. Returns the existing loop's id when the job already has one, and null when no loop applies.
  */
 export const startLoop = (deps: Pick<PipelineDeps, "config" | "stores">, job: Job, start: LoopStart): number | null => {
   const { stores } = deps;
   const existing = stores.loops.forImplementJob(job.id);
   if (existing !== null) return existing.id;
-  if (deps.config.greptile === undefined || !isLabelImplement(job.trigger) || job.pushedAt === null) return null;
+  if (deps.config.greptile === undefined || !isLinearImplement(job.trigger) || job.pushedAt === null) return null;
   const { branch, commitSha } = job;
   if (branch === null || commitSha === null) return null;
   return transaction(stores.db, () => {
@@ -73,7 +72,7 @@ const resumeLoop = async (deps: RestartDeps, loop: Loop, mr: MergeRequestInfo, l
 
 /**
  * No open MR to resume on: says so on the loop's last MR, if it had one, and queues an implement, which hands back with "a branch already exists"
- * while the branch is there. A label restart queues it as the label would; `steward fix` queues a CLI one that leaves labels alone.
+ * while the branch is there. A label restart queues a Linear implement in the ticket's current agent session; a CLI one otherwise.
  */
 const restartImplement = async (deps: RestartDeps, ctx: RunContext, loop: Loop, labelDriven: boolean): Promise<JobOutcome> => {
   try {
@@ -83,7 +82,7 @@ const restartImplement = async (deps: RestartDeps, ctx: RunContext, loop: Loop, 
   }
   const { issueId, identifier, teamKey } = loop;
   const trigger: TriggerEvent = labelDriven
-    ? { kind: "issue.labeled", issueId, identifier, teamKey, deliveryId: `restart-${ctx.jobId}`, description: "", stateType: null, action: "implement" }
+    ? { kind: "linear", run: "implement", issueId, identifier, teamKey, sessionId: deps.stores.agentSessions.current(issueId), message: null }
     : { kind: "cli", issueId, identifier, teamKey, action: "implement" };
   deps.stores.jobs.enqueue(trigger);
   return { status: "succeeded" };

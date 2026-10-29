@@ -1,19 +1,20 @@
-/** The only label that starts work; enrich and its triage label were removed on 2026-10-28. */
-export type LabelAction = "implement";
-
 export type TriggerEvent =
+  | { kind: "cli"; issueId: string; identifier: string; teamKey: string; action?: "implement" }
   | {
-      kind: "issue.created" | "issue.labeled";
+      /**
+       * Linear's agent panel: an implement (the steward was delegated the ticket, or a person answered its questions) or a
+       * chat (a mention or a prompt), each in the ticket's agent session.
+       */
+      kind: "linear";
+      run: "implement" | "chat";
       issueId: string;
       identifier: string;
       teamKey: string;
-      deliveryId: string;
-      description: string;
-      stateType: string | null;
-      /** Set when the event added the implement label; absent on a created ticket without it, which intake skips. */
-      action?: LabelAction;
+      /** The Linear agent session the work answers in; null on a job from the label trigger, which had none. */
+      sessionId: string | null;
+      /** What the person said: the mention, prompt or reply to the steward's questions; null on a fresh implement. */
+      message: string | null;
     }
-  | { kind: "cli"; issueId: string; identifier: string; teamKey: string; action?: LabelAction }
   | {
       kind: "loop";
       issueId: string;
@@ -45,8 +46,6 @@ export type TriggerEvent =
 /** One step of a Greptile fix loop: wait for the MR's review, fix its findings, or restart a handed-back loop. */
 export type LoopStep = "await" | "fix" | "restart";
 
-/** A trigger about a ticket itself (webhook or CLI), as opposed to a step of its fix loop or a chat. */
-export type IssueTrigger = Exclude<TriggerEvent, { kind: "loop" | "chat" }>;
 
 export interface TicketBundle {
   id: string;

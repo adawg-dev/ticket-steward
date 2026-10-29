@@ -4,11 +4,14 @@ import type { StewardConfig } from "../config/schema.js";
 import { chatIntake, type ChatAction } from "../chat/intake.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import { parseGitlabEvent, verifyGitlabWebhook, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
-import { shouldEnqueue, type IntakeDecision } from "../core/intake.js";
+import { errorMessage } from "../core/workspace.js";
+import { ASSIGN_ME_REPLY, linearIntake, type LinearIntakeResult } from "../linear/intake.js";
 import { logger } from "../log.js";
-import { loopSubject, transaction, type Job, type Loop, type Stores } from "../store/index.js";
-import { parseEvent, verifySignature } from "../tracker/linear/webhook.js";
-import type { Tracker, TriggerEvent } from "../tracker/types.js";
+import type { Settings } from "../settings/schema.js";
+import { loopSubject, type Job, type Loop, type Stores } from "../store/index.js";
+import type { LinearAgentApi } from "../tracker/linear/agent.js";
+import { parseLinearEvent, verifySignature, type LinearEvent } from "../tracker/linear/webhook.js";
+import type { Tracker } from "../tracker/types.js";
 import type { WorkerState } from "../worker/index.js";
 
 export interface ServerDeps {
@@ -17,6 +20,10 @@ export interface ServerDeps {
   stores: Stores;
   tracker: Tracker;
   workerState: () => WorkerState;
+  /** The runtime settings, read on each use. */
+  settings: { get(): Settings };
+  /** Linear's agent API with the app's token; absent, nothing is answered in the panel (and that is logged). */
+  linear?: LinearAgentApi;
   /** Set with `greptile` or `chat` on GitLab: chat intake checks a note author's access and answers notes it cannot serve. */
   gitlab?: GitLabMrApi;
 }
@@ -28,9 +35,6 @@ export interface HealthReport {
   counts: { queued: number; failedLast24h: number };
   lastSuccessAt: string | null;
 }
-
-type Intake = IntakeDecision | { action: "duplicate" };
-type WebhookEvent = Extract<TriggerEvent, { kind: "issue.created" | "issue.labeled" }>;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const COUNT_LIMIT = 100_000;
@@ -44,27 +48,6 @@ const parseJson = (raw: string): unknown => {
     return undefined;
   }
 };
-
-const intake = (deps: ServerDeps, event: WebhookEvent): Intake =>
-  transaction(deps.stores.db, () => {
-    const { jobs, deliveries, loops } = deps.stores;
-    if (!deliveries.markSeen(event.deliveryId)) return { action: "duplicate" };
-    if (deps.config.implement === undefined) return { action: "skip", reason: "implement is not configured" };
-    const loop = loops.latestForIssue(event.issueId);
-    const queuedKind = loop?.state === "handed_back" ? "restart" : "implement";
-    const decision = shouldEnqueue({
-      event,
-      allowlist: deps.config.tracker.teams,
-      priorSuccess: jobs.hasSucceeded(event.issueId, "implement"),
-      hasQueuedJob: jobs.findQueued(event.issueId, queuedKind) !== null,
-      loop,
-    });
-    if (decision.action === "enqueue") jobs.enqueue(event);
-    if (decision.action === "restart" && loop !== null) {
-      jobs.enqueue({ kind: "loop", issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, loopId: loop.id, step: "restart", labelDriven: true });
-    }
-    return decision;
-  });
 
 const isFailedWithin = (job: Job, sinceMs: number): boolean =>
   job.finishedAt !== null && new Date(job.finishedAt).getTime() >= sinceMs;
@@ -85,24 +68,49 @@ const healthReport = (deps: ServerDeps): HealthReport => {
   };
 };
 
+/** What intake decided that Linear must hear: run after the webhook is answered, so Linear's 5 s deadline never waits on it. */
+const answerInPanel = async (deps: ServerDeps, event: LinearEvent, result: LinearIntakeResult): Promise<void> => {
+  if (result.action !== "assign_me" || event.kind === "issue.undelegated") return;
+  if (deps.linear === undefined) {
+    logger.warn({ identifier: event.identifier, action: result.action }, "linear: no agent API to answer in the panel");
+    return;
+  }
+  await deps.linear.createActivity(event.sessionId, { type: "response", body: ASSIGN_ME_REPLY });
+};
+
+/**
+ * Agent-session events (delegation, mention, prompt) and the steward losing a delegation. Intake records the delivery
+ * and enqueues work without calling Linear; anything Linear must hear is sent after the reply.
+ */
 const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
   app.post<{ Body: string }>("/webhooks/linear", async (request, reply) => {
     const secret = deps.secrets.LINEAR_WEBHOOK_SECRET;
     const signature = header(request.headers["linear-signature"]);
+    const delivery = header(request.headers["linear-delivery"]);
     if (secret === undefined || !verifySignature(request.body, signature, secret)) {
-      logger.warn({ delivery: header(request.headers["linear-delivery"]) }, "webhook signature rejected");
+      logger.warn({ delivery }, "webhook signature rejected");
       return reply.code(401).send({ ok: false });
     }
     const body = parseJson(request.body);
     if (body === undefined) return reply.code(400).send({ ok: false });
 
-    // The label trigger is gone: a ticket event reaches intake, which skips it, until agent-session intake replaces this.
-    const event = parseEvent({ event: header(request.headers["linear-event"]), delivery: header(request.headers["linear-delivery"]) }, body);
-    if (event === null || event.kind === "cli") return { ok: true, action: "ignored" };
+    // Read once and cached (serve reads it at start); until it can be read, nothing is recorded and Linear redelivers.
+    let appUserId: string;
+    try {
+      appUserId = await deps.tracker.appUserId();
+    } catch (err) {
+      logger.warn({ delivery, err: errorMessage(err) }, "webhook: the app's Linear user could not be read");
+      return reply.code(503).send({ ok: false });
+    }
+    const event = parseLinearEvent({ event: header(request.headers["linear-event"]), delivery }, body, appUserId);
+    if (event === null) return { ok: true, action: "ignored" };
 
-    const decision = intake(deps, event);
-    logger.info({ delivery: event.deliveryId, kind: event.kind, identifier: event.identifier, action: decision.action }, "webhook received");
-    return { ok: true, action: decision.action };
+    const result = await linearIntake(deps, event);
+    logger.info({ delivery, kind: event.kind, identifier: event.identifier, action: result.action, jobId: result.jobId }, "webhook received");
+    answerInPanel(deps, event, result).catch((err: unknown) =>
+      logger.warn({ delivery, identifier: event.identifier, err: errorMessage(err) }, "linear: the panel answer failed"),
+    );
+    return { ok: true, action: result.action };
   });
 };
 

@@ -45,7 +45,7 @@ const issue: TicketBundle = {
   templates: [],
 };
 
-const trigger: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: issue.description, stateType: "unstarted", action: "implement" };
+const trigger: TriggerEvent = { kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-1", message: null };
 
 const BRANCH = "fix/API-1-adapter-drops-the-last-chunk";
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
@@ -558,7 +558,7 @@ describe("runImplement through an executor", () => {
     const first = claim();
     expect(await runImplement(first, { ...makeDeps(undefined), executor: interrupted })).toEqual({ status: "failed", error: "interrupted", retryable: true });
 
-    const second = claim({ ...trigger, deliveryId: "d-2" });
+    const second = claim({ ...trigger, sessionId: "session-2" });
     expect(await runImplement(second, { ...makeDeps(undefined), executor: setup })).toEqual({ status: "failed", error: "setup failed:\npnpm: not found\n", retryable: true });
     expect(stores.attempts.forJob(second.jobId)[0]?.setupTail).toBe("pnpm: not found\n");
   });

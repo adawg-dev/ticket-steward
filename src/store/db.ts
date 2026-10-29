@@ -122,6 +122,14 @@ CREATE TABLE IF NOT EXISTS deliveries (
   seen_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  linear_session_id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  identifier TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_sessions_issue ON agent_sessions (issue_id);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,

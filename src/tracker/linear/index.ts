@@ -6,7 +6,7 @@ export { createClientCredentialsToken, LINEAR_APP_SCOPES, LinearCredentialsRejec
 export { createLinearClient, LinearTracker } from "./client.js";
 export { listIssueTemplates } from "./templateList.js";
 export { toTemplateSummary } from "./templates.js";
-export { parseEvent, verifySignature } from "./webhook.js";
+export { parseLinearEvent, verifySignature, type LinearEvent } from "./webhook.js";
 
 export const requireLinearAppCredentials = (secrets: Secrets): { clientId: string; clientSecret: string } => {
   const { LINEAR_CLIENT_ID: clientId, LINEAR_CLIENT_SECRET: clientSecret } = secrets;

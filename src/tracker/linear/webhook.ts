@@ -1,6 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import type { IssueTrigger, LabelAction } from "../types.js";
 
 export const verifySignature = (rawBody: string | Buffer, signatureHex: string | undefined, secret: string): boolean => {
   if (signatureHex === undefined || !/^[0-9a-f]+$/i.test(signatureHex)) return false;
@@ -9,51 +8,114 @@ export const verifySignature = (rawBody: string | Buffer, signatureHex: string |
   return given.length === expected.length && timingSafeEqual(given, expected);
 };
 
-const IssueSchema = z.object({
-  action: z.enum(["create", "update"]),
-  data: z.object({
+/** A Linear webhook the steward acts on: its agent sessions (delegation, mention, prompt) and losing a delegation. */
+export type LinearEvent =
+  | {
+      kind: "session.created";
+      deliveryId: string;
+      sessionId: string;
+      issueId: string;
+      identifier: string;
+      teamKey: string;
+      /** True when the issue was delegated to the steward; false when a comment mentioned it. */
+      delegated: boolean;
+      /** The mentioning comment; null on a delegation. */
+      commentBody: string | null;
+      promptContext: string;
+      /** The comment that opened the session is the steward's own: never work. */
+      byApp: boolean;
+    }
+  | {
+      kind: "session.prompted";
+      deliveryId: string;
+      sessionId: string;
+      issueId: string;
+      identifier: string;
+      teamKey: string;
+      body: string;
+      /** The person pressed stop in the agent panel. */
+      stop: boolean;
+      authorName: string;
+      /** The prompt is the steward's own: never work. */
+      byApp: boolean;
+    }
+  | { kind: "issue.undelegated"; deliveryId: string; issueId: string; identifier: string; teamKey: string };
+
+const SessionIssue = z.object({ id: z.string(), identifier: z.string(), team: z.object({ key: z.string() }) });
+
+const AgentSessionEventSchema = z.object({
+  action: z.enum(["created", "prompted"]),
+  appUserId: z.string(),
+  agentSession: z.object({
     id: z.string(),
-    identifier: z.string(),
-    description: z.string().nullish(),
-    team: z.object({ key: z.string() }),
-    state: z.object({ type: z.string() }).nullish(),
-    labels: z.array(z.object({ id: z.string(), name: z.string() })).nullish(),
+    issue: SessionIssue.nullish(),
+    comment: z.object({ body: z.string(), userId: z.string().nullish() }).nullish(),
   }),
-  updatedFrom: z.object({ labelIds: z.array(z.string()).nullish() }).nullish(),
+  agentActivity: z
+    .object({
+      content: z.object({ body: z.string().nullish() }),
+      signal: z.string().nullish(),
+      userId: z.string().nullish(),
+      user: z.object({ name: z.string() }).nullish(),
+    })
+    .nullish(),
+  promptContext: z.string().nullish(),
 });
 
-type IssuePayload = z.infer<typeof IssueSchema>;
+const IssueUpdateSchema = z.object({
+  action: z.literal("update"),
+  data: z.object({ id: z.string(), identifier: z.string(), team: z.object({ key: z.string() }), delegateId: z.string().nullish() }),
+  updatedFrom: z.object({ delegateId: z.string().nullish() }).nullish(),
+});
 
-export interface TriggerLabels {
-  implement: string;
-}
-
-/** True when the payload carries `name` and it is new: present on a create, or absent from updatedFrom.labelIds on an update. */
-const newlyAdded = (payload: IssuePayload, name: string): boolean => {
-  const wanted = name.toLowerCase();
-  const label = payload.data.labels?.find((candidate) => candidate.name.toLowerCase() === wanted);
-  if (label === undefined) return false;
-  if (payload.action === "create") return true;
-  const previous = payload.updatedFrom?.labelIds;
-  return previous !== undefined && previous !== null && !previous.includes(label.id);
+const parseSession = (deliveryId: string, body: unknown, appUserId: string): LinearEvent | null => {
+  const parsed = AgentSessionEventSchema.safeParse(body);
+  // Another app's session (a workspace may install several agents) is not ours to answer.
+  if (!parsed.success || parsed.data.appUserId !== appUserId) return null;
+  const { action, agentSession, agentActivity, promptContext } = parsed.data;
+  const issue = agentSession.issue;
+  if (issue === undefined || issue === null) return null;
+  const base = { deliveryId, sessionId: agentSession.id, issueId: issue.id, identifier: issue.identifier, teamKey: issue.team.key };
+  if (action === "created") {
+    const comment = agentSession.comment ?? null;
+    return {
+      kind: "session.created",
+      ...base,
+      delegated: comment === null,
+      commentBody: comment?.body ?? null,
+      promptContext: promptContext ?? "",
+      byApp: comment !== null && comment.userId === appUserId,
+    };
+  }
+  if (agentActivity === undefined || agentActivity === null) return null;
+  return {
+    kind: "session.prompted",
+    ...base,
+    body: agentActivity.content.body ?? "",
+    stop: agentActivity.signal === "stop",
+    authorName: agentActivity.user?.name ?? "someone",
+    byApp: agentActivity.userId === appUserId,
+  };
 };
 
-const labelAction = (payload: IssuePayload, labels: TriggerLabels | undefined): LabelAction | null =>
-  labels !== undefined && newlyAdded(payload, labels.implement) ? "implement" : null;
-
-export const parseEvent = (
-  headers: { event: string | undefined; delivery: string | undefined },
-  body: unknown,
-  opts: { labels?: TriggerLabels | undefined } = {},
-): IssueTrigger | null => {
-  const { event, delivery } = headers;
-  if (delivery === undefined || event !== "Issue") return null;
-  const parsed = IssueSchema.safeParse(body);
+/** An Issue update whose previous delegate was the steward and whose delegate now is not. Any other Issue event is not ours. */
+const parseIssue = (deliveryId: string, body: unknown, appUserId: string): LinearEvent | null => {
+  const parsed = IssueUpdateSchema.safeParse(body);
   if (!parsed.success) return null;
-  const { id, identifier, description, team, state } = parsed.data.data;
-  const base = { issueId: id, identifier, teamKey: team.key, deliveryId: delivery, description: description ?? "", stateType: state?.type ?? null };
-  const action = labelAction(parsed.data, opts.labels);
-  // A created ticket without the implement label still reaches intake, which skips it with a reason; other updates are ignored.
-  if (parsed.data.action === "create") return action === null ? { kind: "issue.created", ...base } : { kind: "issue.created", ...base, action };
-  return action === null ? null : { kind: "issue.labeled", ...base, action };
+  const { data, updatedFrom } = parsed.data;
+  if (updatedFrom?.delegateId !== appUserId || data.delegateId === appUserId) return null;
+  return { kind: "issue.undelegated", deliveryId, issueId: data.id, identifier: data.identifier, teamKey: data.team.key };
+};
+
+/** The event the steward acts on, or null for anything else (other types, other apps' sessions, malformed bodies). */
+export const parseLinearEvent = (
+  headers: { event?: string | undefined; delivery?: string | undefined },
+  body: unknown,
+  appUserId: string,
+): LinearEvent | null => {
+  const { event, delivery } = headers;
+  if (delivery === undefined) return null;
+  if (event === "AgentSessionEvent") return parseSession(delivery, body, appUserId);
+  if (event === "Issue") return parseIssue(delivery, body, appUserId);
+  return null;
 };

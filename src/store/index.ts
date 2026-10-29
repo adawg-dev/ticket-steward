@@ -1,3 +1,4 @@
+import { AgentSessionStore } from "./agentSessions.js";
 import { AttemptStore } from "./attempts.js";
 import { openDatabase, type Database } from "./db.js";
 import { DeliveryStore } from "./deliveries.js";
@@ -19,6 +20,7 @@ export {
   type LoopState,
   type NewLoop,
 } from "./loops.js";
+export { AgentSessionStore } from "./agentSessions.js";
 export { AttemptStore, type Attempt, type AttemptPatch } from "./attempts.js";
 export { DeliveryStore } from "./deliveries.js";
 export { PushStore, type NewPush, type Push } from "./pushes.js";
@@ -34,6 +36,7 @@ export interface Stores {
   pushes: PushStore;
   leases: LeaseStore;
   runTokens: RunTokens;
+  agentSessions: AgentSessionStore;
 }
 
 export const openStores = (dataDir: string): Stores => {
@@ -47,6 +50,7 @@ export const openStores = (dataDir: string): Stores => {
     pushes: new PushStore(db),
     leases: new LeaseStore(db),
     runTokens: new RunTokens(db),
+    agentSessions: new AgentSessionStore(db),
   };
 };
 

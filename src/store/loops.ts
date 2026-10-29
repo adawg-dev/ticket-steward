@@ -1,8 +1,11 @@
 import { z } from "zod";
 import { nowIso, readStored, type Database } from "./db.js";
 
-/** Where a ticket's Greptile fix loop stands; the last three are ended. */
-export type LoopState = "awaiting_mr" | "awaiting_review" | "fixing" | "passed" | "handed_back" | "stopped";
+/**
+ * Where a ticket's Greptile fix loop stands; `passed`, `handed_back` and `stopped` are ended. `unassigned` (the steward was
+ * removed as the ticket's delegate) is neither active nor ended: the loop is parked until it is revived.
+ */
+export type LoopState = "awaiting_mr" | "awaiting_review" | "fixing" | "passed" | "handed_back" | "stopped" | "unassigned";
 
 export const ACTIVE_LOOP_STATES: readonly LoopState[] = ["awaiting_mr", "awaiting_review", "fixing"];
 
@@ -58,7 +61,7 @@ export type LoopPatch = Partial<Omit<Loop, "id" | "issueId" | "identifier" | "te
 
 const ENDED_STATES: readonly LoopState[] = ["passed", "handed_back", "stopped"];
 
-const LoopStateSchema = z.enum(["awaiting_mr", "awaiting_review", "fixing", "passed", "handed_back", "stopped"]);
+const LoopStateSchema = z.enum(["awaiting_mr", "awaiting_review", "fixing", "passed", "handed_back", "stopped", "unassigned"]);
 
 const LoopRoundSchema = z.object({
   round: z.number().int(),
