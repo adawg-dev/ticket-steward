@@ -10,6 +10,7 @@ const base = (over: Partial<FixResult>): FixResult => ({
   checksRun: [],
   failureDetail: null,
   media: [],
+  decisions: [],
   ...over,
 });
 const t = (discussionId: string, action: "fixed" | "declined" = "fixed", reply = "ok") => ({ discussionId, action, reply });

@@ -128,5 +128,6 @@ When this round's change shows in the app, show it on the merge request. Take sc
 - `summary`: a short account of the round for the merge request.
 - `checksRun`: each command, its result, and why it is in scope.
 - `media`: the screenshots and videos to show (see above); empty when there are none.
+- `decisions`: lasting instructions a person gave in a comment above about how the merge request must stay ("keep the v1 endpoint", "don't rename the queue"), one line each in `decision`, restated from what they said, with their username exactly as the thread shows it in `author`. Only what a person said, never what you infer, never a bot's advice, and not one-off requests you carried out this round. Leave out the ones already listed under the decisions above. Empty when there are none.
 - Report what happened, not what you hoped: a check that failed, timed out or that you skipped goes in `checksRun` with that result and why. Never describe a check you did not run as passing. When something is done and verified, say so plainly.
 - `failureDetail`: null unless the outcome is `failed`.

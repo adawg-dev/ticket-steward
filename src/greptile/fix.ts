@@ -13,13 +13,14 @@ import { runIdOf, settingsOf, stewardChecks } from "../implement/pipeline.js";
 import type { PushTarget } from "../push/target.js";
 import { PERSON_COMMITS_MARKER, setupTailOf, STOPPED_JOB_ERROR } from "../run/execute.js";
 import { linearSessionFor, NO_SESSION, stoppedResponse, type LinearSession } from "../linear/session.js";
+import { logger } from "../log.js";
 import { localExecutor } from "../run/local.js";
 import { seedSettings } from "../settings/schema.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { ciFailuresOf, type CiFailure } from "./ci.js";
-import { workList, type WorkItem } from "./evaluate.js";
+import { peopleOn, workList, type WorkItem } from "./evaluate.js";
 import { renderFixPrompt } from "./prompt.js";
 import { publishHandback, publishRoundMedia, publishStop, publishThreads } from "./publish.js";
 import { validateFixResult, type FixResult, type StoredFix } from "./result.js";
@@ -204,11 +205,32 @@ const handleResult = async (
   return decide(fix, await published(), mr);
 };
 
+/**
+ * Adds the lasting instructions people gave in the round's comments to the loop, which shows them to every later round
+ * and chat. A decision is kept only when its author is a person who wrote in one of the round's discussions: a bot's
+ * advice, or a name on no comment, is dropped. Recorded before the round is stored: a retry that runs the brain again
+ * finds them already there, and duplicates are never added.
+ */
+const recordDecisions = (fix: Fix, result: FixResult, people: Set<string>): void => {
+  const { deps, loop } = fix;
+  const kept = result.decisions.filter((item) => people.has(item.author.trim().replace(/^@/, "").toLowerCase())).map((item) => deps.redactor.redact(item.decision));
+  const dropped = result.decisions.length - kept.length;
+  if (dropped > 0) logger.info({ loopId: loop.id, dropped }, "fix: decisions not from a person on the round's comments were dropped");
+  if (kept.length === 0) return;
+  try {
+    deps.stores.loops.appendDecisions(loop.id, kept);
+  } catch (err) {
+    logger.warn({ loopId: loop.id, err: errorMessage(err) }, "fix: decisions could not be recorded");
+  }
+};
+
 /** A prepared round: the spec to execute, and what its finish judges the result against. */
 interface PreparedRound {
   spec: RunSpec;
   facts: RoundFacts;
   work: WorkItem[];
+  /** Who wrote in the round's discussions and is neither the steward nor a bot, lowercased: whose decisions count. */
+  people: Set<string>;
 }
 
 /**
@@ -230,6 +252,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
   let ciFailures: CiFailure[] = [];
   let ciTriage: string[] = [];
   let work: WorkItem[];
+  let people: Set<string>;
   try {
     if (pipeline?.status === "failed") {
       const failed = await gitlab.failedJobs(mr.projectId, pipeline.id);
@@ -240,7 +263,9 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
       const triage = await triageFailures({ gitlab, orbit, settings: runtime, now: deps.now() }, loop, failed, target);
       ciTriage = triage.real.length > 0 ? triage.notes : [];
     }
-    work = workList(discussions, (await gitlab.currentUser()).username, [greptile.botUsername]);
+    const steward = (await gitlab.currentUser()).username;
+    work = workList(discussions, steward, [greptile.botUsername]);
+    people = peopleOn(discussions, work, steward, [greptile.botUsername]);
     await deps.mirror.fetch();
   } catch (err) {
     return { outcome: { status: "failed", error: errorMessage(err), retryable: true } };
@@ -300,7 +325,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
     interactive: false,
   };
   // A reattached run pod already runs this round: what it was started with is what it finishes with.
-  return { spec: ctx.resume ?? spec, facts, work };
+  return { spec: ctx.resume ?? spec, facts, work, people };
 };
 
 /** The finish half, from the executor's report and the work it found: retry, hand back, or judge the agent's result. */
@@ -332,6 +357,7 @@ const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: 
 
   const validated = validateFixResult(report.output, items);
   if (!validated.ok) return decide(fix, handingBack(facts, null, "the agent's result was invalid", validated.error), mr);
+  recordDecisions(fix, validated.result, prepared.people);
   const attach = (): Promise<MediaUploads | undefined> =>
     attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab: fix.gitlab, project: mr.projectId });
   return handleResult(fix, work, facts, validated.result, items.length, mr, attach);

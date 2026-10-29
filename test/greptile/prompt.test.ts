@@ -37,6 +37,12 @@ describe("renderFixPrompt", () => {
     expect(out).toContain("## Decisions a person made on this merge request: never undo these\n\n- Keep the v1 endpoint\n");
     expect(out).not.toMatch(/@greptile/i);
   });
+  it("asks for people's lasting instructions as decisions with their author, never a bot's", async () => {
+    const out = renderFixPrompt(await readFile("prompts/fix.md", "utf8"), input);
+    expect(out).toContain("- `decisions`: lasting instructions a person gave in a comment above");
+    expect(out).toContain("in `author`");
+    expect(out).toContain("never a bot's advice");
+  });
   it("has the agent commit with the identifier and push through the push tool", async () => {
     const out = renderFixPrompt(await readFile("prompts/fix.md", "utf8"), input);
     expect(out).toContain("starts with `ENG-1: `");

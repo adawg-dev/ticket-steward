@@ -11,6 +11,11 @@ export const FixResultSchema = z.object({
   failureDetail: z.string().nullable(),
   /** Screenshots and recordings of the round's change, for the merge request. */
   media: MediaListSchema,
+  /**
+   * Lasting instructions a person gave in a comment ("keep X", "don't Y"), one line each, restated from what they said,
+   * with the username of the person who said it: the finish step keeps only those a person on the round's comments gave.
+   */
+  decisions: z.array(z.object({ author: z.string(), decision: z.string() })).default([]),
 });
 export type FixResult = z.infer<typeof FixResultSchema>;
 

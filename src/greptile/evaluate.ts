@@ -49,6 +49,31 @@ export interface RoundInput {
 /** Every steward note carries a hidden `ticket-steward:` marker (loop notes, chat replies). */
 const STEWARD_MARKER = "<!-- ticket-steward:";
 
+/** Whether a username is a bot's: GitLab's project and group bots, and the configured review bots. */
+const botTest = (botUsernames: readonly string[]): ((username: string) => boolean) => {
+  const bots = new Set(botUsernames.map((name) => name.toLowerCase()));
+  return (username) => BOT_USER.test(username) || bots.has(username.toLowerCase());
+};
+
+/**
+ * The people who wrote in the round's discussions (any note of a thread on the work list), lowercased: neither the
+ * steward nor a bot. Only their lasting instructions become decisions.
+ */
+export const peopleOn = (discussions: MrDiscussion[], items: readonly WorkItem[], stewardUsername: string, botUsernames: readonly string[] = []): Set<string> => {
+  const steward = stewardUsername.toLowerCase();
+  const isBot = botTest(botUsernames);
+  const onList = new Set(items.map((item) => item.discussionId));
+  const people = new Set<string>();
+  for (const discussion of discussions) {
+    if (!onList.has(discussion.id)) continue;
+    for (const note of discussion.notes) {
+      const author = note.author.toLowerCase();
+      if (!note.system && author !== steward && !note.body.includes(STEWARD_MARKER) && !isBot(note.author)) people.add(author);
+    }
+  }
+  return people;
+};
+
 /**
  * The round's work list: every unresolved discussion whose latest note is not the steward's (by its account or its
  * marker), from people and bots alike. System notes are skipped, and so is a Greptile summary, which the prompt shows
@@ -56,7 +81,7 @@ const STEWARD_MARKER = "<!-- ticket-steward:";
  */
 export const workList = (discussions: MrDiscussion[], stewardUsername: string, botUsernames: readonly string[] = []): WorkItem[] => {
   const steward = stewardUsername.toLowerCase();
-  const bots = new Set(botUsernames.map((name) => name.toLowerCase()));
+  const isBot = botTest(botUsernames);
   const out: WorkItem[] = [];
   for (const discussion of discussions) {
     const notes = discussion.notes.filter((note) => !note.system);
@@ -69,7 +94,7 @@ export const workList = (discussions: MrDiscussion[], stewardUsername: string, b
     out.push({
       discussionId: discussion.id,
       author: latest.author,
-      isBot: BOT_USER.test(latest.author) || bots.has(latest.author.toLowerCase()),
+      isBot: isBot(latest.author),
       body: notes.length === 1 ? latest.body : notes.map((note) => `**${note.author}:** ${note.body}`).join("\n\n"),
       position: first.position,
     });

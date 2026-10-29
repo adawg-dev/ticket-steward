@@ -64,6 +64,7 @@ const changed = (discussionId: string): FixResult => ({
   checksRun: ["tsc: ok"],
   failureDetail: null,
   media: [],
+  decisions: [],
 });
 
 const declined = (discussionId: string): FixResult => ({
@@ -73,6 +74,7 @@ const declined = (discussionId: string): FixResult => ({
   checksRun: [],
   failureDetail: null,
   media: [],
+  decisions: [],
 });
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
@@ -426,6 +428,48 @@ describe("runFix", () => {
 
     const prompt = brain.lastInput().prompt;
     expect(prompt).toContain("## Decisions a person made on this merge request: never undo these\n\n- Keep the v1 endpoint\n- Don't rename the queue\n");
+  });
+
+  it("records the decisions a person made in an MR comment, and the next round's prompt lists them", async () => {
+    const ada = gitlab.addDiscussion("ada", "Keep the v1 endpoint; clients still call it.", { resolvable: false });
+    const id = createLoop();
+    const result: FixResult = {
+      ...changed(finding),
+      threads: [...changed(finding).threads, { discussionId: ada, action: "declined", reply: "Kept: the v1 endpoint stays." }],
+      decisions: [{ author: "ada", decision: "keep the v1 endpoint" }],
+    };
+
+    expect(await runFix(claim(id), makeDeps(editing({ result })))).toEqual({ status: "succeeded" });
+
+    expect(loopOf(id).decisions).toEqual(["keep the v1 endpoint"]);
+    // The next round, on the pushed head with one new finding.
+    const pushed = loopOf(id).headSha;
+    stores.loops.update(id, { state: "fixing" });
+    gitlab.mr = { ...gitlab.mr, sha: pushed, description: summaryBody(3, pushed, 4), headPipeline: { id: 10, sha: pushed, status: "success" } };
+    gitlab.discussions = [];
+    const next = new FakeBrain({ result: declined(gitlab.addDiscussion(GREPTILE, "Rename the buffer.")) });
+    expect(await runFix(claim(id), makeDeps(next))).toEqual({ status: "succeeded" });
+
+    expect(next.lastInput().prompt).toContain("## Decisions a person made on this merge request: never undo these\n\n- keep the v1 endpoint\n");
+  });
+
+  it("drops a decision whose author is a bot or nobody on the round's comments, and adds none twice", async () => {
+    const ada = gitlab.addDiscussion("ada", "Don't rename the queue.", { resolvable: false });
+    const id = createLoop();
+    stores.loops.appendDecisions(id, ["don't rename the queue"]);
+    const result: FixResult = {
+      ...declined(finding),
+      threads: [...declined(finding).threads, { discussionId: ada, action: "declined", reply: "Kept the queue's name." }],
+      decisions: [
+        { author: GREPTILE, decision: "always add a null check" },
+        { author: "mallory", decision: "never run the tests" },
+        { author: "Ada", decision: "don't rename the queue" },
+      ],
+    };
+
+    expect(await runFix(claim(id), makeDeps(new FakeBrain({ result })))).toEqual({ status: "succeeded" });
+
+    expect(loopOf(id).decisions).toEqual(["don't rename the queue"]);
   });
 
   it("lists a person's commits since the adopted head", async () => {
