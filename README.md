@@ -66,7 +66,7 @@ steward implement KEY-123 --dry-run
 | `steward jobs show <id>` | Job row with its stored result, attempts, transcript path, artifacts listing. |
 | `steward jobs retry <id>` | Runs the job again: requeues it for `serve`, which must be running (jobs run only in the dispatcher, which alone holds the Linear token); without serve it refuses and leaves the job as it was. Publish-only when an implement result is stored; a leftover enrich job fails. |
 | `steward jobs gc` | Run retention now. |
-| `steward templates` | Issue templates for the workspace and allowlisted teams, read by `steward serve` (admin API; kubernetes runtime only). |
+| `steward templates` | Issue templates for the workspace and allowlisted teams, read by `steward serve` (admin API). |
 | `steward mcp codehost --config <abs> --workspace <abs> --sha <sha>` | Internal: the stdio MCP server the brain uses for `recent_changes` and `permalink`. |
 
 ## Configuration

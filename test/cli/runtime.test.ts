@@ -57,7 +57,7 @@ describe("buildRuntime for a CLI command", () => {
     const runtime = await buildRuntime(loaded, ctx);
     try {
       expect(runtime.linearToken).toBeUndefined();
-      // The local runtime has no admin API: nothing is asked, and nothing reaches Linear.
+      // With no admin API answering, nothing is asked and nothing reaches Linear.
       await expect(runtime.tracker.fetchTicket("issue-1")).rejects.toThrow("reaches Linear only through steward serve's admin API");
       await expect(runtime.tracker.appUserId()).rejects.toThrow("reaches Linear only through steward serve's admin API");
       expect(runtime.tracker.credentialsRejected()).toBe(false);
