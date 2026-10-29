@@ -1,6 +1,6 @@
 # kubectl apply -k deploy/k8s/base (docs/ops.md, "Running on k3s"). Set the steward-cluster values and the images
-# below for your cluster, or override them in an overlay. The steward-config ConfigMap (the config dir) is created
-# separately: kubectl -n ticket-steward create configmap steward-config --from-file=<config dir>.
+# below for your cluster, or override them in an overlay. The steward-config ConfigMap (the config dir as a gzipped tar
+# under the key config.tgz) is created separately; docs/ops.md has the commands.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: ticket-steward

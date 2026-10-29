@@ -34,6 +34,22 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/ticket-steward
+        # The config dir is one gzipped tar in the ConfigMap (ConfigMap keys are flat, the dir is not), unpacked here as
+        # in every run pod (src/k8s/runJob.ts, configUnpackCommand).
+        - name: config-unpack
+          image: ticket-steward/steward
+          command: ["sh", "-c", 'tar -xzf "$1" -C "$2" --strip-components=1 --no-same-owner --no-same-permissions', "config-unpack", "/etc/steward-config-bundle/config.tgz", "/etc/ticket-steward"]
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: config-bundle
+              mountPath: /etc/steward-config-bundle
+              readOnly: true
+            - name: config
+              mountPath: /etc/ticket-steward
       containers:
         - name: steward
           image: ticket-steward/steward
@@ -92,10 +108,17 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: steward-data
-        # The config dir (steward.config.ts, prompts, the overlay template), the same ConfigMap run pods mount.
-        - name: config
+        # The config dir (steward.config.ts, prompts, the overlay template) as the ConfigMap run pods unpack too:
+        # key config.tgz (docs/ops.md, "Running on k3s"). A missing key keeps the pod from starting.
+        - name: config-bundle
           configMap:
             name: steward-config
+            items:
+              - key: config.tgz
+                path: config.tgz
+        - name: config
+          emptyDir:
+            sizeLimit: 64Mi
         # serve writes the admin API's token here: memory only, gone with the pod.
         - name: runtime
           emptyDir:

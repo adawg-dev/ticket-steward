@@ -834,12 +834,21 @@ runtime: {
 },
 ```
 
-The config dir goes into the ConfigMap `steward-config`, which the dispatcher and every run pod mount read-only at
-`/etc/ticket-steward`: `kubectl -n ticket-steward create configmap steward-config --from-file=<config dir>`
-(re-create it and restart the Deployment after a change). ConfigMap keys are flat, so the dir's files sit side by
-side; `--from-file` of a dir skips its subdirectories. Open item for the cut-over: the overlay template's nested files
-(`apps/<app>/.env`) need the run pods' `config` volume to map keys to paths (`items`), which it does not do yet. Secrets come only from Secrets Manager (config load requires `secrets.source: "aws"` here); keep no `.env`
-in the config dir, since run pods mount it.
+The config dir goes into the ConfigMap `steward-config` as one gzipped tar under the key `config.tgz`: ConfigMap keys
+are flat and the dir is not (the overlay template's `apps/<app>/.env`, prompts), and `--from-file=<dir>` would skip
+every subdirectory. The dispatcher and every run pod start with a `config-unpack` init container that unpacks it into
+an emptyDir, which the other containers mount read-only at `/etc/ticket-steward`. A missing `config.tgz` key keeps the
+pod from starting (`CreateContainerConfigError`). Create or update it with:
+
+```bash
+tar -czf steward-config.tgz -C <config dir> .
+kubectl -n ticket-steward create configmap steward-config --from-file=config.tgz=steward-config.tgz --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n ticket-steward rollout restart deployment/steward
+```
+
+Make the tar exactly so, rooted at `.`: the unpack strips that leading `./`. A run pod unpacks the bundle once, when it starts, so a change reaches the runs started after it and never a running
+one. The compressed dir must stay under 1 MiB, the ConfigMap limit. Secrets come only from Secrets Manager (config
+load requires `secrets.source: "aws"` here); keep no `.env` in the config dir, since run pods unpack it.
 
 **Apply.** Set the `steward-cluster` literals in `deploy/k8s/base/kustomization.yaml` (or an overlay): `issuer` (the
 URL above, no trailing slash), `awsRoleArn`, `awsRegion`, and `serviceCidr`/`podCidr` if k3s does not use its
@@ -848,7 +857,8 @@ defaults (`10.43.0.0/16`, `10.42.0.0/16`), which kustomize writes into the Netwo
 
 ```bash
 kubectl apply -k deploy/k8s/base
-kubectl -n ticket-steward create configmap steward-config --from-file=<config dir>
+tar -czf steward-config.tgz -C <config dir> .
+kubectl -n ticket-steward create configmap steward-config --from-file=config.tgz=steward-config.tgz
 kubectl -n ticket-steward exec deploy/steward -- steward mirror init
 kubectl -n ticket-steward exec deploy/steward -- steward doctor --probe-pod
 ```

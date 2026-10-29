@@ -25,6 +25,28 @@ const GUARD_DIR = "/run/steward/guard";
 const RULES_DIR = "/run/egress-rules";
 const EGRESS_CONFDIR = "/run/egress-confdir";
 
+/**
+ * The config dir travels as one gzipped tar under this key of `runtime.config.configMap`: ConfigMap keys are flat and
+ * the dir is not (the overlay template's `apps/<app>/.env`, prompts). The dispatcher and every run pod unpack it into
+ * an emptyDir that the other containers mount read-only (docs/ops.md, "Running on k3s").
+ */
+export const CONFIG_BUNDLE_KEY = "config.tgz";
+export const CONFIG_BUNDLE_DIR = "/etc/steward-config-bundle";
+
+/**
+ * The unpack container's command: the bundle's tree (made with `tar -C <config dir> .`) into `configDir`, owned by the
+ * container's user. Stripping the leading `./` skips the archive's own `.` entry, whose mode and mtime a non-root user
+ * cannot set on the root-owned emptyDir.
+ */
+export const configUnpackCommand = (p: { bundle: string; configDir: string }): string[] => [
+  "sh",
+  "-c",
+  'tar -xzf "$1" -C "$2" --strip-components=1 --no-same-owner --no-same-permissions',
+  "config-unpack",
+  p.bundle,
+  p.configDir,
+];
+
 /** A Kubernetes object name for the run: lower case, `[a-z0-9-]`, at most 63 characters. */
 const dnsName = (prefix: string, runId: string): string =>
   `${prefix}-${runId.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}`.slice(0, 63).replace(/-+$/, "");
@@ -45,8 +67,8 @@ const env = (values: Record<string, string>): V1EnvVar[] => Object.entries(value
 const mount = (name: string, mountPath: string, readOnly = false): V1VolumeMount => (readOnly ? { name, mountPath, readOnly } : { name, mountPath });
 
 /**
- * The run's Job: one pod whose agent container holds no credential. The init containers clone the worktree, render the
- * overlay and pull the session; the sidecars (native, so the pod ends when the agent does and session-sync still pushes
+ * The run's Job: one pod whose agent container holds no credential. The init containers unpack the config dir, clone the
+ * worktree, render the overlay and pull the session; the sidecars (native, so the pod ends when the agent does and session-sync still pushes
  * on its SIGTERM) put credentials on the agent's requests and serve its throwaway services. Only containers that read
  * AWS or MinIO get a projected token, each for its own audience.
  */
@@ -67,6 +89,12 @@ export const buildRunJob = (spec: RunSpec, p: { runtime: KubernetesRuntime; toke
   const sidecar = (container: V1Container): V1Container => ({ ...container, restartPolicy: "Always" });
 
   const init: V1Container[] = [
+    {
+      name: "config-unpack",
+      image: runtime.images.steward,
+      command: configUnpackCommand({ bundle: `${CONFIG_BUNDLE_DIR}/${CONFIG_BUNDLE_KEY}`, configDir: dirname(configPath) }),
+      volumeMounts: [mount("config-bundle", CONFIG_BUNDLE_DIR, true), mount("config", dirname(configPath))],
+    },
     {
       name: "git-init",
       image: runtime.images.steward,
@@ -149,9 +177,9 @@ export const buildRunJob = (spec: RunSpec, p: { runtime: KubernetesRuntime; toke
   const volumes: V1Volume[] = [
     token("aws-token", AWS_AUDIENCE),
     token("minio-token", MINIO_AUDIENCE),
-    { name: "config", configMap: { name: runtime.config.configMap } },
+    { name: "config-bundle", configMap: { name: runtime.config.configMap, items: [{ key: CONFIG_BUNDLE_KEY, path: CONFIG_BUNDLE_KEY }] } },
     { name: "spec", configMap: { name: p.specConfigMap, items: [{ key: SPEC_KEY, path: SPEC_KEY }] } },
-    ...["work", "sessions", "job", "overlay", "rules", "guard", "egress-ca", "egress-confdir"].map(empty),
+    ...["config", "work", "sessions", "job", "overlay", "rules", "guard", "egress-ca", "egress-confdir"].map(empty),
   ];
 
   const labels = runLabels(spec);

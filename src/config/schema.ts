@@ -151,7 +151,7 @@ const RuntimeSchema = z.discriminatedUnion("kind", [
     egressAllowCidrs: z.array(z.string().min(1)).default([]),
     /** The run pods' service account; it has no token mounted and no role in the cluster. */
     serviceAccount: z.string().min(1).default("steward-run"),
-    /** The ConfigMap holding the steward's config dir, and the config file's path where run pods mount it. */
+    /** The ConfigMap holding the steward's config dir as a gzipped tar (key `config.tgz`), and the config file's path where pods unpack it. */
     config: z
       .object({ configMap: z.string().min(1).default("steward-config"), path: z.string().startsWith("/").default("/etc/ticket-steward/steward.config.ts") })
       .prefault({}),

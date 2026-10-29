@@ -1,13 +1,17 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { parseAllDocuments } from "yaml";
 import { z } from "zod";
 import { NETWORK_POLICIES } from "../../src/cli/doctorKubernetes.js";
-import { RUN_LABELS } from "../../src/k8s/runJob.js";
+import { CONFIG_BUNDLE_DIR, CONFIG_BUNDLE_KEY, configUnpackCommand, RUN_LABELS } from "../../src/k8s/runJob.js";
 import { INTERNAL_PORT } from "../../src/server/internal.js";
 import { MINIO_TOKEN_FILE, SESSIONS_BUCKET } from "../../src/sessions/store.js";
 
 const BASE = resolve("deploy/k8s/base");
+const run = promisify(execFile);
 const RFC1918 = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
 
 const Metadata = z.object({ name: z.string(), namespace: z.string().optional(), labels: z.record(z.string(), z.string()).optional() });
@@ -156,11 +160,58 @@ describe("deploy/k8s/base", () => {
     const steward = container(pod, "steward");
     expect(steward.volumeMounts).toContainEqual({ name: "data", mountPath: "/var/lib/ticket-steward" });
     expect(steward.volumeMounts).toContainEqual({ name: "config", mountPath: "/etc/ticket-steward", readOnly: true });
-    expect(pod.volumes).toContainEqual({ name: "config", configMap: { name: "steward-config" } });
     // serve writes the admin API's token to the runtime dir; it never reaches the disk.
     expect(steward.volumeMounts).toContainEqual({ name: "runtime", mountPath: "/run/steward" });
     expect(pod.volumes).toContainEqual({ name: "runtime", emptyDir: { medium: "Memory", sizeLimit: "1Mi" } });
     expect(steward.ports.map((port) => port.containerPort).sort()).toEqual([3020, INTERNAL_PORT]);
+  });
+
+  it("unpacks the config dir from the steward-config bundle as run pods do, into a dir the steward mounts read-only", () => {
+    const pod = Workload.parse(find("Deployment", "steward")).spec.template.spec;
+    const unpack = container(pod, "config-unpack");
+    expect(unpack.command).toEqual(configUnpackCommand({ bundle: `${CONFIG_BUNDLE_DIR}/${CONFIG_BUNDLE_KEY}`, configDir: "/etc/ticket-steward" }));
+    expect(unpack.volumeMounts).toEqual([
+      { name: "config-bundle", mountPath: CONFIG_BUNDLE_DIR, readOnly: true },
+      { name: "config", mountPath: "/etc/ticket-steward" },
+    ]);
+    expect(unpack.securityContext).toMatchObject({ runAsUser: 1001, runAsNonRoot: true });
+    expect(pod.volumes).toContainEqual({ name: "config-bundle", configMap: { name: "steward-config", items: [{ key: CONFIG_BUNDLE_KEY, path: CONFIG_BUNDLE_KEY }] } });
+    expect(pod.volumes).toContainEqual({ name: "config", emptyDir: { sizeLimit: "64Mi" } });
+    expect(container(pod, "steward").volumeMounts.filter((mount) => mount.name === "config-bundle")).toEqual([]);
+  });
+
+  it("restores a config dir's nested files from a bundle made as docs/ops.md says", async () => {
+    const ops = await readFile(resolve("docs/ops.md"), "utf8");
+    expect(ops).toContain("tar -czf steward-config.tgz -C <config dir> .");
+    expect(ops).toContain(`--from-file=${CONFIG_BUNDLE_KEY}=steward-config.tgz`);
+
+    const dir = await mkdtemp(join(tmpdir(), "steward-config-bundle-"));
+    try {
+      const files: Record<string, string> = {
+        "steward.config.ts": "export default {};\n",
+        "prompts/implement.md": "Implement it.\n",
+        "overlay-template/apps/web/.env": "API_KEY={{DEV_WEB_API_KEY}}\n",
+        "overlay-template/apps/api/config/local.json": "{}\n",
+      };
+      const source = join(dir, "source");
+      for (const [name, text] of Object.entries(files)) {
+        await mkdir(dirname(join(source, name)), { recursive: true });
+        await writeFile(join(source, name), text);
+      }
+      const bundle = join(dir, "steward-config.tgz");
+      await run("tar", ["-czf", bundle, "-C", source, "."]);
+      const unpacked = join(dir, "unpacked");
+      await mkdir(unpacked);
+
+      const [command = "", ...args] = configUnpackCommand({ bundle, configDir: unpacked });
+      await run(command, args);
+
+      const tree = (await readdir(unpacked, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name).slice(unpacked.length + 1));
+      expect(tree.sort()).toEqual(Object.keys(files).sort());
+      for (const [name, text] of Object.entries(files)) expect(await readFile(join(unpacked, name), "utf8")).toBe(text);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("gives the dispatcher an AWS token and a MinIO token, each for its own audience, at the paths the code reads", () => {

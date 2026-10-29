@@ -1,7 +1,7 @@
 import type { V1Container, V1Job, V1Volume } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
 import { StewardConfigSchema } from "../../src/config/schema.js";
-import { AWS_AUDIENCE, buildRunJob, jobNameOf, MINIO_AUDIENCE, RUN_LABELS } from "../../src/k8s/runJob.js";
+import { AWS_AUDIENCE, buildRunJob, CONFIG_BUNDLE_KEY, configUnpackCommand, jobNameOf, MINIO_AUDIENCE, RUN_LABELS } from "../../src/k8s/runJob.js";
 import type { RunSpec } from "../../src/run/protocol.js";
 import { podSpecFor, RUNTIME, TOKENS } from "./helpers.js";
 
@@ -67,7 +67,7 @@ describe("buildRunJob", () => {
     expect(audiences.every((token) => token.expirationSeconds === 3600)).toBe(true);
     for (const name of ["git-init", "render-overlay", "keyproxy", "tools"]) expect(audienceOf(job, named(job, name))).toEqual([AWS_AUDIENCE]);
     for (const name of ["sessions-pull", "sessions-sync"]) expect(audienceOf(job, named(job, name))).toEqual([MINIO_AUDIENCE]);
-    for (const name of ["agent", "egress", "postgres", "redis", "rabbitmq"]) expect(audienceOf(job, named(job, name))).toEqual([]);
+    for (const name of ["config-unpack", "agent", "egress", "postgres", "redis", "rabbitmq"]) expect(audienceOf(job, named(job, name))).toEqual([]);
     expect(named(job, "tools").env?.find((variable) => variable.name === "STEWARD_TOOLS_TOKEN")?.value).toBe(TOKENS.tools);
   });
 
@@ -89,7 +89,7 @@ describe("buildRunJob", () => {
     const pod = job.spec?.template.spec;
     expect(pod?.containers.map((container) => container.name)).toEqual(["agent"]);
     const init = pod?.initContainers ?? [];
-    expect(init.filter((container) => container.restartPolicy !== "Always").map((container) => container.name)).toEqual(["git-init", "render-overlay", "sessions-pull"]);
+    expect(init.filter((container) => container.restartPolicy !== "Always").map((container) => container.name)).toEqual(["config-unpack", "git-init", "render-overlay", "sessions-pull"]);
     expect(init.filter((container) => container.restartPolicy === "Always").map((container) => container.name).sort()).toEqual(
       ["egress", "keyproxy", "postgres", "rabbitmq", "redis", "sessions-sync", "tools"],
     );
@@ -139,6 +139,25 @@ describe("the runtime config", () => {
       const result = StewardConfigSchema.safeParse({ ...base, ...patch, runtime: { kind: "kubernetes", ...kubernetes } });
       expect(result.success).toBe(false);
       expect(JSON.stringify(result.error?.issues)).toContain('requires secrets.source \\"aws\\"');
+    }
+  });
+
+  it("unpacks the config dir's bundle first, and mounts the result read-only everywhere else", () => {
+    const job = build();
+    expect(volumes(job)).toContainEqual({ name: "config-bundle", configMap: { name: "steward-config", items: [{ key: CONFIG_BUNDLE_KEY, path: CONFIG_BUNDLE_KEY }] } });
+    expect(volumes(job)).toContainEqual({ name: "config", emptyDir: {} });
+    const unpack = named(job, "config-unpack");
+    expect(job.spec?.template.spec?.initContainers?.[0]?.name).toBe("config-unpack");
+    expect(unpack.command).toEqual(configUnpackCommand({ bundle: "/etc/steward-config-bundle/config.tgz", configDir: "/etc/ticket-steward" }));
+    expect(unpack.volumeMounts).toEqual([
+      { name: "config-bundle", mountPath: "/etc/steward-config-bundle", readOnly: true },
+      { name: "config", mountPath: "/etc/ticket-steward" },
+    ]);
+    const others = allContainers(job).filter((container) => container.name !== "config-unpack");
+    expect(others.filter((container) => (container.volumeMounts ?? []).some((mount) => mount.name === "config-bundle"))).toEqual([]);
+    for (const container of others) {
+      const config = (container.volumeMounts ?? []).find((mount) => mount.name === "config");
+      if (config !== undefined) expect(config, container.name).toEqual({ name: "config", mountPath: "/etc/ticket-steward", readOnly: true });
     }
   });
 });
