@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { git, scrubCredentials, type GitResult } from "../workspace/git.js";
 
 /**
@@ -33,6 +34,13 @@ export const safeGitArgs = (): string[] => asArgs(SAFE_CONFIG);
 
 /** No system or global config or attributes, and no replace refs, so git reads the real objects. */
 export const safeGitEnv = (): Record<string, string> => ({ GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_REPLACE_OBJECTS: "1", GIT_ATTR_NOSYSTEM: "1" });
+
+/**
+ * The working tree pinned to the worktree itself: `GIT_WORK_TREE` wins over a `core.worktree` (or `core.bare`) the agent
+ * sets in the git directory's config, which would otherwise have `status`, `diff` and `ls-files` read some other
+ * directory of the steward's filesystem and hand its file names back in a refusal.
+ */
+export const workTreeEnv = (worktree: string): Record<string, string> => ({ GIT_WORK_TREE: resolve(worktree) });
 
 /** Diff driver keys an empty value makes git refuse rather than run: `git diff` then fails instead of running the agent's program. */
 const DIFF_DRIVER_KEYS: Array<[string, string]> = [
@@ -79,14 +87,18 @@ export const safeGitConfigEnv = async (cwd: string): Promise<Record<string, stri
   ];
   return {
     ...safeGitEnv(),
+    ...workTreeEnv(cwd),
     GIT_CONFIG_COUNT: String(pairs.length),
     ...Object.fromEntries(pairs.flatMap(([key, value], index) => [[`GIT_CONFIG_KEY_${index}`, key], [`GIT_CONFIG_VALUE_${index}`, value]])),
   };
 };
 
-/** `git` on an agent's worktree: the safe overrides, every configured filter off, and the safe env under `extraEnv`. */
+/**
+ * `git` on an agent's worktree (`cwd`, its top directory): the safe overrides, every configured filter off, the working
+ * tree pinned to `cwd`, and the safe env under `extraEnv`.
+ */
 export const safeGit = async (args: string[], cwd: string, extraEnv: Record<string, string> = {}): Promise<GitResult> =>
-  git([...safeGitArgs(), ...(await filterOverrides(cwd)), ...args], cwd, { ...safeGitEnv(), ...extraEnv });
+  git([...safeGitArgs(), ...(await filterOverrides(cwd)), ...args], cwd, { ...safeGitEnv(), ...workTreeEnv(cwd), ...extraEnv });
 
 /** `gitOrThrow` on an agent's worktree, as `safeGit`. The message names the subcommand and scrubbed stderr only. */
 export const safeGitOrThrow = async (args: string[], cwd: string, extraEnv: Record<string, string> = {}): Promise<string> => {

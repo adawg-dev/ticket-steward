@@ -1,7 +1,7 @@
 import { mkdir, open, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execa } from "execa";
-import { filterOverrides, safeGit, safeGitArgs, safeGitEnv, safeGitOrThrow } from "../tools/gitSafe.js";
+import { filterOverrides, safeGit, safeGitArgs, safeGitEnv, safeGitOrThrow, workTreeEnv } from "../tools/gitSafe.js";
 import { git, gitEnvRecord, gitOrThrow, scrubCredentials } from "../workspace/git.js";
 import type { RemoteCredentials } from "../workspace/mirror.js";
 import { branchRefPattern, carriesTicket } from "./branch.js";
@@ -44,7 +44,7 @@ type ScanDiff = { ok: true; diff: string } | { ok: false; reason: string };
 
 /** One file's diff for the secret scan. Fails closed: a git error or output over `maxBytes` is a refusal, never a partial pass. */
 const scanDiff = async (cwd: string, args: string[], env: Record<string, string>, maxBytes: number): Promise<ScanDiff> => {
-  const result = await execa("git", [...safeGitArgs(), ...(await filterOverrides(cwd)), ...args], { cwd, env: { ...gitEnvRecord(), ...safeGitEnv(), ...env }, extendEnv: false, reject: false, maxBuffer: { stdout: maxBytes } });
+  const result = await execa("git", [...safeGitArgs(), ...(await filterOverrides(cwd)), ...args], { cwd, env: { ...gitEnvRecord(), ...safeGitEnv(), ...workTreeEnv(cwd), ...env }, extendEnv: false, reject: false, maxBuffer: { stdout: maxBytes } });
   if (result.isMaxBuffer) return { ok: false, reason: "the change is too large to scan for secrets" };
   if (result.exitCode !== 0) return { ok: false, reason: "the change could not be scanned for secrets" };
   return { ok: true, diff: result.stdout };

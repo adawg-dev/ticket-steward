@@ -6,11 +6,11 @@ import type { StewardConfig } from "../../src/config/schema.js";
 import { Redactor } from "../../src/core/redact.js";
 import { orbitRemote, runOrbitTool } from "../../src/orbit/server.js";
 import type { OrbitExec } from "../../src/orbit/run.js";
-import { guardRange, unpushedWork } from "../../src/implement/git.js";
+import { guardRange, uncommittedPaths, unpushedWork } from "../../src/implement/git.js";
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree } from "../../src/push/service.js";
 import { openStores, type Stores } from "../../src/store/index.js";
-import { safeGitArgs, safeGitEnv } from "../../src/tools/gitSafe.js";
+import { safeGitArgs, safeGitConfigEnv, safeGitEnv } from "../../src/tools/gitSafe.js";
 import type { TicketBundle } from "../../src/tracker/types.js";
 import { createWorktree, type Worktree } from "../../src/workspace/worktree.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
@@ -167,5 +167,37 @@ describe("Orbit on an agent's worktree", () => {
     expect(markers()).toEqual([]);
     expect(gitRuns[0]).toMatchObject({ GIT_CONFIG_NOSYSTEM: "1" });
     expect(Object.values(gitRuns[0] ?? {})).toEqual(expect.arrayContaining(["filter.x.clean", "diff.x.textconv", "diff.x.command"]));
+  });
+});
+
+describe("a worktree whose config moves its working tree", () => {
+  /** The agent's `core.worktree`, pointed at a directory of the sidecar's own filesystem. */
+  const moveWorkTree = async (): Promise<string> => {
+    const elsewhere = join(repo.dataDir, "sidecar-layout");
+    await mkdir(elsewhere, { recursive: true });
+    await writeFile(join(elsewhere, "sidecar-only.txt"), "x\n");
+    await git(worktree.path, ["config", "extensions.worktreeConfig", "true"]);
+    await git(worktree.path, ["config", "--worktree", "core.worktree", elsewhere]);
+    expect(await git(worktree.path, ["status", "--porcelain", "--untracked-files=all"])).toContain("sidecar-only.txt");
+    return elsewhere;
+  };
+
+  it("lists the worktree's own paths, never the directory core.worktree names", async () => {
+    await moveWorkTree();
+    await writeFile(join(worktree.path, "notes.md"), "draft\n");
+
+    const dirty = await uncommittedPaths(worktree.path, []);
+
+    expect(dirty).toContain("notes.md");
+    expect(dirty.join("\n")).not.toContain("sidecar-only.txt");
+  });
+
+  it("pins Orbit's git to the worktree too", async () => {
+    await moveWorkTree();
+    const env = await safeGitConfigEnv(worktree.path);
+
+    expect(env.GIT_WORK_TREE).toBe(worktree.path);
+    const status = await execa("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: worktree.path, env, extendEnv: false, stdin: "ignore" });
+    expect(status.stdout).not.toContain("sidecar-only.txt");
   });
 });

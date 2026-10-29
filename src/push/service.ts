@@ -8,7 +8,8 @@ import { BranchExistsError, guardRange, linearRangeProblem, pushCommit, remoteTi
 import { CHECK_TAIL_BYTES, guardSecrets, lsRemoteSite, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
 import type { Mirror, RemoteCredentials } from "../workspace/mirror.js";
 import { localCheckRunner, type CheckRunner } from "./checks.js";
-import { safeGitOrThrow } from "../tools/gitSafe.js";
+import { safeGitArgs, safeGitEnv, safeGitOrThrow } from "../tools/gitSafe.js";
+import { git } from "../workspace/git.js";
 import type { PushLedger, RemoteHead } from "./ledger.js";
 import type { PushTarget } from "./target.js";
 
@@ -85,9 +86,15 @@ const pushFromBundle = async (deps: PushDeps, jobDir: string, input: { remote: R
 /**
  * Why the worktree's git directory cannot be trusted for the checks, or null. The `.git` file is agent-writable: pointed at
  * another repository, or given grafts or a shallow file, it could hide a commit from the guard while the scratch repo
- * still pushes it.
+ * still pushes it. Its config could also set `core.worktree` or `core.bare`; the checks pin the working tree anyway, but a
+ * worktree whose own git would look elsewhere is refused. That probe runs without the pin, and its output is not shown.
  */
 const gitDirProblem = async (worktreePath: string, mirrorPath: string): Promise<string | null> => {
+  const layout = await git([...safeGitArgs(), "rev-parse", "--is-bare-repository", "--show-toplevel"], worktreePath, safeGitEnv());
+  const [bare, top] = layout.stdout.split("\n");
+  if (layout.exitCode !== 0 || bare !== "false" || top === undefined || top === "" || (await realpath(top)) !== (await realpath(worktreePath))) {
+    return "the git directory's config sets core.worktree or core.bare";
+  }
   const common = await safeGitOrThrow(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktreePath);
   if ((await realpath(common)) !== (await realpath(mirrorPath))) return `the git directory is ${common}, not the steward's mirror`;
   const hiding = ["shallow", join("info", "grafts")].find((file) => existsSync(join(common, file)));

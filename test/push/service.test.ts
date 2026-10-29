@@ -153,6 +153,21 @@ describe("pushFromWorktree refusals", () => {
     expect(await push()).toMatchObject({ ok: false, detail: expect.stringContaining("not the steward's mirror") });
   });
 
+  it.each([
+    ["core.worktree", ["config", "--worktree", "core.worktree", "/"]],
+    ["core.bare", ["config", "--worktree", "core.bare", "true"]],
+  ])("refuses when the worktree's config sets %s, without showing what it names", async (_key, args) => {
+    await agentCommit("API-1: first");
+    await git(worktree.path, ["config", "extensions.worktreeConfig", "true"]);
+    await git(worktree.path, args);
+
+    expect(await push()).toEqual({
+      ok: false,
+      reason: "the worktree's git directory was changed; restore it before pushing",
+      detail: "the git directory's config sets core.worktree or core.bare",
+    });
+  });
+
   it("refuses when there is nothing new on the base", async () => {
     expect(await push()).toEqual({ ok: false, reason: `nothing to push: HEAD is already at ${repo.sha.slice(0, 7)}`, detail: "" });
   });
