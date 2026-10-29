@@ -120,16 +120,25 @@ describe("the runtime config", () => {
     aws: RUNTIME.aws,
     resources: RUNTIME.resources,
   };
+  const secrets = { source: "aws", region: "us-west-2", map: { GITLAB_TOKEN: "DEV_STEWARD_GITLAB_TOKEN" } };
 
   it("is local when unset and needs no workspace.port on kubernetes", () => {
     expect(StewardConfigSchema.safeParse({ ...base, workspace: { ...base.workspace, port: 3000 } }).success).toBe(true);
-    const parsed = StewardConfigSchema.parse({ ...base, runtime: { kind: "kubernetes", ...kubernetes } });
+    const parsed = StewardConfigSchema.parse({ ...base, secrets, runtime: { kind: "kubernetes", ...kubernetes } });
     expect(parsed.runtime).toMatchObject({ kind: "kubernetes", serviceAccount: "steward-run", config: { configMap: "steward-config" } });
   });
 
   it("refuses the openai-agents brain on kubernetes", () => {
-    const result = StewardConfigSchema.safeParse({ ...base, brain: { ...base.brain, kind: "openai-agents" }, runtime: { kind: "kubernetes", ...kubernetes } });
+    const result = StewardConfigSchema.safeParse({ ...base, brain: { ...base.brain, kind: "openai-agents" }, secrets, runtime: { kind: "kubernetes", ...kubernetes } });
     expect(result.success).toBe(false);
     expect(JSON.stringify(result.error?.issues)).toContain('requires brain.kind \\"claude-code\\"');
+  });
+
+  it("refuses a config-dir .env on kubernetes, since run pods mount the config dir", () => {
+    for (const patch of [{}, { secrets: { source: "file" } }]) {
+      const result = StewardConfigSchema.safeParse({ ...base, ...patch, runtime: { kind: "kubernetes", ...kubernetes } });
+      expect(result.success).toBe(false);
+      expect(JSON.stringify(result.error?.issues)).toContain('requires secrets.source \\"aws\\"');
+    }
   });
 });

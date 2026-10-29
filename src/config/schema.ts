@@ -242,6 +242,10 @@ export const StewardConfigSchema = z.object({
     if (config.workspace.overlayTemplateDir === undefined) {
       ctx.addIssue({ code: "custom", path: ["workspace", "overlayTemplateDir"], message: "the kubernetes runtime requires workspace.overlayTemplateDir" });
     }
+    // Run pods mount the config dir, so a `.env` there would reach the agent container.
+    if (config.secrets?.source !== "aws") {
+      ctx.addIssue({ code: "custom", path: ["secrets"], message: 'the kubernetes runtime requires secrets.source "aws"; a .env in the config dir would be mounted into run pods' });
+    }
   }
   if (config.slots === undefined && config.workspace.port === undefined && config.runtime?.kind !== "kubernetes") {
     ctx.addIssue({ code: "custom", path: ["workspace", "port"], message: "workspace.port is required unless slots is set" });
