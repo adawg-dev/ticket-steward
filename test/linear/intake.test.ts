@@ -132,11 +132,21 @@ describe("linearIntake", () => {
       expect(queued()).toHaveLength(1);
     });
 
-    it.each<LoopState>(["unassigned", "handed_back", "awaiting_review"])("revives a ticket whose loop is %s and starts no second implement", async (state) => {
-      loopIn(state);
+    it.each<LoopState>(["unassigned", "handed_back", "stopped"])("resumes a ticket whose loop is %s at its MR head and starts no second implement", async (state) => {
+      const loopId = loopIn(state);
+
+      const result = await linearIntake(deps(), created());
+
+      expect(result.action).toBe("revive");
+      expect(stores.jobs.get(result.jobId ?? -1)?.trigger).toEqual({ kind: "loop", ...ISSUE, loopId, step: "restart" });
+      expect(queued()).toEqual([{ kind: "loop", ...ISSUE, loopId, step: "restart" }]);
+    });
+
+    it("leaves a loop that is still running as it is", async () => {
+      loopIn("awaiting_review");
 
       expect(await linearIntake(deps(), created())).toEqual({ action: "revive" });
-      expect(stores.jobs.findQueued("issue-1", "implement")).toBeNull();
+      expect(queued()).toEqual([]);
     });
 
     it("revives a ticket whose implement pushed a branch without a loop", async () => {
@@ -193,11 +203,21 @@ describe("linearIntake", () => {
       expect((await linearIntake(deps(), mention())).action).toBe("chat");
     });
 
-    it("revives an unassigned loop, unless revive by mention is off", async () => {
-      loopIn("unassigned");
+    it("revives an unassigned loop: its restart step, then a chat with the mention", async () => {
+      const loopId = loopIn("unassigned");
 
-      expect((await linearIntake(deps(), mention())).action).toBe("revive");
+      const result = await linearIntake(deps(), mention("@steward please continue"));
+
+      expect(result.action).toBe("revive");
+      const chat = { kind: "linear", run: "chat", ...ISSUE, sessionId: "session-2", message: "@steward please continue" };
+      expect(stores.jobs.get(result.jobId ?? -1)?.trigger).toEqual(chat);
+      expect(stores.jobs.queuedForIssue("issue-1").map((job) => job.trigger)).toEqual([{ kind: "loop", ...ISSUE, loopId, step: "restart" }, chat]);
+    });
+
+    it("ignores a mention on an unassigned loop with revive by mention off", async () => {
+      loopIn("unassigned");
       settings = { ...settings, "linear.reviveByMention": false };
+
       expect((await linearIntake(deps(), mention())).action).toBe("ignored");
       expect(queued()).toEqual([]);
     });

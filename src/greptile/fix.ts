@@ -332,6 +332,10 @@ const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: 
     deps.stores.loops.update(loop.id, { sessionId: report.sessionId });
     deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
   }
+  // The steward was removed as the delegate mid-round (which stopped the run): the loop stays parked for a revive, which
+  // resumes it on the MR head, so nothing is handed back, replied or noted.
+  const parked = reload(fix);
+  if (parked.state === "unassigned") return { status: "succeeded", warning: `loop ${parked.id} is unassigned; the round was left as it stood` };
   // A person stopped it from Linear: handed back, so the next comment or prompt resumes the loop instead of a retry.
   if (report.stopped) return decide(fix, handingBack(facts, null, STOPPED_JOB_ERROR), mr);
   if (!report.ok) {

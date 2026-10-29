@@ -2,9 +2,9 @@ import type { MergeRequestInfo } from "../codehost/gitlabMr.js";
 import type { PipelineDeps } from "../core/deps.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
-import { transaction, type Job, type Loop } from "../store/index.js";
+import { linearSessionFor } from "../linear/session.js";
+import { ACTIVE_LOOP_STATES, transaction, type Job, type Loop } from "../store/index.js";
 import type { TriggerEvent } from "../tracker/types.js";
-import { LOOP_MARKER, noteOnce } from "./publish.js";
 
 /** Where the implement push left the ticket: the base it branched from and the worktree its brain session ran in. */
 export interface LoopStart {
@@ -44,12 +44,12 @@ export const startLoop = (deps: Pick<PipelineDeps, "config" | "stores">, job: Jo
   });
 };
 
-type RestartDeps = Pick<PipelineDeps, "config" | "stores" | "gitlab" | "redactor">;
+type RestartDeps = Pick<PipelineDeps, "config" | "stores" | "gitlab" | "redactor" | "linear" | "settings">;
 
 const fail = (error: string): JobOutcome => ({ status: "failed", error, retryable: false });
 
 /** Back to `awaiting_review` at round 0 on the open MR, adopting its head; the history and hand-back time are kept. */
-const resumeLoop = async (deps: RestartDeps, loop: Loop, mr: MergeRequestInfo, labelDriven: boolean): Promise<JobOutcome> => {
+const resumeLoop = (deps: RestartDeps, loop: Loop, mr: MergeRequestInfo): JobOutcome => {
   const { stores } = deps;
   transaction(stores.db, () => {
     stores.loops.update(loop.id, {
@@ -63,32 +63,24 @@ const resumeLoop = async (deps: RestartDeps, loop: Loop, mr: MergeRequestInfo, l
       waitStartedAt: null,
       reviewCountAtTrigger: null,
       endedAt: null,
-      labelDriven,
     });
     stores.jobs.enqueue({ kind: "loop", issueId: loop.issueId, identifier: loop.identifier, teamKey: loop.teamKey, loopId: loop.id, step: "await" });
   });
   return { status: "succeeded" };
 };
 
-/**
- * No open MR to resume on: says so on the loop's last MR, if it had one, and queues an implement, which hands back with "a branch already exists"
- * while the branch is there. A label restart queues a Linear implement in the ticket's current agent session; a CLI one otherwise.
- */
-const restartImplement = async (deps: RestartDeps, ctx: RunContext, loop: Loop, labelDriven: boolean): Promise<JobOutcome> => {
-  try {
-    await noteOnce(deps, loop, LOOP_MARKER(loop.id, `restart job=${ctx.jobId}`), `No open merge request for ${loop.branch}; Ticket Steward is starting a fresh implement.`);
-  } catch (err) {
-    return { status: "failed", error: `merge request note: ${errorMessage(err)}`, retryable: true };
-  }
-  const { issueId, identifier, teamKey } = loop;
-  const trigger: TriggerEvent = labelDriven
-    ? { kind: "linear", run: "implement", issueId, identifier, teamKey, sessionId: deps.stores.agentSessions.current(issueId), message: null }
-    : { kind: "cli", issueId, identifier, teamKey, action: "implement" };
-  deps.stores.jobs.enqueue(trigger);
-  return { status: "succeeded" };
+/** No open MR to resume on: the loop stops, and the panel says why. It never starts a second implement. */
+const stopWithoutMr = async (deps: RestartDeps, loop: Loop): Promise<JobOutcome> => {
+  const reason = `there is no open merge request for ${loop.branch}`;
+  deps.stores.loops.update(loop.id, { state: "stopped" });
+  await linearSessionFor(deps, loop.issueId).finish({ type: "response", body: `I could not pick the work back up: ${reason}.` });
+  return { status: "succeeded", warning: `stopped: ${reason}` };
 };
 
-/** The restart job: resumes a handed-back loop on its open MR, or falls back to a fresh implement when there is none. */
+/**
+ * The restart step, queued when a parked or ended loop is revived (a mention, or the ticket delegated to the steward
+ * again): the loop resumes on its open MR's head, or stops when there is none. A loop already running is left alone.
+ */
 export const runRestart = async (ctx: RunContext, deps: RestartDeps): Promise<JobOutcome> => {
   const { config, gitlab } = deps;
   if (ctx.trigger.kind !== "loop") return fail("restart needs a loop trigger");
@@ -98,13 +90,12 @@ export const runRestart = async (ctx: RunContext, deps: RestartDeps): Promise<Jo
   const loopId = ctx.trigger.loopId;
   const loop = deps.stores.loops.get(loopId);
   if (loop === null) return fail(`loop ${loopId} not found`);
-  if (loop.state !== "handed_back") return { status: "succeeded", warning: `loop ${loopId} is ${loop.state}, not handed back` };
-  const labelDriven = ctx.trigger.labelDriven === true;
+  if (ACTIVE_LOOP_STATES.includes(loop.state)) return { status: "succeeded", warning: `loop ${loopId} is ${loop.state}, already running` };
   let mr: MergeRequestInfo | null;
   try {
     mr = await gitlab.findOpenMergeRequest(config.codehost.project, loop.branch);
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
   }
-  return mr === null ? restartImplement(deps, ctx, loop, labelDriven) : resumeLoop(deps, loop, mr, labelDriven);
+  return mr === null ? stopWithoutMr(deps, loop) : resumeLoop(deps, loop, mr);
 };

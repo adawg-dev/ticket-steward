@@ -91,6 +91,8 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   // Waits count from the first poll, so a job that sat in the queue is not timed out on arrival.
   if (stored.waitStartedAt === null) stores.loops.update(loopId, { waitStartedAt: now.toISOString() });
   const loop = reload(deps, loopId);
+  // Parked (the steward was unassigned) while this poll read GitLab: nothing more for it to do.
+  if (!ACTIVE_LOOP_STATES.includes(loop.state)) return { status: "succeeded", warning: `loop ${loopId} is already ${loop.state}` };
   const { mr } = observed;
   const decision = evaluateRound({
     loop,

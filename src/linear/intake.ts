@@ -3,6 +3,8 @@ import type { StewardConfig } from "../config/schema.js";
 import type { Settings } from "../settings/schema.js";
 import { transaction, type Loop, type Stores } from "../store/index.js";
 import type { LinearEvent } from "../tracker/linear/webhook.js";
+import type { TriggerEvent } from "../tracker/types.js";
+import { reviveTicket } from "./assignment.js";
 
 /**
  * What a Linear event led to. `implement`, `resume_implement`, `chat` and `wait_for_lease` enqueued a job; `steer` and
@@ -37,11 +39,19 @@ export const ASSIGN_ME_REPLY = "Assign me to the ticket to start work.";
 
 type SessionEvent = Extract<LinearEvent, { kind: "session.created" | "session.prompted" }>;
 
+const triggerOf = (event: SessionEvent, run: "implement" | "chat", message: string | null): TriggerEvent => ({
+  kind: "linear", run, issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, sessionId: event.sessionId, message,
+  ...(event.kind === "session.prompted" ? { author: event.authorName } : {}),
+});
+
 const enqueue = (stores: Stores, event: SessionEvent, run: "implement" | "chat", message: string | null): number =>
-  stores.jobs.enqueue({
-    kind: "linear", run, issueId: event.issueId, identifier: event.identifier, teamKey: event.teamKey, sessionId: event.sessionId, message,
-    ...(event.kind === "session.prompted" ? { author: event.authorName } : {}),
-  });
+  stores.jobs.enqueue(triggerOf(event, run, message));
+
+/** A revive: the loop's restart queued (a running loop needs none), then the reviving chat, if any. */
+const revive = (stores: Stores, loop: Loop, chat: TriggerEvent | null): LinearIntakeResult => {
+  const jobId = reviveTicket(stores, loop, chat);
+  return jobId === null ? { action: "revive" } : { action: "revive", jobId };
+};
 
 /** A queued or running implement: the ticket's work has started, though it has left no session yet. */
 const implementPending = (stores: Stores, issueId: string): boolean => {
@@ -67,11 +77,14 @@ const awaitsAnswers = (stores: Stores, issueId: string, loop: Loop | null): bool
   return loop === null || loop.implementJobId < job.id;
 };
 
-/** Delegated: a ticket the steward has a branch for is resumed (never implemented twice); a new one is implemented. */
+/**
+ * Delegated: a ticket the steward has a loop for is resumed from its MR head (never implemented twice); one it pushed a
+ * branch for without a loop is left to its people; a new one is implemented.
+ */
 const onDelegated = (deps: LinearIntakeDeps, event: SessionEvent, loop: Loop | null): LinearIntakeResult => {
   const { stores } = deps;
   if (deps.config.implement === undefined) return { action: "ignored" };
-  if (loop !== null) return { action: "revive" };
+  if (loop !== null) return revive(stores, loop, null);
   if (implementPending(stores, event.issueId)) return { action: "ignored" };
   if (stores.jobs.hasSucceeded(event.issueId, "implement")) return { action: "revive" };
   return { action: "implement", jobId: enqueue(stores, event, "implement", null) };
@@ -79,7 +92,9 @@ const onDelegated = (deps: LinearIntakeDeps, event: SessionEvent, loop: Loop | n
 
 const onMention = (deps: LinearIntakeDeps, event: Extract<LinearEvent, { kind: "session.created" }>, loop: Loop | null): LinearIntakeResult => {
   const { stores } = deps;
-  if (loop?.state === "unassigned") return { action: deps.settings.get()["linear.reviveByMention"] ? "revive" : "ignored" };
+  if (loop?.state === "unassigned") {
+    return deps.settings.get()["linear.reviveByMention"] ? revive(stores, loop, triggerOf(event, "chat", event.commentBody ?? "")) : { action: "ignored" };
+  }
   if (!hasWork(stores, event.issueId, loop)) return { action: "assign_me" };
   return chat(stores, event, event.commentBody ?? "");
 };

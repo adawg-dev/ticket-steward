@@ -24,7 +24,7 @@ export type TriggerEvent =
       teamKey: string;
       loopId: number;
       step: LoopStep;
-      /** Restart only: the restart came from a person re-adding the implement label. */
+      /** Read from restart jobs queued by the retired label trigger; ignored. */
       labelDriven?: boolean;
     }
   | {
@@ -45,7 +45,7 @@ export type TriggerEvent =
       message: string;
     };
 
-/** One step of a Greptile fix loop: wait for the MR's review, fix its findings, or restart a handed-back loop. */
+/** One step of a Greptile fix loop: wait for the MR's review, fix its findings, or resume a revived loop on its MR head. */
 export type LoopStep = "await" | "fix" | "restart";
 
 

@@ -2,17 +2,23 @@ import { BOT_USER, type GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { GitlabNote, GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
 import type { StewardConfig } from "../config/schema.js";
 import { errorMessage } from "../core/workspace.js";
+import { restoreDelegate, reviveTicket, type DelegateDeps } from "../linear/assignment.js";
 import { logger } from "../log.js";
+import type { Settings } from "../settings/schema.js";
 import { transaction, type Loop, type Stores } from "../store/index.js";
+import type { TriggerEvent } from "../tracker/types.js";
 import { CHAT_MARKER, NO_SESSION_REPLY } from "./result.js";
 import { latestSession } from "./session.js";
 
-export type ChatAction = "chat" | "chat_restart" | "chat_denied" | "chat_ignored" | "chat_duplicate" | "chat_no_session" | "chat_failed";
+export type ChatAction = "chat" | "chat_revive" | "chat_denied" | "chat_ignored" | "chat_duplicate" | "chat_no_session" | "chat_failed";
 
-export interface ChatIntakeDeps {
+/** With `linear` and `tracker`, a note that revives an unassigned loop sets the steward back as the issue's delegate. */
+export interface ChatIntakeDeps extends DelegateDeps {
   config: StewardConfig;
   stores: Stores;
   gitlab?: GitLabMrApi;
+  /** `linear.reviveByMention` off, a note on an unassigned loop is not acted on; absent, its default (on) applies. */
+  settings?: { get(): Settings };
 }
 
 /** GitLab's Developer role: the lowest that may start a chat. */
@@ -20,9 +26,6 @@ const DEVELOPER = 30;
 
 /** Every steward note carries a hidden `ticket-steward:` marker (chat replies, loop notes); none of them is a request. */
 const STEWARD_MARKER = "<!-- ticket-steward:";
-
-/** The second word that restarts a handed-back loop instead of chatting. */
-const RESTART_WORD = "restart";
 
 /**
  * The message after `prefix` when the note's first line starts with it (case-insensitive, after trimming, as a whole
@@ -71,8 +74,6 @@ const ticketOf = (stores: Stores, event: GitlabWakeEvent): Ticket | null => {
   return job === null ? null : { issueId: job.issueId, identifier: job.identifier, teamKey: job.teamKey, loop: null };
 };
 
-const isRestart = (message: string): boolean => message.split(/\s+/)[0]?.toLowerCase() === RESTART_WORD;
-
 /** Says once, in the note's discussion, that the MR has no agent session to talk to. */
 const replyNoSession = async (gitlab: GitLabMrApi, event: GitlabWakeEvent, mrIid: number, note: GitlabNote): Promise<void> => {
   const body = `${NO_SESSION_REPLY}\n\n${CHAT_MARKER}`;
@@ -81,9 +82,10 @@ const replyNoSession = async (gitlab: GitLabMrApi, event: GitlabWakeEvent, mrIid
 };
 
 /**
- * A `chat.prefix` note from a Developer (or higher) on a steward MR: enqueues a `chat` job (or, as `<prefix> restart`
- * on a handed-back loop, its restart step). Null when the event is not a chat request at all, so the caller handles it
- * as a plain wake. Only GitLab is called before the note id is recorded; each note id is acted on once.
+ * A `chat.prefix` note from a Developer (or higher) on a steward MR: enqueues a `chat` job. On an unassigned loop it is
+ * the mention that revives it: the loop's restart step resumes it on the MR head, the chat follows, and the steward is set
+ * back as the issue's delegate. Null when the event is not a chat request at all, so the caller handles it as a plain
+ * wake. Only GitLab is called before the note id is recorded; each note id is acted on once.
  */
 export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): Promise<{ action: ChatAction; loopId: number | null } | null> => {
   const { config, stores, gitlab } = deps;
@@ -109,8 +111,9 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
 
   const ticket = ticketOf(stores, event);
   const loop = ticket?.loop ?? null;
-  const restart = loop !== null && loop.state === "handed_back" && isRestart(message);
-  if (ticket === null || (!restart && latestSession(stores, ticket.issueId) === null)) {
+  const parked = loop !== null && loop.state === "unassigned";
+  if (parked && deps.settings?.get()["linear.reviveByMention"] === false) return { action: "chat_ignored", loopId: loop.id };
+  if (ticket === null || latestSession(stores, ticket.issueId) === null) {
     if (!stores.deliveries.markSeen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: null };
     try {
       await replyNoSession(gitlab, event, mrIid, note);
@@ -121,19 +124,21 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
   }
 
   const { issueId, identifier, teamKey } = ticket;
-  return transaction(stores.db, () => {
+  const chatJob: TriggerEvent = {
+    kind: "chat", issueId, identifier, teamKey, loopId: loop?.id ?? null, projectId: event.projectId, mrIid,
+    discussionId: note.discussionId, noteId: note.id, author: note.authorUsername, message,
+  };
+  const result = transaction(stores.db, (): { action: ChatAction; loopId: number | null } => {
     if (!stores.deliveries.markSeen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: loop?.id ?? null };
-    if (restart && loop !== null) {
-      // A restart already waiting covers this one.
-      if (stores.jobs.findQueued(issueId, "restart") === null) {
-        stores.jobs.enqueue({ kind: "loop", issueId, identifier, teamKey, loopId: loop.id, step: "restart", labelDriven: false });
-      }
-      return { action: "chat_restart", loopId: loop.id };
+    if (parked) {
+      // The restart runs first: the chat shares the loop's subject, so it follows on the resumed loop.
+      reviveTicket(stores, loop, chatJob);
+      return { action: "chat_revive", loopId: loop.id };
     }
-    stores.jobs.enqueue({
-      kind: "chat", issueId, identifier, teamKey, loopId: loop?.id ?? null, projectId: event.projectId, mrIid,
-      discussionId: note.discussionId, noteId: note.id, author: note.authorUsername, message,
-    });
+    stores.jobs.enqueue(chatJob);
     return { action: "chat", loopId: loop?.id ?? null };
   });
+  // Best effort, after the jobs are recorded: a delegate that could not be set is logged.
+  if (result.action === "chat_revive") void restoreDelegate(deps, issueId);
+  return result;
 };

@@ -149,8 +149,8 @@ describe("runRestart", () => {
 
   const queued = (kind: string): Job[] => stores.jobs.list({ limit: 50 }).filter((row) => row.kind === kind && row.status === "queued");
 
-  /** A loop that ran three rounds and was handed back; its first await has run. */
-  const handedBackLoop = (): number => {
+  /** A loop that ran three rounds and was handed back, then left in `state`; its first await has run. */
+  const parkedLoop = (state: Loop["state"] = "handed_back"): number => {
     const id = startLoop(depsWith(GREPTILE), implementJob(), start);
     if (id === null) throw new Error("no loop");
     for (const job of queued("await_review")) {
@@ -162,11 +162,12 @@ describe("runRestart", () => {
       projectId: 42, mrIid: 7, mrUrl: "https://gitlab.example/acme/repo/-/merge_requests/7", round: 3, state: "handed_back",
       waitStartedAt: "2026-10-27T08:00:00.000Z", reviewCountAtTrigger: 2, handedBackAt: HANDED_BACK_AT,
     });
+    if (state !== "handed_back") stores.loops.update(id, { state });
     return id;
   };
 
-  const claimRestart = (loopId: number, labelDriven: boolean): RunContext => {
-    const trigger: TriggerEvent = { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "restart", labelDriven };
+  const claimRestart = (loopId: number): RunContext => {
+    const trigger: TriggerEvent = { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "restart" };
     const jobId = stores.jobs.enqueue(trigger);
     stores.jobs.claimById(jobId);
     return { jobId, attempt: 1, issueId: "issue-1", identifier: "API-1", teamKey: "API", trigger, dryRun: false };
@@ -178,11 +179,11 @@ describe("runRestart", () => {
     return loop;
   };
 
-  it("adopts a person's head on the open MR, resets the round, queues an await and swaps the label back", async () => {
+  it.each<Loop["state"]>(["unassigned", "handed_back"])("resumes a %s loop on the open MR's head: round 0, the person's head adopted, an await queued", async (state) => {
     gitlab.openMr = fakeMergeRequest({ sha: PERSON, sourceBranch: "fix/API-1-adapter" });
-    const id = handedBackLoop();
+    const id = parkedLoop(state);
 
-    const outcome = await runRestart(claimRestart(id, true), restartDeps());
+    const outcome = await runRestart(claimRestart(id), restartDeps());
 
     expect(outcome).toEqual({ status: "succeeded" });
     const loop = loopOf(id);
@@ -195,58 +196,36 @@ describe("runRestart", () => {
     expect(queued("await_review").map((job) => job.trigger)).toEqual([
       { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "await" },
     ]);
+    expect(queued("implement")).toEqual([]);
   });
 
   it("adopts nothing when the MR is still at the steward's last push", async () => {
     gitlab.openMr = fakeMergeRequest({ sha: HEAD });
-    const id = handedBackLoop();
+    const id = parkedLoop("unassigned");
 
-    await runRestart(claimRestart(id, true), restartDeps());
+    await runRestart(claimRestart(id), restartDeps());
 
     expect(loopOf(id)).toMatchObject({ adoptedFrom: null, headSha: HEAD, state: "awaiting_review" });
   });
 
-  it("records a steward fix restart as not label-driven", async () => {
+  it("with no open MR, stops the loop and never starts a second implement", async () => {
+    const id = parkedLoop("unassigned");
+
+    const outcome = await runRestart(claimRestart(id), restartDeps());
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "stopped: there is no open merge request for fix/API-1-adapter" });
+    expect(loopOf(id).state).toBe("stopped");
+    expect(queued("implement")).toEqual([]);
+    expect(gitlab.notes).toEqual([]);
+  });
+
+  it("does nothing for a loop that is still running", async () => {
     gitlab.openMr = fakeMergeRequest({ sha: PERSON });
-    const id = handedBackLoop();
+    const id = parkedLoop("awaiting_review");
 
-    await runRestart(claimRestart(id, false), restartDeps());
+    const outcome = await runRestart(claimRestart(id), restartDeps());
 
-    expect(loopOf(id).labelDriven).toBe(false);
-  });
-
-  it("with no open MR, says so on the loop's last MR and queues a fresh Linear implement in the ticket's current agent session", async () => {
-    const id = handedBackLoop();
-    stores.agentSessions.record("session-9", "issue-1", "API-1");
-
-    const outcome = await runRestart(claimRestart(id, true), restartDeps());
-
-    expect(outcome).toEqual({ status: "succeeded" });
-    expect(gitlab.notes).toHaveLength(1);
-    expect(gitlab.notes[0]).toContain("No open merge request for fix/API-1-adapter; Ticket Steward is starting a fresh implement.");
-    expect(gitlab.notes[0]).toContain("<!-- ticket-steward:loop");
-    const implement = queued("implement");
-    expect(implement).toHaveLength(1);
-    expect(implement[0]?.trigger).toEqual({ kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-9", message: null });
-    expect(loopOf(id).state).toBe("handed_back");
-  });
-
-  it("with no open MR, a steward fix restart queues a CLI implement that leaves labels alone", async () => {
-    const id = handedBackLoop();
-
-    await runRestart(claimRestart(id, false), restartDeps());
-
-    expect(queued("implement")[0]?.trigger).toEqual({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
-  });
-
-  it("does nothing for a loop that is not handed back", async () => {
-    gitlab.openMr = fakeMergeRequest({ sha: PERSON });
-    const id = handedBackLoop();
-    stores.loops.update(id, { state: "awaiting_review" });
-
-    const outcome = await runRestart(claimRestart(id, true), restartDeps());
-
-    expect(outcome).toEqual({ status: "succeeded", warning: `loop ${id} is awaiting_review, not handed back` });
+    expect(outcome).toEqual({ status: "succeeded", warning: `loop ${id} is awaiting_review, already running` });
     expect(loopOf(id).headSha).toBe(HEAD);
   });
 });

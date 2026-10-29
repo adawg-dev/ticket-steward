@@ -165,6 +165,15 @@ describe("LoopStore", () => {
     expect(stores.loops.active().map((loop) => loop.id)).toEqual([awaitingMr, awaitingReview, fixing]);
   });
 
+  it("reads an unassigned loop back as unassigned: parked, neither active nor ended", () => {
+    const id = stores.loops.create(newLoop());
+    stores.db.prepare("UPDATE loops SET state = 'unassigned' WHERE id = ?").run(id);
+
+    expect(stores.loops.get(id)).toMatchObject({ state: "unassigned", endedAt: null });
+    expect(stores.loops.active()).toEqual([]);
+    expect(stores.loops.stranded()).toEqual([]);
+  });
+
   it("stranded returns running loops with no queued or running job", () => {
     const step = (loopId: number) => ({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "await" }) as const;
     const queued = stores.loops.create(newLoop());

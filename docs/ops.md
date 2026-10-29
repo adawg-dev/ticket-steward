@@ -435,10 +435,14 @@ loop whose await, fix or hand-back job fails for good (out of attempts, or a cra
 within a few minutes, so it never sits in a running state with nothing to move it. Retryable errors only add up while
 they come in a row: each poll that finds the loop still waiting starts the count over.
 
-**Restart.** Re-add `ready-for-agent` to the ticket. Notes people
-posted on the MR after the hand-back are given to the restarted loop's next fix round; system notes and notes from
-Greptile, GitLab bot users (project and group access tokens) and the steward's own `GITLAB_TOKEN` user are left out.
-With no open MR to resume on, the restart says so in a note on the loop's last MR and queues a fresh implement. `steward jobs show <id>` prints the loop and one line per round
+**Unassign, revive, reassign.** Removing the steward as the ticket's delegate stops its run, cancels its queued jobs
+and parks the loop (`unassigned`); the branch and MR stay as they are. While unassigned it ignores Linear prompts and MR
+notes, except a mention: an @mention in Linear (with `linear.reviveByMention` on) or an `/agent` note on the MR sets it
+back as the delegate, resumes the loop on the MR head and answers the message in a chat. Delegating a ticket it already
+has a loop for (unassigned or handed back) resumes the loop on the MR head the same way; it never starts a second
+implement. Notes people posted on the MR after the last hand-back are given to the resumed loop's next fix round; system
+notes and notes from Greptile, GitLab bot users (project and group access tokens) and the steward's own `GITLAB_TOKEN`
+user are left out. With no open MR to resume on, the loop stops and the agent panel says why. `steward jobs show <id>` prints the loop and one line per round
 (`round 1: 3/5 ...`) for the loop's jobs and for the implement job.
 
 **Sessions.** The brain's sessions live in `dataDir/sessions` (`CLAUDE_CONFIG_DIR`), one per ticket, and the loop's worktree
@@ -473,9 +477,9 @@ chat: {
   the newest implement job's). With a pushed steward branch the agent has the `push` tool and may commit and push
   (fast-forward only, every push rule applies); without one it answers only. Work it leaves unpushed is listed in the reply;
   the steward never pushes it.
-- On a handed-back loop, `/agent restart` restarts the loop (the same restart step as re-adding the label); any other
-  `/agent` note chats without restarting it.
-- The webhook answers `chat`, `chat_restart`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
+- On an unassigned loop, an `/agent` note revives it (see above) before its chat runs; any other note is ignored.
+  `/agent restart` is no longer a keyword: it is a chat like any other.
+- The webhook answers `chat`, `chat_revive`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
   `chat_failed` (the access check could not reach GitLab) for an `/agent` note. A bare `/agent` with no message is
   `chat_ignored`.
 - An `/agent` note does not wake a loop waiting for review; the loop's next poll (or any other note) does.

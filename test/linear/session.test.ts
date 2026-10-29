@@ -243,6 +243,50 @@ describe("answerLinearIntake", () => {
     expect(await channels.next(`${fixId}-1`, 0)).toEqual([{ type: "stop" }]);
   });
 
+  /** A loop on the ticket, its implement done. */
+  const loopIn = (state: "fixing" | "unassigned"): number => {
+    const implementId = stores.jobs.enqueue({ kind: "linear", run: "implement", ...ticket, sessionId: "session-1", message: null });
+    const loopId = stores.loops.create({
+      ...ticket, implementJobId: implementId, branch: "fix/API-1-keep", baseSha: "a".repeat(40), headSha: "b".repeat(40),
+      worktreeName: "ticket-API-1", labelDriven: false, sessionId: "claude-session-1",
+    });
+    stores.loops.update(loopId, { state });
+    stores.jobs.claimById(implementId);
+    stores.jobs.finish(implementId, { status: "succeeded" });
+    return loopId;
+  };
+
+  it("stops the open run and parks the loop when the steward is unassigned, posting nothing", async () => {
+    const loopId = loopIn("fixing");
+    const channels = new RunChannels();
+    channels.open("7-1", () => undefined, "issue-1", 7);
+    const event: LinearEvent = { kind: "issue.undelegated", deliveryId: "d-u", ...ticket };
+    const result = await linearIntake(intakeDeps(), event);
+
+    await answerLinearIntake({ ...panelDeps(), channels }, event, result);
+
+    expect(result).toEqual({ action: "unassign" });
+    expect(await channels.next("7-1", 0)).toEqual([{ type: "stop" }]);
+    expect(stores.loops.get(loopId)?.state).toBe("unassigned");
+    expect(linear.calls).toEqual([]);
+  });
+
+  it("sets the steward back as delegate on a reviving mention, and says it is reading", async () => {
+    loopIn("unassigned");
+    const event: LinearEvent = {
+      kind: "session.created", deliveryId: "d-m", sessionId: "session-2", ...ticket, delegated: false, commentBody: "@steward please continue", promptContext: "", byApp: false,
+    };
+    const result = await linearIntake(intakeDeps(), event);
+
+    await answerLinearIntake({ ...panelDeps(), tracker: { appUserId: () => Promise.resolve("app-user") } }, event, result);
+
+    expect(result.action).toBe("revive");
+    expect(linear.calls).toEqual([
+      { kind: "delegate", issueId: "issue-1", appUserId: "app-user" },
+      { kind: "activity", sessionId: "session-2", content: { type: "thought", body: PANEL_TEXT.reading }, ephemeral: false },
+    ]);
+  });
+
   it("says the message waits while a person holds the ticket in a terminal session", async () => {
     await answerLinearIntake(panelDeps(), prompted("hi"), { action: "wait_for_lease", jobId: 1 });
     expect(linear.activities().map((call) => call.content)).toEqual([{ type: "thought", body: PANEL_TEXT.waitForLease }]);

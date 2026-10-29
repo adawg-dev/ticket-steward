@@ -10,6 +10,7 @@ import { seedSettings } from "../../src/settings/schema.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { ActivityContent, LinearAgentApi } from "../../src/tracker/linear/agent.js";
 import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
+import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FAKE_APP_USER_ID, FakeTracker } from "../fakes/fakeTracker.js";
 
 const WEBHOOK_SECRET = "webhook-secret-value";
@@ -494,6 +495,7 @@ describe("buildServer", () => {
       const DEVELOPER = 5;
       const REPORTER = 6;
       let gitlab: FakeGitLabMr;
+      let recording: RecordingLinear;
       let noteIds = 900;
 
       const chatNote = (body: string, over: { branch?: string; username?: string; userId?: number; bot?: boolean; system?: boolean; noteId?: number; discussionId?: string } = {}) =>
@@ -509,7 +511,7 @@ describe("buildServer", () => {
         });
 
       /** A loop on BRANCH with a session, in `state`. */
-      const sessionLoop = (state: "awaiting_review" | "handed_back" = "awaiting_review"): number => {
+      const sessionLoop = (state: "awaiting_review" | "handed_back" | "unassigned" = "awaiting_review"): number => {
         const implementJobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
         stores.jobs.claimById(implementJobId);
         stores.jobs.finish(implementJobId, { status: "succeeded" });
@@ -528,6 +530,7 @@ describe("buildServer", () => {
         gitlab = new FakeGitLabMr();
         gitlab.members.set(DEVELOPER, 30);
         gitlab.members.set(REPORTER, 20);
+        recording = new RecordingLinear();
         app = buildServer({
           config: { ...makeConfig(), greptile: GREPTILE, chat: { prefix: "/agent", sessionRetentionDays: 180 } },
           secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, GITLAB_WEBHOOK_SIGNING_TOKEN: SIGNING_TOKEN },
@@ -536,6 +539,7 @@ describe("buildServer", () => {
           settings: { get: () => seedSettings({}) },
           workerState: () => WORKER_IDLE,
           gitlab,
+          linear: recording,
         });
       });
 
@@ -625,26 +629,36 @@ describe("buildServer", () => {
         expect(chat).toMatchObject({ issueId: "issue-2", identifier: "API-2", subject: null, trigger: { loopId: null } });
       });
 
-      it("restarts a handed-back loop on `/agent restart`, and chats without restarting on a plain note", async () => {
-        const loopId = sessionLoop("handed_back");
+      it("revives an unassigned loop on a prefixed note: the steward delegated again, the loop resumed, the chat queued", async () => {
+        const loopId = sessionLoop("unassigned");
 
-        expect((await postGitlab("Note Hook", chatNote("/agent restart"))).json()).toEqual({ ok: true, action: "chat_restart" });
-        expect((await postGitlab("Note Hook", chatNote("/agent Restart please"))).json()).toEqual({ ok: true, action: "chat_restart" });
+        const response = await postGitlab("Note Hook", chatNote("/agent please continue", { noteId: 801 }));
+
+        expect(response.json()).toEqual({ ok: true, action: "chat_revive" });
         expect(jobsOfKind("restart").map((job) => job.trigger)).toEqual([
-          { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "restart", labelDriven: false },
+          { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, step: "restart" },
         ]);
-
-        expect((await postGitlab("Note Hook", chatNote("/agent what went wrong?"))).json()).toEqual({ ok: true, action: "chat" });
-        expect((await postGitlab("Note Hook", chatNote("/agent restarting would not help, right?"))).json()).toEqual({ ok: true, action: "chat" });
-        expect(jobsOfKind("restart")).toHaveLength(1);
-        expect(jobsOfKind("chat")).toHaveLength(2);
+        expect(jobsOfKind("chat").map((job) => job.trigger)).toEqual([{
+          kind: "chat", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId, projectId: 42, mrIid: 7,
+          discussionId: "disc-1", noteId: 801, author: "ada", message: "please continue",
+        }]);
+        await vi.waitFor(() => expect(recording.calls).toEqual([{ kind: "delegate", issueId: "issue-1", appUserId: FAKE_APP_USER_ID }]));
       });
 
-      it("treats `/agent restart` on a loop that is not handed back as a chat", async () => {
-        sessionLoop("awaiting_review");
+      it("leaves an unassigned loop alone on a note without the prefix", async () => {
+        sessionLoop("unassigned");
+
+        expect((await postGitlab("Note Hook", chatNote("please continue"))).json()).toEqual({ ok: true, action: "no_loop" });
+        expect(stores.jobs.list({ status: "queued", limit: 10 })).toEqual([]);
+        expect(recording.calls).toEqual([]);
+      });
+
+      it("chats on a handed-back loop without restarting it, `/agent restart` included", async () => {
+        sessionLoop("handed_back");
 
         expect((await postGitlab("Note Hook", chatNote("/agent restart"))).json()).toEqual({ ok: true, action: "chat" });
         expect(jobsOfKind("restart")).toEqual([]);
+        expect(jobsOfKind("chat")).toHaveLength(1);
       });
     });
   });

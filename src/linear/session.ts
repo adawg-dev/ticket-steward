@@ -8,7 +8,9 @@ import type { Settings } from "../settings/schema.js";
 import type { Stores } from "../store/index.js";
 import type { ActivityContent, LinearAgentApi } from "../tracker/linear/agent.js";
 import type { LinearEvent } from "../tracker/linear/webhook.js";
+import type { Tracker } from "../tracker/types.js";
 import { createBrainLineMapper, panelScrub } from "./activities.js";
+import { restoreDelegate, unassignTicket } from "./assignment.js";
 import { ASSIGN_ME_REPLY, type LinearIntakeResult } from "./intake.js";
 import { ActivityPoster } from "./poster.js";
 
@@ -220,10 +222,14 @@ export const mergeRequestOpened = async (deps: LinearPanelDeps, issueId: string,
   await moveTicket(deps, api, issueId, { name }, sessionId);
 };
 
-/** What answering intake needs besides the panel: the jobs (a steer that finds no run becomes a chat) and the run channels. */
+/**
+ * What answering intake needs besides the panel: the jobs (a steer that finds no run becomes a chat) and loops (unassign
+ * parks them), the run channels, and the tracker for the app's user id (a revive sets the steward back as delegate).
+ */
 export interface IntakeAnswerDeps extends LinearPanelDeps {
-  stores: Pick<Stores, "agentSessions" | "jobs">;
+  stores: Pick<Stores, "agentSessions" | "jobs" | "loops" | "db">;
   channels?: Pick<RunChannels, "active" | "steer" | "stop" | "stopWhenOpened">;
+  tracker?: Pick<Tracker, "appUserId">;
 }
 
 /** An agent API that posts nothing: steering and stopping still act on the run when Linear is not wired. */
@@ -285,6 +291,10 @@ const answerSession = async (deps: IntakeAnswerDeps, api: LinearAgentApi, event:
       return moveToStarted(deps, event.issueId, event.sessionId);
     case "resume_implement":
       return post({ type: "thought", body: PANEL_TEXT.answerTaken });
+    case "revive":
+      // A mention on a parked loop: the steward is the delegate again, and its chat reads the message.
+      await restoreDelegate(deps, event.issueId);
+      return post({ type: "thought", body: PANEL_TEXT.reading });
     case "chat":
       return post({ type: "thought", body: PANEL_TEXT.reading });
     case "wait_for_lease":
@@ -308,13 +318,18 @@ const answerSession = async (deps: IntakeAnswerDeps, api: LinearAgentApi, event:
 
 /**
  * What Linear hears of an intake decision, sent after the webhook is answered: the first thought on new work (within
- * Linear's 10 s), the answer to a mention on a ticket the steward never had, and steering or stopping the open run.
+ * Linear's 10 s), the answer to a mention on a ticket the steward never had, steering or stopping the open run, and the
+ * delegate set back on a reviving mention. Losing the delegation stops the ticket's run and parks its loop.
  */
 export const answerLinearIntake = async (deps: IntakeAnswerDeps, event: LinearEvent, result: LinearIntakeResult): Promise<void> => {
-  if (event.kind === "issue.undelegated") return;
-  // Delegated again to a ticket it has a branch for (Task 11 resumes it): only the state moves here.
+  // Removed as the delegate: the run stops and the loop is parked; Linear's own prompt handles the panel.
+  if (event.kind === "issue.undelegated") {
+    if (result.action === "unassign") unassignTicket(deps, event.issueId);
+    return;
+  }
+  // Delegated again to a ticket it has a loop for (its restart step resumes it): only the state moves here.
   if (result.action === "revive" && event.kind === "session.created" && event.delegated) return moveToStarted(deps, event.issueId, event.sessionId);
-  const quiet: readonly string[] = ["ignored", "duplicate", "unassign", "revive"];
+  const quiet: readonly string[] = ["ignored", "duplicate", "unassign"];
   if (quiet.includes(result.action)) return;
   const api = deps.linear;
   if (api === undefined) {

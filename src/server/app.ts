@@ -105,6 +105,7 @@ const panelDeps = (deps: ServerDeps): IntakeAnswerDeps => ({
   stores: deps.stores,
   settings: deps.settings,
   redactor: deps.redactor ?? unredacted,
+  tracker: deps.tracker,
   ...(deps.linear === undefined ? {} : { linear: deps.linear }),
   ...(deps.channels === undefined ? {} : { channels: deps.channels }),
 });
@@ -191,7 +192,7 @@ const gitlabIntake = async (deps: ServerDeps, event: GitlabWakeEvent | null): Pr
 
 /**
  * GitLab events wake a waiting fix loop's deferred await; polling is only the fallback. A `chat.prefix` note from a
- * Developer enqueues a chat (or a handed-back loop's restart); nothing else enqueues a job.
+ * Developer enqueues a chat (on an unassigned loop, after its revive); nothing else enqueues a job.
  */
 const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
   app.post<{ Body: string }>("/webhooks/gitlab", { bodyLimit: GITLAB_BODY_LIMIT }, async (request, reply) => {

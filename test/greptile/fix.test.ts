@@ -446,7 +446,7 @@ describe("runFix", () => {
     gitlab.addDiscussion("ada", "Keep the old buffer size when you fix it", { createdAt: "2026-10-27T10:00:00.000Z" });
     const id = createLoop();
     stores.loops.update(id, { state: "handed_back", round: 3, handedBackAt: "2026-10-27T09:00:00.000Z" });
-    const restart: TriggerEvent = { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "restart", labelDriven: true };
+    const restart: TriggerEvent = { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "restart" };
     const restartJob = stores.jobs.enqueue(restart);
     stores.jobs.claimById(restartJob);
     const deps = makeDeps(editing({ result: changed(finding) }));
@@ -762,6 +762,25 @@ describe("runFix through an executor", () => {
 
     expect(await runFix(claim(id), { ...makeDeps(new FakeBrain()), executor: stopped })).toEqual({ status: "succeeded", warning: `handed back: ${STOPPED_JOB_ERROR}` });
     expect(loopOf(id)).toMatchObject({ state: "handed_back", sessionId: "session-stopped" });
+  });
+
+  it("leaves a loop unassigned mid-round parked: no hand-back, no note, its session kept", async () => {
+    const id = createLoop();
+    const unassigning: RunExecutor = {
+      execute: async (spec) => {
+        // The steward is removed as the ticket's delegate while the round runs: the loop is parked, then the run stopped.
+        stores.loops.update(id, { state: "unassigned" });
+        return {
+          report: { runId: spec.runId, ok: false, error: "stopped", interrupted: false, stopped: true, setupFailed: false, sessionId: "session-stopped", output: null, usage: null },
+          work: { runId: spec.runId, unpushed: "", pushedSha: null },
+        };
+      },
+    };
+
+    expect(await runFix(claim(id), { ...makeDeps(new FakeBrain()), executor: unassigning })).toEqual({ status: "succeeded", warning: `loop ${id} is unassigned; the round was left as it stood` });
+    expect(loopOf(id)).toMatchObject({ state: "unassigned", sessionId: "session-stopped", headSha });
+    expect(gitlab.notes).toEqual([]);
+    expect(gitlab.replies).toEqual([]);
   });
 
   it("fails retryably and keeps the tail when setup fails, and when the executor cannot start the run", async () => {
