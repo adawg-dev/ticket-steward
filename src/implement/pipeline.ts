@@ -13,7 +13,7 @@ import type { JobOutcome, RunContext } from "../core/types.js";
 import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, stableWorktreeName, type JobPaths } from "../core/workspace.js";
 import { isLinearImplement, startLoop } from "../greptile/start.js";
 import type { PushTarget } from "../push/target.js";
-import { setupTailOf } from "../run/execute.js";
+import { setupTailOf, STOPPED_JOB_ERROR } from "../run/execute.js";
 import { localExecutor } from "../run/local.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import { transaction, type Job } from "../store/index.js";
@@ -250,6 +250,7 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
   if (!ctx.dryRun) deps.stores.jobs.recordWorkspace(ctx.jobId, paths.worktreeName, baseSha);
   patchAttempt(ctx, deps, { transcriptPath: paths.transcriptPath, ...(report.usage === null ? {} : { usage: report.usage }) });
   if (report.sessionId !== null && !ctx.dryRun) deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
+  if (report.stopped) return { status: "failed", error: STOPPED_JOB_ERROR, retryable: false };
   if (!report.ok) return { status: "failed", error: report.error ?? "brain run failed", retryable: report.interrupted };
 
   const validated = validateImplementResult(report.output);

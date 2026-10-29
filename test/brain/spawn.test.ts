@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FakeBrainPids } from "../../src/brain/fake.js";
 import { runBrainDetached } from "../../src/brain/spawn.js";
-import { INTERRUPTED_ERROR, type BrainInput } from "../../src/brain/types.js";
+import { INTERRUPTED_ERROR, STOPPED_ERROR, type BrainControl, type BrainInput } from "../../src/brain/types.js";
 import type { BrainConfig } from "../../src/config/schema.js";
 import { Redactor } from "../../src/core/redact.js";
 
@@ -95,5 +95,26 @@ describe("runBrainDetached", () => {
   it("still settles the run when the transcript cannot be written", async () => {
     const run = await runBrainDetached(fakeBrain, input({ transcriptPath: "/dev/full" }), new Redactor([]));
     expect(run.ok).toBe(true);
+  });
+
+  it("delivers a steered message to the brain in the runner over IPC", async () => {
+    const brainInput = input({ prompt: "await steering" });
+    let control: BrainControl | undefined;
+    const running = runBrainDetached(fakeBrain, brainInput, new Redactor([]), { control: (handlers) => (control = handlers) });
+    await vi.waitFor(() => transcriptPids(brainInput.transcriptPath), { timeout: 15_000 });
+    control?.steer("use v2");
+    const run = await running;
+    expect(run).toEqual({ ok: true, output: { steered: "use v2" } });
+    await pidsAreGone(brainInput.transcriptPath);
+  });
+
+  it("stops the brain in the runner over IPC, and ignores control after the run ended", async () => {
+    const brainInput = input({ prompt: "await steering" });
+    let control: BrainControl | undefined;
+    const running = runBrainDetached(fakeBrain, brainInput, new Redactor([]), { control: (handlers) => (control = handlers) });
+    await vi.waitFor(() => transcriptPids(brainInput.transcriptPath), { timeout: 15_000 });
+    control?.stop();
+    expect(await running).toEqual({ ok: false, output: undefined, error: STOPPED_ERROR });
+    expect(() => control?.steer("after the end")).not.toThrow();
   });
 });

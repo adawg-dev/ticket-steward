@@ -88,7 +88,7 @@ let cluster: FakeCluster;
 let executor: KubernetesExecutor;
 
 const reportFor = (runId: string, patch: Partial<RunReport> = {}): RunReport => ({
-  runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-1", output: { outcome: "done" }, usage: null, ...patch,
+  runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-1", output: { outcome: "done" }, usage: null, ...patch,
 });
 const workFor = (runId: string): WorkReport => ({ runId, unpushed: "", pushedSha: null });
 

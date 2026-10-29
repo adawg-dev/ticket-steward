@@ -11,6 +11,7 @@ import { publishImplementOnly, runImplement } from "../../src/implement/pipeline
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
+import { STOPPED_JOB_ERROR } from "../../src/run/execute.js";
 import type { RunExecutor } from "../../src/run/executor.js";
 import { localExecutor } from "../../src/run/local.js";
 import { RunSpecSchema, type RunReport, type RunSpec } from "../../src/run/protocol.js";
@@ -409,7 +410,7 @@ describe("runImplement", () => {
       execute: (resumed) => {
         reattached.push(resumed);
         return Promise.resolve({
-          report: { runId: resumed.runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-1", output: implemented, usage: null },
+          report: { runId: resumed.runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-1", output: implemented, usage: null },
           work: { runId: resumed.runId, unpushed: "", pushedSha: null },
         });
       },
@@ -517,7 +518,7 @@ describe("runImplement", () => {
 
 describe("runImplement through an executor", () => {
   const reportOf = (spec: RunSpec, patch: Partial<RunReport> = {}): RunReport => ({
-    runId: spec.runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-x", output: implemented, usage: { inputTokens: 1, outputTokens: 1 }, ...patch,
+    runId: spec.runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-x", output: implemented, usage: { inputTokens: 1, outputTokens: 1 }, ...patch,
   });
 
   it("hands the executor a spec that carries no secret, then finishes from its reports", async () => {
@@ -561,6 +562,14 @@ describe("runImplement through an executor", () => {
     const second = claim({ ...trigger, sessionId: "session-2" });
     expect(await runImplement(second, { ...makeDeps(undefined), executor: setup })).toEqual({ status: "failed", error: "setup failed:\npnpm: not found\n", retryable: true });
     expect(stores.attempts.forJob(second.jobId)[0]?.setupTail).toBe("pnpm: not found\n");
+  });
+
+  it("does not retry a run a person stopped, and keeps its session for the next prompt", async () => {
+    const stopped: RunExecutor = { execute: async (spec) => ({ report: reportOf(spec, { ok: false, error: "stopped", stopped: true, sessionId: "session-stopped", output: null }), work: { runId: spec.runId, unpushed: "", pushedSha: null } }) };
+    const ctx = claim();
+
+    expect(await runImplement(ctx, { ...makeDeps(undefined), executor: stopped })).toEqual({ status: "failed", error: STOPPED_JOB_ERROR, retryable: false });
+    expect(stores.jobs.get(ctx.jobId)?.sessionId).toBe("session-stopped");
   });
 
   it("fails retryably when the executor cannot start the run", async () => {

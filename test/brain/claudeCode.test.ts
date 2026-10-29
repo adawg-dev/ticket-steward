@@ -1,6 +1,6 @@
-import type { SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKMessage, SDKResultMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createClaudeCodeBrain, type QueryImpl } from "../../src/brain/claudeCode.js";
-import type { BrainInput } from "../../src/brain/types.js";
+import { STOPPED_ERROR, type BrainControl, type BrainInput } from "../../src/brain/types.js";
 import { fixResultJsonSchema } from "../../src/greptile/result.js";
 import { implementResultJsonSchema } from "../../src/implement/result.js";
 
@@ -35,6 +35,24 @@ const yielding =
   async function* () {
     for (const message of messages) yield message;
   };
+
+const assistantText = (text: string): SDKMessage =>
+  ({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] }, parent_tool_use_id: null, session_id: "sess-1" }) as unknown as SDKMessage;
+
+const textOf = (message: SDKUserMessage): unknown => message.message.content;
+
+/** Like the SDK in streaming-input mode: one turn per user message it pulls, until the input ends. */
+const streaming =
+  (received: SDKUserMessage[]): QueryImpl =>
+  ({ prompt }) =>
+    (async function* () {
+      if (typeof prompt === "string") throw new Error("expected a streamed prompt");
+      for await (const message of prompt) {
+        received.push(message);
+        yield assistantText(`working on turn ${received.length}`);
+        yield resultMessage({ subtype: "success", structured_output: { summary: `turn ${received.length}` } });
+      }
+    })();
 
 const lines: string[] = [];
 const onMessage = (line: string): void => {
@@ -177,5 +195,66 @@ describe("claude-code brain", () => {
       push: { type: "http", url: "http://127.0.0.1:4181/mcp/push" },
       codehost: { type: "http", url: "http://127.0.0.1:4181/mcp/codehost", headers: { "x-run": "7-1" } },
     });
+  });
+
+  it("streams the prompt and delivers a steered message as the next user message", async () => {
+    const received: SDKUserMessage[] = [];
+    let control: BrainControl | undefined;
+    const steerOnFirstTurn = (line: string): void => {
+      if (line.includes("working on turn 1")) control?.steer("use v2");
+    };
+
+    const run = await createClaudeCodeBrain({ queryImpl: streaming(received) }).run(input, steerOnFirstTurn, (handlers) => {
+      control = handlers;
+    });
+
+    expect(received.map(textOf)).toEqual(["investigate", "use v2"]);
+    expect(received[0]).toMatchObject({ type: "user", parent_tool_use_id: null, message: { role: "user" } });
+    expect(run).toMatchObject({ ok: true, output: { summary: "turn 2" } });
+  });
+
+  it("ends the input when the result arrives, so a later steer is not delivered", async () => {
+    const received: SDKUserMessage[] = [];
+    let control: BrainControl | undefined;
+
+    const run = await createClaudeCodeBrain({ queryImpl: streaming(received) }).run(input, onMessage, (handlers) => {
+      control = handlers;
+    });
+    control?.steer("too late");
+
+    expect(received.map(textOf)).toEqual(["investigate"]);
+    expect(run).toMatchObject({ ok: true, output: { summary: "turn 1" } });
+  });
+
+  it("interrupts the query on stop and reports the run as stopped, without a max-turns follow-up", async () => {
+    let interrupted!: () => void;
+    const interruptedNow = new Promise<void>((resolve) => {
+      interrupted = resolve;
+    });
+    const interrupt = vi.fn(async () => {
+      interrupted();
+      return undefined;
+    });
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(({ prompt }) => {
+      const messages = (async function* () {
+        if (typeof prompt !== "string") await prompt[Symbol.asyncIterator]().next();
+        yield assistantText("editing");
+        await interruptedNow;
+        yield resultMessage({ subtype: "error_max_turns", session_id: "s-stopped" });
+      })();
+      return Object.assign(messages, { interrupt });
+    });
+    let control: BrainControl | undefined;
+    const stopWhileWorking = (line: string): void => {
+      if (line.includes("editing")) control?.stop();
+    };
+
+    const run = await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, stopWhileWorking, (handlers) => {
+      control = handlers;
+    });
+
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect(queryMock).toHaveBeenCalledTimes(1);
+    expect(run).toEqual({ ok: false, output: undefined, usage, sessionId: "s-stopped", error: STOPPED_ERROR });
   });
 });

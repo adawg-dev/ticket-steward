@@ -85,7 +85,7 @@ export const jobEnded = (job: V1Job): Ended | null => {
 };
 
 const interruptedReport = (runId: string): RunReport => ({
-  runId, ok: false, error: POD_ENDED_WITHOUT_REPORT, interrupted: true, setupFailed: false, sessionId: null, output: null, usage: null,
+  runId, ok: false, error: POD_ENDED_WITHOUT_REPORT, interrupted: true, stopped: false, setupFailed: false, sessionId: null, output: null, usage: null,
 });
 
 /**

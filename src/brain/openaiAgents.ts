@@ -4,6 +4,7 @@ import { Agent, MCPServerStdio, run } from "@openai/agents";
 import { ChatResultSchema } from "../chat/result.js";
 import { FixResultSchema } from "../greptile/result.js";
 import { ImplementResultSchema } from "../implement/result.js";
+import { logger } from "../log.js";
 import { createBrainTools } from "./tools/index.js";
 import { BackgroundProcesses } from "./tools/processes.js";
 import type { Brain, BrainInput, BrainUsage, ReasoningEffort } from "./types.js";
@@ -100,7 +101,12 @@ const agentFor = <TOutput extends typeof ImplementResultSchema | typeof FixResul
 
 export const createOpenAiAgentsBrain = (): Brain => ({
   kind: "openai-agents",
-  run: async (input, onMessage) => {
+  run: async (input, onMessage, control) => {
+    // This brain takes no input mid-run: steering and stop are logged and dropped (the Linear app requires claude-code).
+    control?.({
+      steer: () => logger.warn("openai-agents cannot be steered; message dropped"),
+      stop: () => logger.warn("openai-agents cannot be stopped mid-run; stop ignored"),
+    });
     if (input.resumeSessionId !== undefined) return { ok: false, output: undefined, error: "openai-agents cannot resume a session" };
     const http = httpServers(input);
     if (http.length > 0) return { ok: false, output: undefined, error: `openai-agents cannot reach HTTP MCP servers: ${http.join(", ")}` };

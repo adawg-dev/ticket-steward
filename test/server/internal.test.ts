@@ -56,7 +56,7 @@ const runs: RunCallbacks = {
   },
 };
 
-const reportFor = (runId: string): RunReport => ({ runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: null, output: null, usage: null });
+const reportFor = (runId: string): RunReport => ({ runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: null, output: null, usage: null });
 
 /** A run of a job with a row, as the executor registers it, with both of its tokens. */
 const startRun = (identifier: string): { spec: RunSpec; runner: string; tools: string } => {

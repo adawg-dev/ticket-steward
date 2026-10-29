@@ -1,5 +1,5 @@
 import { runBrainDetached } from "../brain/spawn.js";
-import { INTERRUPTED_ERROR, type BrainInput, type BrainRun, type McpServerSpec } from "../brain/types.js";
+import { INTERRUPTED_ERROR, STOPPED_ERROR, type BrainControlSink, type BrainInput, type BrainRun, type McpServerSpec } from "../brain/types.js";
 import type { BrainConfig } from "../config/schema.js";
 import type { Redactor } from "../core/redact.js";
 import { errorMessage, MINUTE_MS, SETUP_TAIL_BYTES } from "../core/workspace.js";
@@ -12,6 +12,9 @@ export const PERSON_COMMITS_MARKER = "{{steward:personCommits}}";
 
 /** What a failed setup's report error starts with; the redacted tail follows. */
 export const SETUP_FAILED_PREFIX = "setup failed:\n";
+
+/** The job error of a run whose report says `stopped`; such a job is not retried. */
+export const STOPPED_JOB_ERROR = "stopped by a person in Linear";
 
 /** The worktree the executor built for the spec. */
 export interface PreparedWorkspace {
@@ -31,6 +34,8 @@ export interface ExecuteEnv {
   inlineSkills?: string[];
   redactor: Redactor;
   signal?: AbortSignal;
+  /** Receives the handlers that steer and stop the brain once it runs. */
+  control?: BrainControlSink;
   runBrain?: typeof runBrainDetached;
 }
 
@@ -79,7 +84,7 @@ const brainInputOf = (spec: RunSpec, env: ExecuteEnv, prompt: string): BrainInpu
  */
 export const executeRun = async (spec: RunSpec, env: ExecuteEnv): Promise<RunReport> => {
   const failed = (error: string, patch: Partial<RunReport> = {}): RunReport => ({
-    runId: spec.runId, ok: false, error, interrupted: false, setupFailed: false, sessionId: null, output: null, usage: null, ...patch,
+    runId: spec.runId, ok: false, error, interrupted: false, stopped: false, setupFailed: false, sessionId: null, output: null, usage: null, ...patch,
   });
   const interrupted = (): boolean => env.signal?.aborted === true;
 
@@ -98,7 +103,10 @@ export const executeRun = async (spec: RunSpec, env: ExecuteEnv): Promise<RunRep
 
   let run: BrainRun;
   try {
-    run = await (env.runBrain ?? runBrainDetached)(env.brain, brainInputOf(spec, env, prompt), env.redactor, { ...(env.signal === undefined ? {} : { signal: env.signal }) });
+    run = await (env.runBrain ?? runBrainDetached)(env.brain, brainInputOf(spec, env, prompt), env.redactor, {
+      ...(env.signal === undefined ? {} : { signal: env.signal }),
+      ...(env.control === undefined ? {} : { control: env.control }),
+    });
   } catch (err) {
     return failed(errorMessage(err));
   }
@@ -107,6 +115,7 @@ export const executeRun = async (spec: RunSpec, env: ExecuteEnv): Promise<RunRep
     ok: run.ok,
     error: run.ok ? null : (run.error ?? null),
     interrupted: !run.ok && run.error === INTERRUPTED_ERROR,
+    stopped: !run.ok && run.error === STOPPED_ERROR,
     setupFailed: false,
     sessionId: run.sessionId ?? null,
     output: run.output ?? null,

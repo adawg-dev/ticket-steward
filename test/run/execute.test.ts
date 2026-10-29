@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { BrainInput, BrainRun } from "../../src/brain/types.js";
+import { STOPPED_ERROR, type BrainControlSink, type BrainInput, type BrainRun } from "../../src/brain/types.js";
 import { Redactor } from "../../src/core/redact.js";
 import { executeRun, PERSON_COMMITS_MARKER, type ExecuteEnv } from "../../src/run/execute.js";
 import type { RunSpec } from "../../src/run/protocol.js";
@@ -60,7 +60,7 @@ describe("executeRun", () => {
 
     const report = await executeRun(specFor(), envFor(brain));
 
-    expect(report).toEqual({ runId: "7-1", ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-2", output: { outcome: "changed" }, usage: { inputTokens: 3, outputTokens: 2 } });
+    expect(report).toEqual({ runId: "7-1", ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-2", output: { outcome: "changed" }, usage: { inputTokens: 3, outputTokens: 2 } });
     expect(brain.lastInput()).toMatchObject({
       workspacePath: repo,
       prompt: "Fix the findings.",
@@ -128,8 +128,23 @@ describe("executeRun", () => {
     const interrupted = await executeRun(specFor(), envFor(new FakeBrain({ fail: true, error: "interrupted" })));
     const failed = await executeRun(specFor(), envFor(new FakeBrain({ fail: true, error: "error_max_turns" })));
 
-    expect(interrupted).toMatchObject({ ok: false, interrupted: true, error: "interrupted" });
-    expect(failed).toMatchObject({ ok: false, interrupted: false, error: "error_max_turns" });
+    expect(interrupted).toMatchObject({ ok: false, interrupted: true, stopped: false, error: "interrupted" });
+    expect(failed).toMatchObject({ ok: false, interrupted: false, stopped: false, error: "error_max_turns" });
+  });
+
+  it("reports a run a person stopped as stopped, not interrupted, and hands the brain the env's control sink", async () => {
+    const control: BrainControlSink = () => undefined;
+    const sinks: Array<BrainControlSink | undefined> = [];
+    const report = await executeRun(specFor(), envFor(new FakeBrain(), {
+      control,
+      runBrain: (_config, _input, _redactor, opts) => {
+        sinks.push(opts?.control);
+        return Promise.resolve({ ok: false, output: undefined, sessionId: "session-2", error: STOPPED_ERROR });
+      },
+    }));
+
+    expect(report).toMatchObject({ ok: false, interrupted: false, stopped: true, error: STOPPED_ERROR, sessionId: "session-2" });
+    expect(sinks).toEqual([control]);
   });
 
   it("reports a brain that throws as a failed run", async () => {

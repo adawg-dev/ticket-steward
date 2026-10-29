@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import type { BrainConfig } from "../config/schema.js";
 import type { Redactor } from "../core/redact.js";
 import { logger } from "../log.js";
-import type { RunnerMessage, RunnerStart } from "./runner.js";
-import { INTERRUPTED_ERROR, type BrainInput, type BrainRun } from "./types.js";
+import type { RunnerControl, RunnerMessage, RunnerStart } from "./runner.js";
+import { INTERRUPTED_ERROR, type BrainControlSink, type BrainInput, type BrainRun } from "./types.js";
 
 const runningFromSource = import.meta.url.endsWith(".ts");
 const runnerPath = fileURLToPath(new URL(runningFromSource ? "./runner.ts" : "./runner.js", import.meta.url));
@@ -25,7 +25,7 @@ export const runBrainDetached = async (
   brain: BrainConfig,
   input: BrainInput,
   redactor: Redactor,
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; control?: BrainControlSink } = {},
 ): Promise<BrainRun> => {
   await mkdir(dirname(input.transcriptPath), { recursive: true, mode: 0o700 });
   const transcript = createWriteStream(input.transcriptPath, { flags: "a", mode: 0o600 });
@@ -36,9 +36,20 @@ export const runBrainDetached = async (
   const interrupt = (): void => {
     if (pid !== undefined) killGroup(pid);
   };
+  let settled = false;
+  /** Forwards a control message to the runner; dropped once the run settled or the channel closed. */
+  const control = (message: RunnerControl): void => {
+    if (settled || !child.connected) return;
+    try {
+      child.send(message);
+    } catch (err) {
+      logger.warn({ err }, "brain control message not delivered");
+    }
+  };
   const run = await new Promise<BrainRun>((resolve) => {
     const timer = setTimeout(() => resolve({ ok: false, output: undefined, error: `brain timed out after ${input.timeoutMs} ms` }), input.timeoutMs);
     const settle = (result: BrainRun): void => {
+      settled = true;
       clearTimeout(timer);
       resolve(result);
     };
@@ -56,6 +67,7 @@ export const runBrainDetached = async (
     if (opts.signal?.aborted) interrupt();
     const start: RunnerStart = { type: "start", brain, input };
     child.send(start);
+    opts.control?.({ steer: (message) => control({ type: "steer", message }), stop: () => control({ type: "stop" }) });
   });
 
   opts.signal?.removeEventListener("abort", interrupt);

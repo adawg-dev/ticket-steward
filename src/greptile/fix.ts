@@ -11,7 +11,7 @@ import type { JobOutcome, RunContext } from "../core/types.js";
 import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, type JobPaths } from "../core/workspace.js";
 import { runIdOf, settingsOf, stewardChecks } from "../implement/pipeline.js";
 import type { PushTarget } from "../push/target.js";
-import { PERSON_COMMITS_MARKER, setupTailOf } from "../run/execute.js";
+import { PERSON_COMMITS_MARKER, setupTailOf, STOPPED_JOB_ERROR } from "../run/execute.js";
 import { localExecutor } from "../run/local.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store/index.js";
@@ -331,6 +331,8 @@ const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: 
     deps.stores.loops.update(loop.id, { sessionId: report.sessionId });
     deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
   }
+  // A person stopped it from Linear: handed back, so the next comment or prompt resumes the loop instead of a retry.
+  if (report.stopped) return decide(fix, handingBack(facts, null, STOPPED_JOB_ERROR), mr);
   if (!report.ok) {
     const error = report.error ?? "brain run failed";
     return decide(fix, SESSION_ERROR.test(error) ? handingBack(facts, null, SESSION_LOST, error) : handingBack(facts, null, `the agent's run failed: ${error}`), mr);

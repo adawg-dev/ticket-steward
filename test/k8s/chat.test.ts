@@ -40,7 +40,7 @@ class FakeExecutor {
   };
 
   finish(runId: string, patch: Partial<RunReport>, unpushed: string): void {
-    const report: RunReport = { runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-1", output: undefined, usage: null, ...patch };
+    const report: RunReport = { runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-1", output: undefined, usage: null, ...patch };
     this.finishers.get(runId)?.resolve({ report, work: { runId, unpushed, pushedSha: null } });
     this.finishers.delete(runId);
   }

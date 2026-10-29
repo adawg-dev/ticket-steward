@@ -30,6 +30,7 @@ const report: RunReport = {
   ok: true,
   error: null,
   interrupted: false,
+  stopped: false,
   setupFailed: false,
   sessionId: "session-1",
   output: { outcome: "implemented", summary: "done" },
@@ -43,6 +44,8 @@ describe("the run protocol", () => {
     expect(RunSpecSchema.parse(roundTrip(spec))).toEqual(spec);
     expect(RunReportSchema.parse(roundTrip(report))).toEqual(report);
     expect(RunReportSchema.parse(roundTrip({ ...report, ok: false, error: "interrupted", interrupted: true, sessionId: null, output: null, usage: null }))).toMatchObject({ ok: false, usage: null });
+    const older = Object.fromEntries(Object.entries(report).filter(([key]) => key !== "stopped"));
+    expect(RunReportSchema.parse(roundTrip(older))).toEqual(report);
     const work = { runId: "7-1", unpushed: "uncommitted:\n  notes.md", pushedSha: null };
     expect(WorkReportSchema.parse(roundTrip(work))).toEqual(work);
   });

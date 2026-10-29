@@ -62,6 +62,8 @@ export const RunReportSchema = z.object({
   error: z.string().nullable(),
   /** Stopped by the executor's signal (shutdown) or by the pod going away: the job is retried. */
   interrupted: z.boolean(),
+  /** Stopped by a person (Linear's stop): never retried. False when parsing a report from before this field. */
+  stopped: z.boolean().default(false),
   /** `workspace.setup` failed; the brain did not run and `error` carries the redacted tail. */
   setupFailed: z.boolean(),
   sessionId: z.string().min(1).nullable(),

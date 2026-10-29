@@ -333,7 +333,7 @@ export interface PodRun {
 }
 
 const failedReport = (spec: RunSpec, error: string): RunReport => ({
-  runId: spec.runId, ok: false, error, interrupted: false, setupFailed: false, sessionId: null, output: null, usage: null,
+  runId: spec.runId, ok: false, error, interrupted: false, stopped: false, setupFailed: false, sessionId: null, output: null, usage: null,
 });
 
 /**

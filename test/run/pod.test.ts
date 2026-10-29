@@ -204,7 +204,7 @@ describe("startChecksServer", () => {
 });
 
 describe("postReport", () => {
-  const report = { runId: "7-1", ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-2", output: null, usage: null };
+  const report = { runId: "7-1", ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-2", output: null, usage: null };
   const quick = { retryForMs: 5_000, backoffMs: { first: 10, max: 20 } };
 
   it("keeps trying while the dispatcher refuses connections or answers 503, and delivers the report once it is back", async () => {
@@ -333,7 +333,7 @@ describe("steward run-pod", () => {
     expect(callback.received).toHaveLength(1);
     const [report] = callback.received;
     expect(report).toMatchObject({ method: "POST", path: "/internal/runs/7-1/report", authorization: `Bearer ${RUNNER_TOKEN}` });
-    expect(JSON.parse(report?.body ?? "")).toEqual({ runId: "7-1", ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-2", output: { outcome: "pushed" }, usage: { inputTokens: 10, outputTokens: 5 } });
+    expect(JSON.parse(report?.body ?? "")).toEqual({ runId: "7-1", ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-2", output: { outcome: "pushed" }, usage: { inputTokens: 10, outputTokens: 5 } });
 
     const input = brain.lastInput();
     expect(input.env.ANTHROPIC_AUTH_TOKEN).toBe("steward-keyproxy");

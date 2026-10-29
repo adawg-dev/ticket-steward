@@ -16,7 +16,7 @@ import type { FixResult } from "../../src/greptile/result.js";
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
-import { PERSON_COMMITS_MARKER } from "../../src/run/execute.js";
+import { PERSON_COMMITS_MARKER, STOPPED_JOB_ERROR } from "../../src/run/execute.js";
 import type { RunExecutor } from "../../src/run/executor.js";
 import { RunSpecSchema, type RunReport, type RunSpec, type WorkReport } from "../../src/run/protocol.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
@@ -679,7 +679,7 @@ describe("runFix", () => {
 
 describe("runFix through an executor", () => {
   const reportOf = (spec: RunSpec, patch: Partial<RunReport> = {}): RunReport => ({
-    runId: spec.runId, ok: true, error: null, interrupted: false, setupFailed: false, sessionId: "session-x", output: declined(finding), usage: { inputTokens: 1, outputTokens: 1 }, ...patch,
+    runId: spec.runId, ok: true, error: null, interrupted: false, stopped: false, setupFailed: false, sessionId: "session-x", output: declined(finding), usage: { inputTokens: 1, outputTokens: 1 }, ...patch,
   });
 
   /** An executor that records the specs it is handed and reports `patch` and `work` for each. */
@@ -753,6 +753,14 @@ describe("runFix through an executor", () => {
     const lost = executing({ ok: false, error: "No conversation found with session ID: session-1", sessionId: null, output: null });
     expect(await runFix(claim(first), { ...makeDeps(new FakeBrain()), executor: lost })).toEqual({ status: "succeeded", warning: "handed back: the agent's session could not be resumed" });
     expect(loopOf(first).state).toBe("handed_back");
+  });
+
+  it("hands back a round a person stopped instead of retrying it, keeping its session", async () => {
+    const id = createLoop();
+    const stopped = executing({ ok: false, error: "stopped", stopped: true, sessionId: "session-stopped", output: null });
+
+    expect(await runFix(claim(id), { ...makeDeps(new FakeBrain()), executor: stopped })).toEqual({ status: "succeeded", warning: `handed back: ${STOPPED_JOB_ERROR}` });
+    expect(loopOf(id)).toMatchObject({ state: "handed_back", sessionId: "session-stopped" });
   });
 
   it("fails retryably and keeps the tail when setup fails, and when the executor cannot start the run", async () => {

@@ -11,7 +11,7 @@ import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, 
 import { unpushedWork } from "../implement/git.js";
 import { guardSecrets, runIdOf, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
 import type { PushTarget } from "../push/target.js";
-import { setupTailOf } from "../run/execute.js";
+import { setupTailOf, STOPPED_JOB_ERROR } from "../run/execute.js";
 import { localExecutor } from "../run/local.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import type { TriggerEvent } from "../tracker/types.js";
@@ -262,6 +262,8 @@ const finishChat = async (
     else deps.stores.jobs.recordSession(session.jobId, report.sessionId);
     deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
   }
+  // A person stopped it from Linear: nothing to reply, and the next message resumes the recorded session.
+  if (report.stopped) return { status: "failed", error: STOPPED_JOB_ERROR, retryable: false };
   const leftover = deps.redactor.redact(work.unpushed);
   if (!report.ok) {
     const error = report.error ?? "brain run failed";
