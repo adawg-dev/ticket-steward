@@ -834,10 +834,19 @@ network plugin must enforce NetworkPolicy. Install helm 3 and kubectl.
   default network does not.
 
   ```bash
+  # pods get no search domain of the host's (a host domain that answers every name would win over the real one)
+  mkdir -p ~/.minikube/files/etc
+  printf 'nameserver 192.168.49.1\n' > ~/.minikube/files/etc/kubelet-resolv.conf
   minikube start -p steward --driver=docker --cni=calico --cpus=6 --memory=16g --disk-size=100g \
+    --extra-config=kubelet.resolv-conf=/etc/kubelet-resolv.conf \
     --extra-config=apiserver.service-account-issuer=https://oidc.example.com \
     --extra-config=apiserver.service-account-jwks-uri=https://oidc.example.com/openid/v1/jwks
   ```
+
+  On a profile that already exists, minikube saves a new `--extra-config` but keeps the running kubelet: run
+  `minikube -p steward ssh -- 'sudo systemctl daemon-reload && sudo systemctl restart kubelet'` and restart CoreDNS.
+  `192.168.49.1` is the gateway of minikube's Docker network, which answers DNS with the host's resolver; check it with
+  `minikube -p steward ssh -- cat /etc/resolv.conf` if your network differs.
 
   `deploy/helm/values/minikube.yaml` matches its defaults: StorageClass `standard`, service CIDR `10.96.0.0/12`, pod
   CIDR `10.244.0.0/16`, and the webhooks on node port 30320 (point the tunnel or reverse proxy of §1.6 at
