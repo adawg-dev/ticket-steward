@@ -4,13 +4,13 @@ import { claudeMcpServer, CLEANUP_PERIOD_DAYS } from "../brain/claudeCode.js";
 import type { runBrainDetached } from "../brain/spawn.js";
 import type { BrainInput, BrainRun } from "../brain/types.js";
 import { chatSettings } from "../chat/hook.js";
-import { MINUTE_MS } from "../core/workspace.js";
 import {
   EGRESS_CA_FILE,
   POD_OVERLAY_DIR,
   POD_PORTS,
   POD_WAIT_PORTS,
   POD_WAIT_TIMEOUT_MS,
+  podChecksTimeoutMs,
   runPod,
   TOOLS_URL,
 } from "../run/pod.js";
@@ -122,7 +122,7 @@ export const registerRunPod = (program: Command, ctx: CliContext): void => {
           waitPorts,
           waitTimeoutMs,
           checksListen,
-          checksTimeoutMs: ((config.implement?.checksTimeoutMinutes ?? 0) + 1) * MINUTE_MS,
+          checksTimeoutMs: podChecksTimeoutMs(config.implement?.checksTimeoutMinutes ?? 0),
           callbackUrl,
           runnerToken,
           fetchImpl: ctx.fetchImpl,

@@ -8,7 +8,7 @@ import type { runBrainDetached } from "../brain/spawn.js";
 import { INTERRUPTED_ERROR, type McpServerSpec } from "../brain/types.js";
 import type { BrainConfig } from "../config/schema.js";
 import { Redactor } from "../core/redact.js";
-import { errorMessage, playwrightMcpSpec, SETUP_TAIL_BYTES } from "../core/workspace.js";
+import { errorMessage, MINUTE_MS, playwrightMcpSpec, SETUP_TAIL_BYTES } from "../core/workspace.js";
 import { KEYPROXY_DUMMY_TOKEN, KEYPROXY_HOST, KEYPROXY_PORT } from "../keyproxy/server.js";
 import { logger } from "../log.js";
 import { SESSIONS_CONFIG_DIR } from "../sessions/store.js";
@@ -40,6 +40,22 @@ export const POD_DENY_PATHS = [EGRESS_CA_DIR];
 /** The ports run-pod waits on before the run: keyproxy, tools, egress and the run's services. */
 export const POD_WAIT_PORTS = [POD_PORTS.keyproxy, POD_PORTS.tools, POD_PORTS.egress, POD_PORTS.postgres, POD_PORTS.redis, POD_PORTS.rabbitmq];
 export const POD_WAIT_TIMEOUT_MS = 120_000;
+
+/** What the sessions-sync sidecar gets for its last push once the agent container has exited. */
+export const SESSION_FINAL_PUSH_MS = 2 * MINUTE_MS;
+
+/** The checks server's budget for one batch: the configured checks timeout plus a minute. */
+export const podChecksTimeoutMs = (checksTimeoutMinutes: number): number => (checksTimeoutMinutes + 1) * MINUTE_MS;
+
+/** The tools sidecar's budget to finish (a push's checks in flight, then the work report). */
+const finishToolsMs = (checksTimeoutMs: number): number => checksTimeoutMs + REPORT_RETRY_MS + 2 * CALLBACK_REQUEST_TIMEOUT_MS;
+
+/**
+ * The most a run pod needs after SIGTERM: finish the tools, post the run report, then the sessions' last push. The Job's
+ * grace period, so the kubelet does not kill sessions-sync before it uploads.
+ */
+export const podShutdownBudgetMs = (checksTimeoutMinutes: number): number =>
+  finishToolsMs(podChecksTimeoutMs(checksTimeoutMinutes)) + REPORT_RETRY_MS + SESSION_FINAL_PUSH_MS;
 
 const LOOPBACK = "127.0.0.1";
 const egressUrl = `http://${LOOPBACK}:${POD_PORTS.egress}`;
@@ -321,7 +337,7 @@ export const runPod = async (p: PodRun): Promise<RunReport> => {
     report = p.signal?.aborted === true ? { ...failedReport(spec, INTERRUPTED_ERROR), interrupted: true } : failedReport(spec, errorMessage(err));
   }
   try {
-    await finishTools({ toolsUrl: p.toolsUrl, fetchImpl: p.fetchImpl, timeoutMs: p.checksTimeoutMs + REPORT_RETRY_MS + 2 * CALLBACK_REQUEST_TIMEOUT_MS });
+    await finishTools({ toolsUrl: p.toolsUrl, fetchImpl: p.fetchImpl, timeoutMs: finishToolsMs(p.checksTimeoutMs) });
   } catch (err) {
     p.warn(`the tools sidecar did not finish the run: ${errorMessage(err)}`);
   } finally {

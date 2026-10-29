@@ -2,10 +2,11 @@ import type { V1Container, V1Job, V1Volume } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
 import { StewardConfigSchema } from "../../src/config/schema.js";
 import { AWS_AUDIENCE, buildRunJob, CONFIG_BUNDLE_KEY, configUnpackCommand, jobNameOf, MINIO_AUDIENCE, RUN_LABELS, STEWARD_UID } from "../../src/k8s/runJob.js";
+import { podShutdownBudgetMs } from "../../src/run/pod.js";
 import type { RunSpec } from "../../src/run/protocol.js";
 import { podSpecFor, RUNTIME, TOKENS } from "./helpers.js";
 
-const build = (patch: Partial<RunSpec> = {}): V1Job => buildRunJob(podSpecFor(patch), { runtime: RUNTIME, tokens: TOKENS, specConfigMap: "run-7-1" });
+const build = (patch: Partial<RunSpec> = {}): V1Job => buildRunJob(podSpecFor(patch), { runtime: RUNTIME, tokens: TOKENS, specConfigMap: "run-7-1", checksTimeoutMinutes: 20 });
 
 const allContainers = (job: V1Job): V1Container[] => [...(job.spec?.template.spec?.initContainers ?? []), ...(job.spec?.template.spec?.containers ?? [])];
 const named = (job: V1Job, name: string): V1Container => {
@@ -34,6 +35,12 @@ describe("buildRunJob", () => {
     expect(job.spec?.activeDeadlineSeconds).toBe((60 + 15 + 15) * 60);
     expect(job.spec?.template.spec?.automountServiceAccountToken).toBe(false);
     expect(job.spec?.template.spec?.restartPolicy).toBe("Never");
+  });
+
+  it("gives the pod time to finish the tools, post the report and push the session after a SIGTERM", () => {
+    // 20 min checks: (20 + 1) for the checks, 5 + 2 × 1 for the tools' work report, 5 for the run report, 2 for the session push.
+    expect(build().spec?.template.spec?.terminationGracePeriodSeconds).toBe((21 + 5 + 2 + 5 + 2) * 60);
+    expect(podShutdownBudgetMs(20)).toBe((21 + 5 + 2 + 5 + 2) * 60_000);
   });
 
   it("gives the agent container no token: no projected volume, no envFrom, no tools token, only the runner token", () => {

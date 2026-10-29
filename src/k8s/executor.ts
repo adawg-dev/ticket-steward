@@ -104,6 +104,8 @@ export const kubernetesExecutor = (p: {
   /** How long a run waits for the ticket's earlier run pods (still uploading their session) to end. */
   ticketIdleMs?: number;
   maxAttempts?: number;
+  /** `implement.checksTimeoutMinutes`, for the run pods' grace period. */
+  checksTimeoutMinutes: number;
 }): KubernetesExecutor => {
   const { namespace } = p.runtime;
   const pollMs = p.pollMs ?? DEFAULT_POLL_MS;
@@ -226,7 +228,7 @@ export const kubernetesExecutor = (p: {
         await deleteSpec(spec.runId);
         await p.core.createNamespacedConfigMap({ namespace, body });
       }
-      await p.batch.createNamespacedJob({ namespace, body: buildRunJob(spec, { runtime: p.runtime, tokens, specConfigMap }) });
+      await p.batch.createNamespacedJob({ namespace, body: buildRunJob(spec, { runtime: p.runtime, tokens, specConfigMap, checksTimeoutMinutes: p.checksTimeoutMinutes }) });
     } catch (err) {
       await endRun(spec.runId);
       throw new Error(`the run pod could not be created: ${message(err)}`, { cause: err });

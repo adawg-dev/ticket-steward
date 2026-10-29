@@ -115,7 +115,7 @@ beforeEach(async () => {
   dataDir = await mkdtemp(join(tmpdir(), "steward-k8s-"));
   stores = openStores(dataDir);
   cluster = new FakeCluster();
-  executor = kubernetesExecutor({ runtime: RUNTIME, batch: cluster.batch, core: cluster.core, stores, pollMs: 10, ticketIdleMs: 50 });
+  executor = kubernetesExecutor({ runtime: RUNTIME, batch: cluster.batch, core: cluster.core, stores, pollMs: 10, ticketIdleMs: 50, checksTimeoutMinutes: 20 });
 });
 
 afterEach(async () => {

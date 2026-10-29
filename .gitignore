@@ -9,3 +9,4 @@ coverage/
 .DS_Store
 ops/compose.env
 deploy/images/kickoff/
+__pycache__/

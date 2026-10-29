@@ -3,7 +3,7 @@ import type { V1Container, V1EnvVar, V1Job, V1Volume, V1VolumeMount } from "@kub
 import type { KubernetesRuntime } from "../config/schema.js";
 import { RUNNER_TOKEN_ENV } from "../cli/runPod.js";
 import { CALLBACK_URL_ENV, TOOLS_TOKEN_ENV } from "../cli/tools.js";
-import { EGRESS_CA_DIR, EGRESS_CA_FILE, POD_OVERLAY_DIR, POD_PORTS } from "../run/pod.js";
+import { EGRESS_CA_DIR, EGRESS_CA_FILE, POD_OVERLAY_DIR, POD_PORTS, podShutdownBudgetMs } from "../run/pod.js";
 import type { RunSpec } from "../run/protocol.js";
 import { MINIO_TOKEN_FILE, SESSIONS_CONFIG_DIR } from "../sessions/store.js";
 
@@ -77,7 +77,13 @@ const mount = (name: string, mountPath: string, readOnly = false): V1VolumeMount
  * on its SIGTERM) put credentials on the agent's requests and serve its throwaway services. Only containers that read
  * AWS or MinIO get a projected token, each for its own audience.
  */
-export const buildRunJob = (spec: RunSpec, p: { runtime: KubernetesRuntime; tokens: { runner: string; tools: string }; specConfigMap: string }): V1Job => {
+export const buildRunJob = (spec: RunSpec, p: {
+  runtime: KubernetesRuntime;
+  tokens: { runner: string; tools: string };
+  specConfigMap: string;
+  /** `implement.checksTimeoutMinutes`: sizes the pod's grace period. */
+  checksTimeoutMinutes: number;
+}): V1Job => {
   const { runtime } = p;
   const configPath = runtime.config.path;
   const steward = (...args: string[]): string[] => ["steward", "--config", configPath, ...args];
@@ -207,6 +213,7 @@ export const buildRunJob = (spec: RunSpec, p: { runtime: KubernetesRuntime; toke
           automountServiceAccountToken: false,
           enableServiceLinks: false,
           restartPolicy: "Never",
+          terminationGracePeriodSeconds: Math.ceil(podShutdownBudgetMs(p.checksTimeoutMinutes) / 1000),
           initContainers: [...init, ...sidecars],
           containers: [agent],
           volumes,

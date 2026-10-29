@@ -16,7 +16,7 @@ import { podSpecFor, RUNTIME, TOKENS } from "../k8s/helpers.js";
 const stewardImage = process.env.STEWARD_SMOKE_STEWARD_IMAGE;
 const egressImage = process.env.STEWARD_SMOKE_EGRESS_IMAGE;
 
-const job: V1Job = buildRunJob(podSpecFor(), { runtime: RUNTIME, tokens: TOKENS, specConfigMap: "run-7-1" });
+const job: V1Job = buildRunJob(podSpecFor(), { runtime: RUNTIME, tokens: TOKENS, specConfigMap: "run-7-1", checksTimeoutMinutes: 20 });
 const named = (name: string): V1Container => {
   const container = job.spec?.template.spec?.initContainers?.find((candidate) => candidate.name === name);
   if (container === undefined) throw new Error(`no container ${name}`);

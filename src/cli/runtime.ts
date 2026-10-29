@@ -82,7 +82,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
     if (opts.serve !== true) return { loaded, stores, tracker, deps: { ...deps, executor: refuseInline } };
     // Run pods replace slots: each brings its own services on fixed loopback ports.
     const cluster = ctx.factories?.cluster ?? clusterApis(kubernetes.namespace);
-    const executor = kubernetesExecutor({ runtime: kubernetes, ...cluster, stores });
+    const executor = kubernetesExecutor({ runtime: kubernetes, ...cluster, stores, checksTimeoutMinutes: config.implement?.checksTimeoutMinutes ?? 0 });
     const chat =
       cluster.pods === undefined
         ? undefined
