@@ -11,7 +11,7 @@ import type { LinearEvent } from "../tracker/linear/webhook.js";
 import type { Tracker } from "../tracker/types.js";
 import { createBrainLineMapper, panelScrub } from "./activities.js";
 import { restoreDelegate, unassignTicket } from "./assignment.js";
-import { ASSIGN_ME_REPLY, type LinearIntakeResult } from "./intake.js";
+import { ASSIGN_ME_REPLY, type DelegationDetail, type LinearIntakeResult } from "./intake.js";
 import { ActivityPoster } from "./poster.js";
 
 /** What the agent panel needs: Linear's agent API (absent, nothing is posted), the runtime settings and the run redactor. */
@@ -46,6 +46,12 @@ export const PANEL_TEXT = {
   steered: "Got it; passing that on while I work",
   waitForLease: "Someone is in a terminal session on this ticket; I'll pick your message up when they leave",
   nothingToStop: "Stopped. Nothing was running.",
+  resumingLoop: "Picking the merge request back up",
+  alreadyWorking: "Already working on this",
+  pushedWithoutLoop: "A branch for this ticket is already pushed and I have no review loop to pick back up; I left it to the people on it.",
+  teamNotServed: "I don't work on this team's tickets.",
+  notConfigured: "I can't take on tickets here: implementing is not configured.",
+  unassigned: "I was removed from this ticket; delegate it to me again to pick it back up.",
 } as const;
 
 const DEFAULT_INTERVAL_MS = 2_000;
@@ -279,10 +285,35 @@ const stopTicket = (deps: IntakeAnswerDeps, issueId: string, runId: string | nul
   return { runAnswers, canceled };
 };
 
+/**
+ * The first word in a new session that started no new work: the loop picked back up or already at work (the ticket
+ * moves to its started state), or why nothing was started.
+ */
+const answerNotNew = async (deps: IntakeAnswerDeps, post: (content: ActivityContent) => Promise<void>, event: SessionEvent, detail: DelegationDetail): Promise<void> => {
+  switch (detail) {
+    case "loop_resumed":
+      await post({ type: "thought", body: PANEL_TEXT.resumingLoop });
+      return moveToStarted(deps, event.issueId, event.sessionId);
+    case "loop_running":
+    case "implement_pending":
+      await post({ type: "thought", body: PANEL_TEXT.alreadyWorking });
+      return moveToStarted(deps, event.issueId, event.sessionId);
+    case "pushed_without_loop":
+      return post({ type: "response", body: PANEL_TEXT.pushedWithoutLoop });
+    case "team_not_served":
+      return post({ type: "response", body: PANEL_TEXT.teamNotServed });
+    case "not_configured":
+      return post({ type: "response", body: PANEL_TEXT.notConfigured });
+    case "unassigned":
+      return post({ type: "response", body: PANEL_TEXT.unassigned });
+  }
+};
+
 /** The panel's first word on a session event, or a steer or stop handed to the ticket's open run. */
 const answerSession = async (deps: IntakeAnswerDeps, api: LinearAgentApi, event: SessionEvent, result: LinearIntakeResult): Promise<void> => {
   const post = (content: ActivityContent): Promise<void> => api.createActivity(event.sessionId, scrubContent(content, panelScrubOf(deps)));
   const runId = deps.channels?.active(event.issueId) ?? null;
+  if (event.kind === "session.created" && result.detail !== undefined) return answerNotNew(deps, post, event, result.detail);
   switch (result.action) {
     case "assign_me":
       return post({ type: "response", body: ASSIGN_ME_REPLY });
@@ -327,10 +358,10 @@ export const answerLinearIntake = async (deps: IntakeAnswerDeps, event: LinearEv
     if (result.action === "unassign") unassignTicket(deps, event.issueId);
     return;
   }
-  // Delegated again to a ticket it has a loop for (its restart step resumes it): only the state moves here.
-  if (result.action === "revive" && event.kind === "session.created" && event.delegated) return moveToStarted(deps, event.issueId, event.sessionId);
   const quiet: readonly string[] = ["ignored", "duplicate", "unassign"];
-  if (quiet.includes(result.action)) return;
+  // A new session that is not new work still gets its first word: Linear marks a silent session unresponsive.
+  const answered = event.kind === "session.created" && result.detail !== undefined;
+  if (quiet.includes(result.action) && !answered) return;
   const api = deps.linear;
   if (api === undefined) {
     logger.warn({ identifier: event.identifier, action: result.action }, "linear: no agent API to answer in the panel");

@@ -137,7 +137,7 @@ describe("linearIntake", () => {
 
       const result = await linearIntake(deps(), created());
 
-      expect(result.action).toBe("revive");
+      expect(result).toMatchObject({ action: "revive", detail: "loop_resumed" });
       expect(stores.jobs.get(result.jobId ?? -1)?.trigger).toEqual({ kind: "loop", ...ISSUE, loopId, step: "restart" });
       expect(queued()).toEqual([{ kind: "loop", ...ISSUE, loopId, step: "restart" }]);
     });
@@ -145,21 +145,32 @@ describe("linearIntake", () => {
     it("leaves a loop that is still running as it is", async () => {
       loopIn("awaiting_review");
 
-      expect(await linearIntake(deps(), created())).toEqual({ action: "revive" });
+      expect(await linearIntake(deps(), created())).toEqual({ action: "revive", detail: "loop_running" });
       expect(queued()).toEqual([]);
     });
 
     it("revives a ticket whose implement pushed a branch without a loop", async () => {
       finishedImplement(true);
 
-      expect((await linearIntake(deps(), created())).action).toBe("revive");
+      expect(await linearIntake(deps(), created())).toEqual({ action: "revive", detail: "pushed_without_loop" });
+      expect(queued()).toEqual([]);
+    });
+
+    it("never implements again over a branch an implement pushed before it was stopped", async () => {
+      const jobId = stores.jobs.enqueue(linearImplement);
+      stores.jobs.claimById(jobId);
+      stores.jobs.recordCommit(jobId, "fix/API-1-keep", "b".repeat(40));
+      stores.jobs.markPushed(jobId);
+      stores.jobs.finish(jobId, { status: "failed", error: "stopped", retryable: false });
+
+      expect(await linearIntake(deps(), created())).toEqual({ action: "revive", detail: "pushed_without_loop" });
       expect(queued()).toEqual([]);
     });
 
     it("leaves a queued implement alone, the new session becoming current", async () => {
       stores.jobs.enqueue(linearImplement);
 
-      expect((await linearIntake(deps(), created({ sessionId: "session-new" }))).action).toBe("ignored");
+      expect(await linearIntake(deps(), created({ sessionId: "session-new" }))).toEqual({ action: "ignored", detail: "implement_pending" });
       expect(queued()).toHaveLength(1);
       expect(stores.agentSessions.current("issue-1")).toBe("session-new");
     });
@@ -171,10 +182,10 @@ describe("linearIntake", () => {
     });
 
     it("ignores a ticket of a team outside the allowlist, and does nothing when implement is not configured", async () => {
-      expect((await linearIntake(deps(), created({ teamKey: "OPS" }))).action).toBe("ignored");
+      expect(await linearIntake(deps(), created({ teamKey: "OPS" }))).toEqual({ action: "ignored", detail: "team_not_served" });
       const noImplement = makeConfig();
       delete noImplement.implement;
-      expect((await linearIntake(deps(noImplement), created())).action).toBe("ignored");
+      expect(await linearIntake(deps(noImplement), created())).toEqual({ action: "ignored", detail: "not_configured" });
       expect(queued()).toEqual([]);
     });
   });

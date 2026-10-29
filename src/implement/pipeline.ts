@@ -12,6 +12,7 @@ import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, stableWorktreeName, type JobPaths } from "../core/workspace.js";
 import { isLinearImplement, startLoop } from "../greptile/start.js";
+import { isUnassigned } from "../linear/assignment.js";
 import { implementFinish, linearSessionFor, NO_SESSION, stoppedResponse, type LinearSession } from "../linear/session.js";
 import type { PushTarget } from "../push/target.js";
 import { setupTailOf, STOPPED_JOB_ERROR } from "../run/execute.js";
@@ -98,6 +99,19 @@ const implementPaths = (ctx: RunContext, deps: PipelineDeps): JobPaths => {
 const startLoopFor = (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, baseSha: string): void => {
   const job = deps.stores.jobs.get(ctx.jobId);
   if (job !== null) startLoop(deps, job, { baseSha, worktreeName: paths.worktreeName });
+};
+
+/**
+ * The job pushed but ends without its loop running (stopped, or handed back over unpushed work): its loop is created
+ * parked, handed back (or unassigned when the steward was removed), so being delegated again or a mention resumes it from
+ * the MR head and never starts a second implement over the branch.
+ */
+const parkLoopFor = (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, baseSha: string): void => {
+  if (ctx.dryRun) return;
+  const job = deps.stores.jobs.get(ctx.jobId);
+  if (job === null || job.pushedAt === null) return;
+  const state = isUnassigned(deps.stores, ctx.issueId, null) ? "unassigned" : "handed_back";
+  startLoop(deps, job, { baseSha, worktreeName: paths.worktreeName }, state);
 };
 
 const shortRef = (ref: string): string => ref.replace(/^refs\/heads\//, "");
@@ -273,7 +287,10 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
   if (!ctx.dryRun) deps.stores.jobs.recordWorkspace(ctx.jobId, paths.worktreeName, baseSha);
   patchAttempt(ctx, deps, { transcriptPath: paths.transcriptPath, ...(report.usage === null ? {} : { usage: report.usage }) });
   if (report.sessionId !== null && !ctx.dryRun) deps.stores.jobs.recordSession(ctx.jobId, report.sessionId);
-  if (report.stopped) return { status: "failed", error: STOPPED_JOB_ERROR, retryable: false };
+  if (report.stopped) {
+    parkLoopFor(ctx, deps, paths, baseSha);
+    return { status: "failed", error: STOPPED_JOB_ERROR, retryable: false };
+  }
   if (!report.ok) return { status: "failed", error: report.error ?? "brain run failed", retryable: report.interrupted };
 
   const validated = validateImplementResult(report.output);
@@ -307,7 +324,10 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
   }
   const detail = deps.redactor.redact(work.unpushed);
   if (!landed) return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent did not push its change", detail), baseSha });
-  if (work.unpushed !== "") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent left unpushed work", detail), baseSha });
+  if (work.unpushed !== "") {
+    parkLoopFor(ctx, deps, paths, baseSha);
+    return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent left unpushed work", detail), baseSha });
+  }
 
   const stored: StoredImplement = { result, handback: null, baseSha, ...withMedia };
   // Stored before the loop starts, so a crash from here on retries via publishImplementOnly, which starts it once.

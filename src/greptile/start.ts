@@ -18,9 +18,11 @@ export const isLinearImplement = (trigger: TriggerEvent): boolean => trigger.kin
 
 /**
  * Starts the review loop for a pushed implement job from Linear: creates the loop at round 0 and enqueues its
- * first await. Returns the existing loop's id when the job already has one, and null when no loop applies.
+ * first await. With `parked`, the job ended before its loop could run (stopped, or handed back after pushing): the loop
+ * is created in that state with nothing queued, so a revive or a new delegation resumes it on the MR head instead of
+ * implementing again. Returns the existing loop's id when the job already has one, and null when no loop applies.
  */
-export const startLoop = (deps: Pick<PipelineDeps, "config" | "stores">, job: Job, start: LoopStart): number | null => {
+export const startLoop = (deps: Pick<PipelineDeps, "config" | "stores">, job: Job, start: LoopStart, parked: "handed_back" | "unassigned" | null = null): number | null => {
   const { stores } = deps;
   const existing = stores.loops.forImplementJob(job.id);
   if (existing !== null) return existing.id;
@@ -40,7 +42,11 @@ export const startLoop = (deps: Pick<PipelineDeps, "config" | "stores">, job: Jo
       labelDriven: true,
       sessionId: job.sessionId,
     });
-    stores.jobs.enqueue({ kind: "loop", issueId: job.issueId, identifier: job.identifier, teamKey: job.teamKey, loopId, step: "await" });
+    if (parked === null) {
+      stores.jobs.enqueue({ kind: "loop", issueId: job.issueId, identifier: job.identifier, teamKey: job.teamKey, loopId, step: "await" });
+    } else {
+      stores.loops.update(loopId, { state: parked, ...(parked === "handed_back" ? { handedBackAt: new Date().toISOString() } : {}) });
+    }
     return loopId;
   });
 };

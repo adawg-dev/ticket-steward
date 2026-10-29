@@ -50,8 +50,8 @@ const panelDeps = (redactor = new Redactor([])) => ({ linear, stores, redactor, 
 
 const ticket = { issueId: "issue-1", identifier: "API-1", teamKey: "API" };
 let delivery = 0;
-const created = (): LinearEvent => ({
-  kind: "session.created", deliveryId: `d-${++delivery}`, sessionId: "session-1", ...ticket, delegated: true, commentBody: null, promptContext: "", byApp: false,
+const created = (over: Partial<Extract<LinearEvent, { kind: "session.created" }>> = {}): LinearEvent => ({
+  kind: "session.created", deliveryId: `d-${++delivery}`, sessionId: "session-1", ...ticket, delegated: true, commentBody: null, promptContext: "", byApp: false, ...over,
 });
 const prompted = (body: string, stop = false): LinearEvent => ({
   kind: "session.prompted", deliveryId: `d-${++delivery}`, sessionId: "session-1", ...ticket, body, stop, authorName: "Ada", byApp: false,
@@ -156,6 +156,58 @@ describe("answerLinearIntake", () => {
     expect(result.action).toBe("implement");
     expect(stores.jobs.get(result.jobId ?? 0)?.status).toBe("queued");
     expect(linear.activities()[0]).toMatchObject({ sessionId: "session-1", content: { type: "thought", body: PANEL_TEXT.pickedUp }, ephemeral: false });
+  });
+
+  describe("posts within Linear's deadline in every session it is given, whatever the intake decided", () => {
+    const loopIn = (state: "awaiting_review" | "handed_back"): void => {
+      const jobId = stores.jobs.enqueue({ kind: "linear", run: "implement", ...ticket, sessionId: "session-0", message: null });
+      stores.jobs.claimById(jobId);
+      stores.jobs.recordCommit(jobId, "fix/API-1-keep", "b".repeat(40));
+      stores.jobs.markPushed(jobId);
+      stores.jobs.finish(jobId, { status: "succeeded" });
+      const loopId = stores.loops.create({
+        ...ticket, implementJobId: jobId, branch: "fix/API-1-keep", baseSha: "a".repeat(40), headSha: "b".repeat(40),
+        worktreeName: "ticket-API-1", labelDriven: true, sessionId: "s",
+      });
+      stores.loops.update(loopId, { state });
+    };
+    const pushedWithoutLoop = (): void => {
+      const jobId = stores.jobs.enqueue({ kind: "cli", ...ticket, action: "implement" });
+      stores.jobs.claimById(jobId);
+      stores.jobs.recordCommit(jobId, "fix/API-1-keep", "b".repeat(40));
+      stores.jobs.markPushed(jobId);
+      stores.jobs.finish(jobId, { status: "succeeded" });
+    };
+    const cases: Array<[string, () => void, Partial<StewardConfig>, { type: string; body: string }, boolean]> = [
+      ["a loop picked back up", () => loopIn("handed_back"), {}, { type: "thought", body: PANEL_TEXT.resumingLoop }, true],
+      ["a loop still running", () => loopIn("awaiting_review"), {}, { type: "thought", body: PANEL_TEXT.alreadyWorking }, true],
+      ["an implement already queued", () => void stores.jobs.enqueue({ kind: "linear", run: "implement", ...ticket, sessionId: "s0", message: null }), {}, { type: "thought", body: PANEL_TEXT.alreadyWorking }, true],
+      ["a branch pushed with no loop", pushedWithoutLoop, {}, { type: "response", body: PANEL_TEXT.pushedWithoutLoop }, false],
+      ["a team it does not serve", () => undefined, { tracker: { kind: "linear", teams: ["OPS"] } }, { type: "response", body: PANEL_TEXT.teamNotServed }, false],
+      ["no implement configured", () => undefined, { implement: undefined }, { type: "response", body: PANEL_TEXT.notConfigured }, false],
+    ];
+    it.each(cases)("%s", async (_name, arrange, over, content, moves) => {
+      arrange();
+      const config = { ...makeConfig(), ...over };
+      const event = created();
+      await answerLinearIntake(panelDeps(), event, await linearIntake({ config, stores, settings: { get: () => seedSettings(config) } }, event));
+      expect(linear.activities().map((activity) => activity.content)).toEqual([content]);
+      expect(linear.calls.some((call) => call.kind === "state")).toBe(moves);
+    });
+
+    it("a mention on a ticket it was removed from, with revive by mention off", async () => {
+      stores.agentSessions.markUnassigned("issue-1");
+      const settings = { get: () => ({ ...seedSettings(makeConfig()), "linear.reviveByMention": false }) };
+      const event = created({ delegated: false, commentBody: "@steward hi" });
+      await answerLinearIntake(panelDeps(), event, await linearIntake({ config: makeConfig(), stores, settings }, event));
+      expect(linear.activities().map((activity) => activity.content)).toEqual([{ type: "response", body: PANEL_TEXT.unassigned }]);
+    });
+
+    it("but never answers a session the steward opened itself", async () => {
+      const event = created({ delegated: false, commentBody: "Done.", byApp: true });
+      await answerLinearIntake(panelDeps(), event, await linearIntake(intakeDeps(), event));
+      expect(linear.calls).toEqual([]);
+    });
   });
 
   it("hands a prompt to the open run as a steering message", async () => {

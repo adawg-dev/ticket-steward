@@ -715,7 +715,7 @@ describe("the fix loop start", () => {
     expect(awaitJobs().map((row) => row.trigger)).toEqual([{ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: loop?.id, step: "await" }]);
   });
 
-  it("starts no loop when the agent left unpushed work", async () => {
+  it("parks a handed-back loop, with nothing queued, when the agent pushed and left unpushed work", async () => {
     const brain = agentBrain(implemented, async (workspace, push) => {
       await commitAndPush(workspace, push);
       await writeFile(join(workspace, "notes.md"), "draft\n");
@@ -723,7 +723,32 @@ describe("the fix loop start", () => {
     const ctx = claim();
 
     expect(await runImplement(ctx, depsFor(brain, withGreptile()))).toEqual({ status: "succeeded", warning: "handed back: the agent left unpushed work" });
-    expect(stores.loops.forImplementJob(ctx.jobId)).toBeNull();
+    expect(stores.loops.forImplementJob(ctx.jobId)).toMatchObject({ state: "handed_back", headSha: stores.jobs.get(ctx.jobId)?.commitSha });
+    expect(awaitJobs()).toEqual([]);
+  });
+
+  /** An agent that pushes, then is stopped by a person (or the steward's removal) before it reports. */
+  const stoppedAfterPush = (): AgentBrain => {
+    const brain = agentBrain(implemented);
+    return { ...brain, runBrain: async (config: unknown, input: BrainInput) => ({ ...(await brain.runBrain(config, input)), ok: false, error: "stopped", output: undefined }) };
+  };
+
+  it("parks a handed-back loop for an implement stopped after it pushed, so being delegated again resumes it", async () => {
+    const ctx = claim();
+
+    expect(await runImplement(ctx, depsFor(stoppedAfterPush(), withGreptile()))).toEqual({ status: "failed", error: STOPPED_JOB_ERROR, retryable: false });
+
+    expect(stores.loops.forImplementJob(ctx.jobId)).toMatchObject({ state: "handed_back", branch: BRANCH, headSha: stores.jobs.get(ctx.jobId)?.commitSha });
+    expect(awaitJobs()).toEqual([]);
+  });
+
+  it("parks the loop unassigned when the steward was removed while the implement ran", async () => {
+    const ctx = claim();
+    stores.agentSessions.markUnassigned("issue-1");
+
+    expect((await runImplement(ctx, depsFor(stoppedAfterPush(), withGreptile()))).status).toBe("failed");
+
+    expect(stores.loops.forImplementJob(ctx.jobId)?.state).toBe("unassigned");
     expect(awaitJobs()).toEqual([]);
   });
 

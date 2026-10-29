@@ -29,9 +29,24 @@ export interface LinearIntakeDeps {
   settings: { get(): Settings };
 }
 
+/**
+ * Why a new session was not new work, for the panel's first word (Linear wants one within 10 s of every session): the
+ * loop resumed, already running, an implement already queued or running, a branch pushed for the ticket with no loop to
+ * resume, a team the steward does not serve, no `implement` configured, or a mention on a ticket it was removed from.
+ */
+export type DelegationDetail =
+  | "loop_resumed"
+  | "loop_running"
+  | "implement_pending"
+  | "pushed_without_loop"
+  | "team_not_served"
+  | "not_configured"
+  | "unassigned";
+
 export interface LinearIntakeResult {
   action: LinearIntakeAction;
   jobId?: number;
+  detail?: DelegationDetail;
 }
 
 /** The panel's answer to a mention on a ticket the steward never had. */
@@ -59,6 +74,10 @@ const implementPending = (stores: Stores, issueId: string): boolean => {
   return job !== null && (job.status === "queued" || job.status === "running");
 };
 
+/** An implement pushed a branch for the ticket, whether it then finished, handed back or was stopped. */
+const pushedImplement = (stores: Stores, issueId: string): boolean =>
+  stores.jobs.hasSucceeded(issueId, "implement") || (stores.jobs.latestOfKind(issueId, "implement")?.pushedAt ?? null) !== null;
+
 /** Something a chat can resume: the ticket's loop or a brain session, or an implement that will leave one. */
 const hasWork = (stores: Stores, issueId: string, loop: Loop | null): boolean =>
   loop !== null || latestSession(stores, issueId) !== null || implementPending(stores, issueId);
@@ -79,23 +98,27 @@ const awaitsAnswers = (stores: Stores, issueId: string, loop: Loop | null): bool
 
 /**
  * Delegated: a ticket the steward has a loop for is resumed from its MR head (never implemented twice); one it pushed a
- * branch for without a loop is left to its people; a new one is implemented.
+ * branch for without a loop is left to its people; a new one is implemented. `detail` tells the panel which.
  */
 const onDelegated = (deps: LinearIntakeDeps, event: SessionEvent, loop: Loop | null): LinearIntakeResult => {
   const { stores } = deps;
-  if (deps.config.implement === undefined) return { action: "ignored" };
+  if (deps.config.implement === undefined) return { action: "ignored", detail: "not_configured" };
   // Delegated again: the ticket is the steward's once more, whatever happens next.
   stores.agentSessions.clearUnassigned(event.issueId);
-  if (loop !== null) return revive(stores, event.issueId, loop, null);
-  if (implementPending(stores, event.issueId)) return { action: "ignored" };
-  if (stores.jobs.hasSucceeded(event.issueId, "implement")) return { action: "revive" };
+  if (loop !== null) {
+    const revived = revive(stores, event.issueId, loop, null);
+    return { ...revived, detail: revived.jobId === undefined ? "loop_running" : "loop_resumed" };
+  }
+  if (implementPending(stores, event.issueId)) return { action: "ignored", detail: "implement_pending" };
+  // Pushed without a loop (an implement from the CLI, or with no review loop configured): never a second implement.
+  if (pushedImplement(stores, event.issueId)) return { action: "revive", detail: "pushed_without_loop" };
   return { action: "implement", jobId: enqueue(stores, event, "implement", null) };
 };
 
 const onMention = (deps: LinearIntakeDeps, event: Extract<LinearEvent, { kind: "session.created" }>, loop: Loop | null): LinearIntakeResult => {
   const { stores } = deps;
   if (isUnassigned(stores, event.issueId, loop)) {
-    if (!deps.settings.get()["linear.reviveByMention"]) return { action: "ignored" };
+    if (!deps.settings.get()["linear.reviveByMention"]) return { action: "ignored", detail: "unassigned" };
     if (!hasWork(stores, event.issueId, loop)) return { action: "assign_me" };
     return revive(stores, event.issueId, loop, triggerOf(event, "chat", event.commentBody ?? ""));
   }
@@ -118,7 +141,9 @@ const decide = (deps: LinearIntakeDeps, event: LinearEvent): LinearIntakeResult 
   const { stores, config } = deps;
   if (!stores.deliveries.markSeen(event.deliveryId)) return { action: "duplicate" };
   const { teams } = config.tracker;
-  if (teams.length > 0 && !teams.includes(event.teamKey)) return { action: "ignored" };
+  if (teams.length > 0 && !teams.includes(event.teamKey)) {
+    return event.kind === "session.created" && !event.byApp ? { action: "ignored", detail: "team_not_served" } : { action: "ignored" };
+  }
   if (event.kind === "issue.undelegated") {
     // Recorded with the delivery, loop or none; the answer parks the loop and stops the run.
     stores.agentSessions.markUnassigned(event.issueId);
