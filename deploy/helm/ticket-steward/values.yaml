@@ -1,0 +1,68 @@
+# What differs between clusters. Install into the namespace runtime.namespace names (docs/ops.md, "Running on
+# Kubernetes"); deploy/helm/values/ has a file per cluster.
+
+images:
+  steward:
+    repository: ticket-steward/steward
+    tag: latest
+    pullPolicy: IfNotPresent
+  minio:
+    repository: ticket-steward/minio
+    tag: RELEASE.2025-10-15T17-29-55Z
+    pullPolicy: IfNotPresent
+
+cluster:
+  # The service-account issuer: a public HTTPS URL, no trailing slash, that AWS and MinIO fetch the discovery
+  # document and JWKS from. Required.
+  issuer: ""
+  # The cluster's service and pod CIDRs, kept out of every pod's reach but the dispatcher's.
+  serviceCidr: 10.43.0.0/16
+  podCidr: 10.42.0.0/16
+
+aws:
+  # The dispatcher's role (runtime.aws.roleArn). Run pods assume runtime.aws.runRoleArn, set in steward.config.ts.
+  roleArn: ""
+  region: ""
+
+storage:
+  # Empty uses the cluster's default StorageClass.
+  className: ""
+  stewardData: 20Gi
+  minioData: 50Gi
+
+# Private ranges run pods may reach; keep equal to runtime.egressAllowCidrs. Empty allows none.
+runPods:
+  allowCidrs: []
+
+dispatcher:
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+  # The webhooks' Service (3020). NodePort when the public URL reaches a node's port instead of an ingress.
+  service:
+    type: ClusterIP
+    nodePort: null
+
+minio:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+# The public webhook URL (server.publicUrl) routed to the Service steward:3020.
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  annotations: {}
+  tlsSecretName: ""
+
+config:
+  # The config dir as a base64 gzipped tar, set by deploy/helm/install.sh. Empty: create the steward-config ConfigMap
+  # (key config.tgz) yourself.
+  bundle: ""

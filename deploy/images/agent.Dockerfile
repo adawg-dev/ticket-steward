@@ -1,4 +1,4 @@
-# The run pod's agent container (docs/ops.md, "Running on k3s"): `steward run-pod` with Claude Code, workspace setup,
+# The run pod's agent container (docs/ops.md, "Running on Kubernetes"): `steward run-pod` with Claude Code, workspace setup,
 # Playwright's Chromium, the app and the checks. It holds no credential; everything it needs is baked in, and a pnpm
 # store prefetched from kickoff's base-branch lockfile, so a run's `pnpm install` fetches only what changed. Nothing a
 # run writes reaches another run: each pod writes to its own copy. Build with deploy/images/build-agent.sh, which

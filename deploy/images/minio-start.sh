@@ -1,5 +1,5 @@
 #!/bin/sh
-# MinIO for the steward's sessions (deploy/k8s/base/minio.yaml). The root password is new on every start and lives
+# MinIO for the steward's sessions (deploy/helm/ticket-steward/templates/minio.yaml). The root password is new on every start and lives
 # only in this container's memory: it creates the bucket and the steward-sessions policy, idempotently, then is
 # dropped from this shell. Pods sign in through MinIO's STS with their projected token and get that policy. MinIO
 # signs STS credentials with the root key, so a restart voids them; the sessions store signs in again on the

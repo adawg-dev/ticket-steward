@@ -1,11 +1,11 @@
-# The IAM side of the steward on k3s (docs/ops.md, "Running on k3s"). Copy it into your Terraform, set the variables,
+# The IAM side of the steward on Kubernetes (docs/ops.md, "Running on Kubernetes"). Copy it into your Terraform, set the variables,
 # and apply. It registers the cluster's service-account issuer as an OIDC provider and defines two roles, assumed with
 # projected tokens (audience sts.amazonaws.com): the dispatcher's, which reads the DEV_ secrets, the Linear app's among
 # them; and the run pods' sidecars', which reads the DEV_ secrets except the Linear app's (an explicit deny). A sidecar
 # handles what the agent wrote, so a Linear credential must never be within its reach. No access key is created.
 
-variable "k3s_issuer_url" {
-  description = "k3s's --service-account-issuer: the public https URL serving /.well-known/openid-configuration and the JWKS, no trailing slash."
+variable "cluster_issuer_url" {
+  description = "The API server's --service-account-issuer: the public https URL serving /.well-known/openid-configuration and the JWKS, no trailing slash."
   type        = string
 }
 
@@ -15,7 +15,7 @@ variable "region" {
 }
 
 variable "namespace" {
-  description = "The steward's namespace (deploy/k8s/base/namespace.yaml)."
+  description = "The steward's namespace (the chart's release namespace, runtime.namespace)."
   type        = string
   default     = "ticket-steward"
 }
@@ -23,19 +23,19 @@ variable "namespace" {
 data "aws_caller_identity" "current" {}
 
 locals {
-  issuer_host = trimprefix(var.k3s_issuer_url, "https://")
+  issuer_host = trimprefix(var.cluster_issuer_url, "https://")
 }
 
 # AWS fetches the issuer's discovery document and JWKS itself; for an issuer served with a public CA it no longer uses
 # the thumbprint, but the provider still takes one.
-data "tls_certificate" "k3s_issuer" {
-  url = var.k3s_issuer_url
+data "tls_certificate" "cluster_issuer" {
+  url = var.cluster_issuer_url
 }
 
-resource "aws_iam_openid_connect_provider" "k3s" {
-  url             = var.k3s_issuer_url
+resource "aws_iam_openid_connect_provider" "cluster" {
+  url             = var.cluster_issuer_url
   client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = [data.tls_certificate.k3s_issuer.certificates[length(data.tls_certificate.k3s_issuer.certificates) - 1].sha1_fingerprint]
+  thumbprint_list = [data.tls_certificate.cluster_issuer.certificates[length(data.tls_certificate.cluster_issuer.certificates) - 1].sha1_fingerprint]
 }
 
 # One service account per role: the dispatcher's token cannot assume the run role, and a run pod's cannot assume the
@@ -50,7 +50,7 @@ data "aws_iam_policy_document" "trust" {
     actions = ["sts:AssumeRoleWithWebIdentity"]
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.k3s.arn]
+      identifiers = [aws_iam_openid_connect_provider.cluster.arn]
     }
     condition {
       test     = "StringEquals"
@@ -127,7 +127,7 @@ resource "aws_iam_role_policy" "run" {
   policy = data.aws_iam_policy_document.run.json
 }
 
-# runtime.aws.roleArn in steward.config.ts and awsRoleArn in deploy/k8s/base/kustomization.yaml.
+# runtime.aws.roleArn in steward.config.ts and aws.roleArn in the chart's values (deploy/helm/values).
 output "steward_role_arn" {
   value = aws_iam_role.steward.arn
 }

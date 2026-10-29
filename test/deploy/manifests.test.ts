@@ -10,11 +10,17 @@ import { CONFIG_BUNDLE_DIR, CONFIG_BUNDLE_KEY, configUnpackCommand, RUN_LABELS }
 import { INTERNAL_PORT } from "../../src/server/internal.js";
 import { MINIO_TOKEN_FILE, SESSIONS_BUCKET } from "../../src/sessions/store.js";
 
-const BASE = resolve("deploy/k8s/base");
+const CHART = resolve("deploy/helm/ticket-steward");
+const VALUES = resolve("deploy/helm/values");
 const run = promisify(execFile);
 const RFC1918 = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"];
 
-const Metadata = z.object({ name: z.string(), namespace: z.string().optional(), labels: z.record(z.string(), z.string()).optional() });
+const Metadata = z.object({
+  name: z.string(),
+  namespace: z.string().optional(),
+  labels: z.record(z.string(), z.string()).optional(),
+  annotations: z.record(z.string(), z.string()).optional(),
+});
 const Manifest = z.looseObject({ apiVersion: z.string(), kind: z.string(), metadata: Metadata });
 type Manifest = z.infer<typeof Manifest>;
 
@@ -80,45 +86,39 @@ const RoleBinding = z.object({
   subjects: z.array(z.object({ kind: z.string(), name: z.string() })),
 });
 
-const Kustomization = z.object({
-  namespace: z.string(),
-  resources: z.array(z.string()),
-  configMapGenerator: z.array(z.object({ name: z.string(), literals: z.array(z.string()).optional(), files: z.array(z.string()).optional() })),
-  replacements: z.array(
-    z.object({
-      source: z.object({ kind: z.string(), name: z.string(), fieldPath: z.string() }),
-      targets: z.array(z.object({ select: z.object({ kind: z.string(), name: z.string() }), fieldPaths: z.array(z.string()) })),
-    }),
-  ),
-});
-
 const PolicyDocument = z.object({
   Statement: z.array(z.object({ Effect: z.string(), Action: z.array(z.string()), Resource: z.array(z.string()) })),
 });
 
-/** Every document of every manifest under the base, with the file it came from. */
-const loadManifests = async (): Promise<Array<{ file: string; manifest: Manifest }>> => {
-  const files = (await readdir(BASE)).filter((file) => file.endsWith(".yaml") && file !== "kustomization.yaml");
-  const out: Array<{ file: string; manifest: Manifest }> = [];
-  for (const file of files) {
-    for (const doc of parseAllDocuments(await readFile(join(BASE, file), "utf8"))) {
-      if (doc.errors.length > 0) throw new Error(`${file}: ${doc.errors.map((error) => error.message).join("; ")}`);
-      const value: unknown = doc.toJS();
-      if (value !== null) out.push({ file, manifest: Manifest.parse(value) });
-    }
+type Rendered = Manifest[];
+
+/** `helm template` of the chart in the ticket-steward namespace with these helm args. */
+const render = async (args: string[]): Promise<Rendered> => {
+  const { stdout } = await run("helm", ["template", "ticket-steward", CHART, "--namespace", "ticket-steward", ...args], { maxBuffer: 16 * 1024 * 1024 }).catch((err: unknown) => {
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") throw new Error("these tests render the chart with helm 3: install it (docs/ops.md, \"Running on Kubernetes\")", { cause: err });
+    throw err;
+  });
+  const out: Rendered = [];
+  for (const doc of parseAllDocuments(stdout)) {
+    if (doc.errors.length > 0) throw new Error(doc.errors.map((error) => error.message).join("; "));
+    const value: unknown = doc.toJS();
+    if (value !== null) out.push(Manifest.parse(value));
   }
   return out;
 };
 
-let manifests: Array<{ file: string; manifest: Manifest }>;
-let kustomization: z.infer<typeof Kustomization>;
+/** Renders with these values on top of the k3s values file. */
+const renderWith = (values: string[]): Promise<Rendered> => render(["-f", join(VALUES, "k3s.yaml"), ...values.flatMap((value) => ["--set", value])]);
 
-const find = (kind: string, name: string): Manifest => {
-  const found = manifests.find(({ manifest }) => manifest.kind === kind && manifest.metadata.name === name)?.manifest;
-  if (found === undefined) throw new Error(`no ${kind} ${name} in ${BASE}`);
+let manifests: Rendered;
+
+const findIn = (rendered: Rendered, kind: string, name: string): Manifest => {
+  const found = rendered.find((manifest) => manifest.kind === kind && manifest.metadata.name === name);
+  if (found === undefined) throw new Error(`no ${kind} ${name} in the chart`);
   return found;
 };
-const ofKind = (kind: string): Manifest[] => manifests.filter(({ manifest }) => manifest.kind === kind).map(({ manifest }) => manifest);
+const find = (kind: string, name: string): Manifest => findIn(manifests, kind, name);
+const ofKind = (kind: string): Manifest[] => manifests.filter((manifest) => manifest.kind === kind);
 const policies = (): NetworkPolicy[] => ofKind("NetworkPolicy").map((policy) => NetworkPolicy.parse(policy));
 const policy = (name: string): NetworkPolicy => NetworkPolicy.parse(find("NetworkPolicy", name));
 
@@ -133,20 +133,28 @@ const container = (spec: z.infer<typeof PodSpec>, name: string): z.infer<typeof 
 };
 
 beforeAll(async () => {
-  manifests = await loadManifests();
-  kustomization = Kustomization.parse(parseAllDocuments(await readFile(join(BASE, "kustomization.yaml"), "utf8"))[0]?.toJS());
+  manifests = await render(["-f", join(VALUES, "k3s.yaml")]);
 });
 
-describe("deploy/k8s/base", () => {
-  it("lists every manifest in the kustomization, all in the ticket-steward namespace", async () => {
-    const files = (await readdir(BASE)).filter((file) => file.endsWith(".yaml") && file !== "kustomization.yaml");
-    expect([...kustomization.resources].sort()).toEqual(files.sort());
-    expect(kustomization.namespace).toBe("ticket-steward");
-    const namespace = find("Namespace", "ticket-steward");
-    expect(namespace.apiVersion).toBe("v1");
+describe("deploy/helm/ticket-steward", () => {
+  it("renders into the release namespace, creating no namespace and no object outside it", () => {
+    expect(ofKind("Namespace")).toEqual([]);
+    for (const manifest of manifests) expect(manifest.metadata.namespace, `${manifest.kind} ${manifest.metadata.name}`).toBeUndefined();
   });
 
-  it("runs the dispatcher as one replica, recreated rather than rolled, on a 20 Gi Ceph RBD volume", () => {
+  it("refuses to render without the issuer, the dispatcher's role and the region", async () => {
+    await expect(render([])).rejects.toThrow("cluster.issuer is required");
+    await expect(render(["--set", "cluster.issuer=https://oidc.example.com"])).rejects.toThrow("aws.roleArn is required");
+    await expect(render(["--set", "cluster.issuer=https://oidc.example.com", "--set", "aws.roleArn=arn:aws:iam::1:role/x"])).rejects.toThrow("aws.region is required");
+  });
+
+  it("renders every values file in deploy/helm/values", async () => {
+    const files = (await readdir(VALUES)).filter((file) => file.endsWith(".yaml"));
+    expect(files.sort()).toEqual(["k3s.yaml", "minikube.yaml"]);
+    for (const file of files) expect((await render(["-f", join(VALUES, file)])).length).toBeGreaterThan(0);
+  });
+
+  it("runs the dispatcher as one replica, recreated rather than rolled, on a 20 Gi volume kept on uninstall", () => {
     const deployment = Workload.parse(find("Deployment", "steward"));
     expect(deployment.spec.replicas).toBe(1);
     expect(deployment.spec.strategy?.type).toBe("Recreate");
@@ -155,6 +163,7 @@ describe("deploy/k8s/base", () => {
 
     const claim = Claim.parse(find("PersistentVolumeClaim", "steward-data"));
     expect(claim.spec).toEqual({ accessModes: ["ReadWriteOnce"], storageClassName: "ceph-rbd", resources: { requests: { storage: "20Gi" } } });
+    expect(find("PersistentVolumeClaim", "steward-data").metadata).toMatchObject({ annotations: { "helm.sh/resource-policy": "keep" } });
     expect(pod.volumes).toContainEqual({ name: "data", persistentVolumeClaim: { claimName: "steward-data" } });
 
     const steward = container(pod, "steward");
@@ -180,10 +189,9 @@ describe("deploy/k8s/base", () => {
     expect(container(pod, "steward").volumeMounts.filter((mount) => mount.name === "config-bundle")).toEqual([]);
   });
 
-  it("restores a config dir's nested files from a bundle made as docs/ops.md says", async () => {
-    const ops = await readFile(resolve("docs/ops.md"), "utf8");
-    expect(ops).toContain("tar -czf steward-config.tgz -C <config dir> .");
-    expect(ops).toContain(`--from-file=${CONFIG_BUNDLE_KEY}=steward-config.tgz`);
+  it("restores a config dir's nested files from a bundle made as deploy/helm/install.sh makes it", async () => {
+    const install = await readFile(resolve("deploy/helm/install.sh"), "utf8");
+    expect(install).toContain('tar -czf "$bundle" -C "$config_dir" .');
 
     const dir = await mkdtemp(join(tmpdir(), "steward-config-bundle-"));
     try {
@@ -242,7 +250,7 @@ describe("deploy/k8s/base", () => {
   });
 
   it("grants the dispatcher its namespace only: no cluster-scoped role or binding", () => {
-    expect(manifests.filter(({ manifest }) => manifest.kind.startsWith("Cluster"))).toEqual([]);
+    expect(manifests.filter((manifest) => manifest.kind.startsWith("Cluster"))).toEqual([]);
     const role = Role.parse(find("Role", "steward-dispatcher"));
     const verbsOn = (resource: string): string[] => role.rules.filter((rule) => rule.resources.includes(resource)).flatMap((rule) => rule.verbs);
     for (const resource of ["jobs", "configmaps", "pods"]) {
@@ -316,27 +324,67 @@ describe("deploy/k8s/base", () => {
     }
   });
 
-  it("replaces the service and pod CIDRs from the steward-cluster ConfigMap", () => {
-    const literals = kustomization.configMapGenerator.find((generator) => generator.name === "steward-cluster")?.literals ?? [];
-    const keys = literals.map((literal) => literal.split("=", 1)[0]);
-    expect(keys).toEqual(expect.arrayContaining(["issuer", "awsRoleArn", "awsRegion", "serviceCidr", "podCidr"]));
-    const targets = (key: string) =>
-      kustomization.replacements.filter((replacement) => replacement.source.name === "steward-cluster" && replacement.source.fieldPath === `data.${key}`).flatMap((replacement) => replacement.targets);
-    expect(targets("serviceCidr")).toEqual([
-      { select: { kind: "NetworkPolicy", name: "run-pods" }, fieldPaths: ["spec.egress.3.to.0.ipBlock.except.3"] },
-      { select: { kind: "NetworkPolicy", name: "minio" }, fieldPaths: ["spec.egress.1.to.0.ipBlock.except.3"] },
-    ]);
-    expect(targets("podCidr")).toEqual([
-      { select: { kind: "NetworkPolicy", name: "run-pods" }, fieldPaths: ["spec.egress.3.to.0.ipBlock.except.4"] },
-      { select: { kind: "NetworkPolicy", name: "minio" }, fieldPaths: ["spec.egress.1.to.0.ipBlock.except.4"] },
-    ]);
-    // The paths point where the test above found the placeholders.
-    const minioBlock = policy("minio").spec.egress?.[1]?.to?.[0]?.ipBlock;
-    expect(minioBlock?.except?.slice(3)).toEqual(["10.43.0.0/16", "10.42.0.0/16"]);
-    expect(policy("run-pods").spec.egress?.[3]?.to?.[0]?.ipBlock?.except?.slice(3)).toEqual(["10.43.0.0/16", "10.42.0.0/16"]);
+  it("keeps the cluster's service and pod CIDRs from the values out of run pods' and MinIO's reach", async () => {
+    const rendered = await renderWith(["cluster.serviceCidr=10.96.0.0/12", "cluster.podCidr=10.244.0.0/16"]);
+    const except = (name: string): string[] =>
+      (NetworkPolicy.parse(findIn(rendered, "NetworkPolicy", name)).spec.egress ?? []).flatMap((rule) => rule.to ?? []).flatMap((peer) => peer.ipBlock?.except ?? []);
+    for (const name of ["run-pods", "minio"]) expect(except(name)).toEqual([...RFC1918, "10.96.0.0/12", "10.244.0.0/16"]);
+    const cluster = z.object({ data: z.record(z.string(), z.string()) }).parse(findIn(rendered, "ConfigMap", "steward-cluster"));
+    expect(Object.keys(cluster.data).sort()).toEqual(["awsRegion", "awsRoleArn", "issuer"]);
   });
 
-  it("runs MinIO on a 50 Gi Ceph RBD volume, signing in pods with the k3s issuer under the steward-sessions policy", async () => {
+  it("lets run pods reach the private ranges of runPods.allowCidrs and nothing more", async () => {
+    const rendered = await renderWith(["runPods.allowCidrs={192.168.10.5/32,10.1.2.0/24}"]);
+    const allow = NetworkPolicy.parse(findIn(rendered, "NetworkPolicy", "run-pods-allow-cidrs"));
+    expect(selectsRunPods(allow.spec.podSelector)).toBe(true);
+    expect(allow.spec.egress).toEqual([{ to: [{ ipBlock: { cidr: "192.168.10.5/32" } }, { ipBlock: { cidr: "10.1.2.0/24" } }] }]);
+    expect(policy("run-pods-allow-cidrs").spec.egress).toEqual([]);
+  });
+
+  it("trims a trailing slash from the issuer", async () => {
+    const rendered = await renderWith(["cluster.issuer=https://oidc.example.com/"]);
+    expect(z.object({ data: z.object({ issuer: z.string() }) }).parse(findIn(rendered, "ConfigMap", "steward-cluster")).data.issuer).toBe("https://oidc.example.com");
+  });
+
+  it("leaves the storage class to the cluster's default when none is named", async () => {
+    const rendered = await renderWith(["storage.className="]);
+    const claim = z.object({ spec: z.record(z.string(), z.unknown()) }).parse(findIn(rendered, "PersistentVolumeClaim", "steward-data"));
+    expect(Object.keys(claim.spec)).not.toContain("storageClassName");
+    const minio = Workload.parse(findIn(rendered, "StatefulSet", "minio"));
+    expect(JSON.stringify(minio.spec.volumeClaimTemplates)).not.toContain("storageClassName");
+  });
+
+  it("bundles the config dir as binary config.tgz, and a new bundle restarts the dispatcher", async () => {
+    expect(manifests.filter((manifest) => manifest.kind === "ConfigMap" && manifest.metadata.name === "steward-config")).toEqual([]);
+    const checksum = async (bundle: string): Promise<string | undefined> => {
+      const rendered = await renderWith([`config.bundle=${bundle}`]);
+      const config = z.object({ binaryData: z.record(z.string(), z.string()) }).parse(findIn(rendered, "ConfigMap", "steward-config"));
+      expect(config.binaryData).toEqual({ [CONFIG_BUNDLE_KEY]: bundle });
+      const template = z.object({ spec: z.object({ template: z.object({ metadata: Metadata.omit({ name: true }) }) }) }).parse(findIn(rendered, "Deployment", "steward"));
+      return template.spec.template.metadata.annotations?.["steward/config-checksum"];
+    };
+    const first = await checksum("H4sIAAAAAAAAA0tMSgYAAP//");
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+    expect(await checksum("H4sIAAAAAAAAA0vKz8sBAP//")).not.toBe(first);
+  });
+
+  it("serves the webhooks through the ingress, or on a fixed node port", async () => {
+    const ingress = z.object({ spec: z.unknown() }).parse(find("Ingress", "steward")).spec;
+    expect(ingress).toEqual({
+      ingressClassName: "traefik",
+      tls: [{ hosts: ["steward.example.com"], secretName: "steward-tls" }],
+      rules: [{ host: "steward.example.com", http: { paths: [{ path: "/", pathType: "Prefix", backend: { service: { name: "steward", port: { number: 3020 } } } }] } }],
+    });
+    const local = await render(["-f", join(VALUES, "minikube.yaml")]);
+    expect(local.filter((manifest) => manifest.kind === "Ingress")).toEqual([]);
+    expect(z.object({ spec: z.unknown() }).parse(findIn(local, "Service", "steward")).spec).toEqual({
+      type: "NodePort",
+      selector: { app: "steward" },
+      ports: [{ name: "http", port: 3020, targetPort: 3020, nodePort: 30320 }],
+    });
+  });
+
+  it("runs MinIO on a 50 Gi volume, signing in pods with the cluster's issuer under the steward-sessions policy", async () => {
     const minio = Workload.parse(find("StatefulSet", "minio"));
     expect(minio.spec.replicas).toBe(1);
     expect(minio.spec.template.spec.automountServiceAccountToken).toBe(false);
@@ -344,16 +392,16 @@ describe("deploy/k8s/base", () => {
       { metadata: { name: "data" }, spec: { accessModes: ["ReadWriteOnce"], storageClassName: "ceph-rbd", resources: { requests: { storage: "50Gi" } } } },
     ]);
     const env = Object.fromEntries(container(minio.spec.template.spec, "minio").env.map((variable) => [variable.name, variable]));
-    expect(env.K3S_ISSUER?.valueFrom?.configMapKeyRef).toEqual({ name: "steward-cluster", key: "issuer" });
-    expect(env.MINIO_IDENTITY_OPENID_CONFIG_URL?.value).toBe("$(K3S_ISSUER)/.well-known/openid-configuration");
+    expect(env.CLUSTER_ISSUER?.valueFrom?.configMapKeyRef).toEqual({ name: "steward-cluster", key: "issuer" });
+    expect(env.MINIO_IDENTITY_OPENID_CONFIG_URL?.value).toBe("$(CLUSTER_ISSUER)/.well-known/openid-configuration");
     expect(env.MINIO_IDENTITY_OPENID_CLIENT_ID?.value).toBe("minio");
     expect(env.MINIO_IDENTITY_OPENID_ROLE_POLICY?.value).toBe(SESSIONS_BUCKET);
     // No root credential in the manifests: the image makes a new one on each start and keeps it in memory.
     expect(Object.keys(env).filter((name) => name.startsWith("MINIO_ROOT"))).toEqual([]);
 
-    const policyFile = kustomization.configMapGenerator.find((generator) => generator.name === "minio-policy")?.files ?? [];
-    expect(policyFile).toEqual(["policy.json=minio-policy.json"]);
-    const document = PolicyDocument.parse(JSON.parse(await readFile(join(BASE, "minio-policy.json"), "utf8")));
+    const policyMap = z.object({ data: z.object({ "policy.json": z.string() }) }).parse(find("ConfigMap", "minio-policy"));
+    expect(policyMap.data["policy.json"].trim()).toBe((await readFile(join(CHART, "files", "minio-policy.json"), "utf8")).trim());
+    const document = PolicyDocument.parse(JSON.parse(policyMap.data["policy.json"]));
     for (const statement of document.Statement) {
       expect(statement.Effect).toBe("Allow");
       for (const resource of statement.Resource) expect(resource === `arn:aws:s3:::${SESSIONS_BUCKET}` || resource.startsWith(`arn:aws:s3:::${SESSIONS_BUCKET}/`)).toBe(true);

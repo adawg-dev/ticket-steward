@@ -1,4 +1,4 @@
-# The steward image on k3s (docs/ops.md, "Running on k3s"): the dispatcher, and in each run pod the init containers
+# The steward image on Kubernetes (docs/ops.md, "Running on Kubernetes"): the dispatcher, and in each run pod the init containers
 # (git-init, render-overlay, sessions pull) and the keyproxy, tools and sessions-sync sidecars. It is the Compose
 # image (Dockerfile) without what only the agent uses: no Chromium, pnpm or psql. glab and Orbit stay, for the tools
 # sidecar's Orbit server and doctor. Build from the repo root:

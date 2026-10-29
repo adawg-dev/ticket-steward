@@ -1,0 +1,26 @@
+# A k3s cluster: the API server started with the issuer flags in docs/ops.md, "Running on Kubernetes"; images pulled
+# from your registry; webhooks through the ingress.
+images:
+  steward:
+    repository: registry.example.com/ticket-steward/steward
+    tag: latest
+  minio:
+    repository: registry.example.com/ticket-steward/minio
+
+cluster:
+  issuer: https://oidc.example.com
+  serviceCidr: 10.43.0.0/16
+  podCidr: 10.42.0.0/16
+
+aws:
+  roleArn: arn:aws:iam::123456789012:role/ticket-steward
+  region: us-east-1
+
+storage:
+  className: ceph-rbd
+
+ingress:
+  enabled: true
+  className: traefik
+  host: steward.example.com
+  tlsSecretName: steward-tls

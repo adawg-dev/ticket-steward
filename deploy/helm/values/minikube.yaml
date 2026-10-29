@@ -1,0 +1,28 @@
+# A local cluster: minikube -p steward start --driver=docker --cni=calico (Calico enforces the NetworkPolicies) with
+# the issuer flags in docs/ops.md, "Running on Kubernetes". Images are built into minikube's own Docker, so nothing is
+# pulled.
+images:
+  steward:
+    pullPolicy: Never
+  minio:
+    pullPolicy: Never
+
+cluster:
+  issuer: https://oidc.example.com # the public issuer URL; minikube's apiserver must be started with it
+  serviceCidr: 10.96.0.0/12
+  podCidr: 10.244.0.0/16
+
+aws:
+  roleArn: arn:aws:iam::123456789012:role/ticket-steward
+  region: us-east-1
+
+storage:
+  className: standard
+  stewardData: 20Gi
+  minioData: 20Gi
+
+# The tunnel or reverse proxy on the host forwards the public URL to <minikube ip>:30320.
+dispatcher:
+  service:
+    type: NodePort
+    nodePort: 30320

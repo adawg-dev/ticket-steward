@@ -1,3 +1,17 @@
+# The dispatcher's account talks to the API server (the Role below) and assumes the IAM role with a projected token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: steward-dispatcher
+---
+# The run pods' account: no API token is mounted and it has no role in the cluster. Only the sidecars that read AWS or
+# MinIO get a projected token, each for its own audience (src/k8s/runJob.ts); the agent container gets none.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: steward-run
+automountServiceAccountToken: false
+---
 # The dispatcher's rights, in its own namespace only: a Job, a spec ConfigMap and a pod per run, the TTY of a chat's
 # run pod, and doctor's read of the NetworkPolicies and its probe pod. Nothing cluster-scoped.
 apiVersion: rbac.authorization.k8s.io/v1

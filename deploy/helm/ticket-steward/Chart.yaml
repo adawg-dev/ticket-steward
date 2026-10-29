@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ticket-steward
+description: The steward's dispatcher, its MinIO session store and the namespace's isolation. Run pods are Jobs the dispatcher creates.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

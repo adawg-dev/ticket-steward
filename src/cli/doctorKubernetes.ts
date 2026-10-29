@@ -17,7 +17,7 @@ import { MINIO_TOKEN_FILE, minioCredentials, s3ObjectStore, type ObjectStore } f
 import { flunk, ok, warn, type Check, type CheckResult } from "./check.js";
 import { errorMessage, type CliContext } from "./context.js";
 
-/** The NetworkPolicies of `deploy/k8s/base/networkpolicy.yaml`; doctor expects each in the namespace. */
+/** The NetworkPolicies of the chart (`deploy/helm/ticket-steward`); doctor expects each in the namespace. */
 export const NETWORK_POLICIES = ["default-deny", "dispatcher", "minio", "run-pods", "run-pods-allow-cidrs"] as const;
 
 /** The parts of the cluster doctor reads, and the probe pod it starts; tests stand in for them. */
@@ -54,7 +54,7 @@ const HTTP_TIMEOUT_MS = 5_000;
 const PROBE_POLL_MS = 2_000;
 /** Covers pulling the agent image onto a node that has not run one yet. */
 const PROBE_TIMEOUT_MS = 5 * 60_000;
-const OPS_DOC = 'docs/ops.md, "Running on k3s"';
+const OPS_DOC = 'docs/ops.md, "Running on Kubernetes"';
 
 const Discovery = z.object({ issuer: z.string(), jwks_uri: z.string() });
 const Jwks = z.object({ keys: z.array(z.unknown()) });
@@ -125,7 +125,7 @@ const readAwsToken = async (file: string | undefined): Promise<Read<{ token: str
   return { ok: true, value: { token, issuer: parsed.data.iss } };
 };
 
-/** k3s's default issuer is the in-cluster API server, which neither AWS nor MinIO can fetch. */
+/** The default issuer is the in-cluster API server, which neither AWS nor MinIO can fetch. */
 const isPublicHttps = (issuer: string): boolean => {
   let url: URL;
   try {
@@ -138,13 +138,13 @@ const isPublicHttps = (issuer: string): boolean => {
 };
 
 const issuerCheck = (deps: KubernetesDoctorDeps): Check => ({
-  name: "k3s issuer",
+  name: "cluster issuer",
   run: async () => {
     const read = await readAwsToken(deps.awsTokenFile);
     if (!read.ok) return read.result;
     const { issuer } = read.value;
     if (!isPublicHttps(issuer)) {
-      return flunk(`the token's issuer is ${issuer}; start k3s with --kube-apiserver-arg=service-account-issuer=<public https url> (${OPS_DOC})`);
+      return flunk(`the token's issuer is ${issuer}; start the API server with --service-account-issuer=<public https url> (${OPS_DOC})`);
     }
     const discoveryUrl = `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
     const discovery = await deps.fetchImpl(discoveryUrl, { signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
@@ -260,7 +260,7 @@ const networkPolicyCheck = (runtime: KubernetesRuntime, deps: KubernetesDoctorDe
     const list = await deps.cluster.networking.listNamespacedNetworkPolicy({ namespace });
     const present = new Set(list.items.map((policy) => policy.metadata?.name));
     const absent = NETWORK_POLICIES.filter((name) => !present.has(name));
-    return absent.length === 0 ? ok(`${NETWORK_POLICIES.join(", ")} in ${namespace}`) : flunk(`missing in ${namespace}: ${absent.join(", ")}; kubectl apply -k deploy/k8s/base`);
+    return absent.length === 0 ? ok(`${NETWORK_POLICIES.join(", ")} in ${namespace}`) : flunk(`missing in ${namespace}: ${absent.join(", ")}; install the chart (deploy/helm/install.sh)`);
   },
 });
 

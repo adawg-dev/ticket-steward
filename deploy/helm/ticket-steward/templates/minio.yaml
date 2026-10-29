@@ -1,8 +1,16 @@
 # MinIO holds the Claude Code sessions (bucket steward-sessions, objects sessions/<KEY>/...). Pods sign in through
-# MinIO's STS with a projected service-account token (audience "minio") that MinIO checks against the k3s issuer, and
-# get the steward-sessions policy (minio-policy.json). No access key is stored anywhere: the image makes a new root
-# password on each start, uses it once to create the bucket and the policy, and keeps it in memory only
+# MinIO's STS with a projected service-account token (audience "minio") that MinIO checks against the cluster's issuer,
+# and get the steward-sessions policy (files/minio-policy.json). No access key is stored anywhere: the image makes a
+# new root password on each start, uses it once to create the bucket and the policy, and keeps it in memory only
 # (deploy/images/minio.Dockerfile).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minio-policy
+data:
+  policy.json: |
+    {{- .Files.Get "files/minio-policy.json" | nindent 4 }}
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -30,21 +38,22 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: minio
-          image: ticket-steward/minio
+          image: {{ include "steward.image" .Values.images.minio | quote }}
+          imagePullPolicy: {{ .Values.images.minio.pullPolicy }}
           env:
-            - name: K3S_ISSUER
+            - name: CLUSTER_ISSUER
               valueFrom:
                 configMapKeyRef:
                   name: steward-cluster
                   key: issuer
             - name: MINIO_IDENTITY_OPENID_CONFIG_URL
-              value: $(K3S_ISSUER)/.well-known/openid-configuration
+              value: $(CLUSTER_ISSUER)/.well-known/openid-configuration
             - name: MINIO_IDENTITY_OPENID_CLIENT_ID
               value: minio
             - name: MINIO_IDENTITY_OPENID_ROLE_POLICY
               value: steward-sessions
             - name: MINIO_IDENTITY_OPENID_DISPLAY_NAME
-              value: k3s
+              value: cluster
             - name: STEWARD_BUCKET
               value: steward-sessions
             - name: STEWARD_POLICY_FILE
@@ -65,11 +74,7 @@ spec:
               port: 9000
             periodSeconds: 30
           resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              memory: 1Gi
+            {{- toYaml .Values.minio.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
           volumeMounts:
@@ -93,10 +98,10 @@ spec:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        storageClassName: ceph-rbd
+        {{- include "steward.storageClass" . | nindent 8 }}
         resources:
           requests:
-            storage: 50Gi
+            storage: {{ .Values.storage.minioData }}
 ---
 apiVersion: v1
 kind: Service

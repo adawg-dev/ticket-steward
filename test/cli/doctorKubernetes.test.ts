@@ -122,31 +122,31 @@ afterEach(async () => {
 describe("kubernetesChecks", () => {
   it("runs the cluster checks in order, the probe pod last", () => {
     const names = kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }).map((check) => check.name);
-    expect(names).toEqual(["k3s issuer", "aws role", "run role", "dev secrets", "overlay template", "minio sts", "network policies", "probe pod"]);
+    expect(names).toEqual(["cluster issuer", "aws role", "run role", "dev secrets", "overlay template", "minio sts", "network policies", "probe pod"]);
   });
 
-  describe("k3s issuer", () => {
+  describe("cluster issuer", () => {
     it("reads the issuer from the dispatcher's AWS token and fetches its discovery document and JWKS", async () => {
       const seen: string[] = [];
-      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps({ fetchImpl: issuerFetch({}, seen) }), { probePod: false }), "k3s issuer");
+      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps({ fetchImpl: issuerFetch({}, seen) }), { probePod: false }), "cluster issuer");
       expect(result).toEqual({ level: "ok", message: `${ISSUER}: discovery and JWKS (1 key) answer` });
       expect(seen).toEqual([DISCOVERY_URL, JWKS_URL]);
     });
 
     it("fails when the discovery document does not answer, naming its URL", async () => {
       const fetchImpl = issuerFetch({ discovery: () => new Response("no", { status: 404 }) });
-      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps({ fetchImpl }), { probePod: false }), "k3s issuer");
+      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps({ fetchImpl }), { probePod: false }), "cluster issuer");
       expect(result).toEqual({ level: "fail", message: `${DISCOVERY_URL} answered 404; AWS and MinIO fetch it to trust the cluster's tokens` });
     });
 
     it("fails when the discovery document names another issuer, or no keys are published", async () => {
       const other = issuerFetch({ discovery: () => Response.json({ issuer: "https://elsewhere.example", jwks_uri: JWKS_URL }) });
-      expect(await run(kubernetesChecks(loaded(), RUNTIME, deps({ fetchImpl: other }), { probePod: false }), "k3s issuer")).toEqual({
+      expect(await run(kubernetesChecks(loaded(), RUNTIME, deps({ fetchImpl: other }), { probePod: false }), "cluster issuer")).toEqual({
         level: "fail",
         message: `${DISCOVERY_URL} names the issuer https://elsewhere.example, not ${ISSUER}`,
       });
       const empty = issuerFetch({ jwks: () => Response.json({ keys: [] }) });
-      expect(await run(kubernetesChecks(loaded(), RUNTIME, deps({ fetchImpl: empty }), { probePod: false }), "k3s issuer")).toEqual({
+      expect(await run(kubernetesChecks(loaded(), RUNTIME, deps({ fetchImpl: empty }), { probePod: false }), "cluster issuer")).toEqual({
         level: "fail",
         message: `${JWKS_URL} publishes no keys`,
       });
@@ -154,18 +154,18 @@ describe("kubernetesChecks", () => {
 
     it("fails on the in-cluster issuer, which AWS cannot reach", async () => {
       await writeFile(tokenFile, jwt({ iss: "https://kubernetes.default.svc.cluster.local" }));
-      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }), "k3s issuer");
+      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }), "cluster issuer");
       expect(result.level).toBe("fail");
       expect(result.message).toBe(
-        "the token's issuer is https://kubernetes.default.svc.cluster.local; start k3s with --kube-apiserver-arg=service-account-issuer=<public https url> (docs/ops.md, \"Running on k3s\")",
+        "the token's issuer is https://kubernetes.default.svc.cluster.local; start the API server with --service-account-issuer=<public https url> (docs/ops.md, \"Running on Kubernetes\")",
       );
     });
 
     it("fails without the dispatcher's AWS token, and never prints a token", async () => {
-      const unset = await run(kubernetesChecks(loaded(), RUNTIME, deps({ awsTokenFile: undefined }), { probePod: false }), "k3s issuer");
+      const unset = await run(kubernetesChecks(loaded(), RUNTIME, deps({ awsTokenFile: undefined }), { probePod: false }), "cluster issuer");
       expect(unset).toEqual({ level: "fail", message: "AWS_WEB_IDENTITY_TOKEN_FILE is not set; the dispatcher's Deployment projects its AWS token there" });
       await writeFile(tokenFile, "not-a-jwt-but-secret");
-      const garbled = await run(kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }), "k3s issuer");
+      const garbled = await run(kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }), "cluster issuer");
       expect(garbled).toEqual({ level: "fail", message: `${tokenFile} does not hold a service-account token` });
     });
   });
@@ -289,7 +289,7 @@ describe("kubernetesChecks", () => {
   });
 
   describe("network policies", () => {
-    it("is ok when every policy of deploy/k8s/base is in the namespace", async () => {
+    it("is ok when every policy of the chart is in the namespace", async () => {
       expect(await run(kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }), "network policies")).toEqual({
         level: "ok",
         message: `${NETWORK_POLICIES.join(", ")} in ${RUNTIME.namespace}`,
@@ -300,7 +300,7 @@ describe("kubernetesChecks", () => {
       const cluster = fakeCluster({ policies: ["default-deny", "dispatcher"] });
       expect(await run(kubernetesChecks(loaded(), RUNTIME, deps({ cluster }), { probePod: false }), "network policies")).toEqual({
         level: "fail",
-        message: `missing in ${RUNTIME.namespace}: minio, run-pods, run-pods-allow-cidrs; kubectl apply -k deploy/k8s/base`,
+        message: `missing in ${RUNTIME.namespace}: minio, run-pods, run-pods-allow-cidrs; install the chart (deploy/helm/install.sh)`,
       });
     });
   });

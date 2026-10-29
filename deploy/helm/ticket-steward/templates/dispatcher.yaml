@@ -17,13 +17,17 @@ spec:
     metadata:
       labels:
         app: steward
+      annotations:
+        # A new config bundle restarts the dispatcher; run pods read the bundle when they start.
+        steward/config-checksum: {{ .Values.config.bundle | sha256sum | quote }}
     spec:
       serviceAccountName: steward-dispatcher
       terminationGracePeriodSeconds: 120
       initContainers:
-        # The PVC's root is root-owned on a new volume; the steward runs as 1001 and doctor expects its dataDir 0700.
+        # The volume's root is root-owned on a new volume; the steward runs as 1001 and doctor expects its dataDir 0700.
         - name: data-permissions
-          image: ticket-steward/steward
+          image: {{ include "steward.image" .Values.images.steward | quote }}
+          imagePullPolicy: {{ .Values.images.steward.pullPolicy }}
           command: ["sh", "-c", "chown 1001:1001 /var/lib/ticket-steward && chmod 0700 /var/lib/ticket-steward"]
           securityContext:
             runAsUser: 0
@@ -34,10 +38,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/ticket-steward
-        # The config dir is one gzipped tar in the ConfigMap (ConfigMap keys are flat, the dir is not), unpacked here as
-        # in every run pod (src/k8s/runJob.ts, configUnpackCommand).
+        # The config bundle unpacked as in every run pod (src/k8s/runJob.ts, configUnpackCommand).
         - name: config-unpack
-          image: ticket-steward/steward
+          image: {{ include "steward.image" .Values.images.steward | quote }}
+          imagePullPolicy: {{ .Values.images.steward.pullPolicy }}
           command: ["sh", "-c", 'tar -xzf "$1" -C "$2" --strip-components=1 --no-same-owner --no-same-permissions', "config-unpack", "/etc/steward-config-bundle/config.tgz", "/etc/ticket-steward"]
           securityContext:
             runAsUser: 1001
@@ -52,12 +56,12 @@ spec:
               mountPath: /etc/ticket-steward
       containers:
         - name: steward
-          image: ticket-steward/steward
+          image: {{ include "steward.image" .Values.images.steward | quote }}
+          imagePullPolicy: {{ .Values.images.steward.pullPolicy }}
           args: ["--config", "/etc/ticket-steward/steward.config.ts", "serve"]
           env:
-            # No secret is set here: config load reads each one from Secrets Manager through `secrets.map` (the Linear
-            # app's DEV_STEWARD_LINEAR_CLIENT_ID and DEV_STEWARD_LINEAR_CLIENT_SECRET among them; docs/ops.md §1.7, §1.13).
-            # The SDK's default chain assumes the role with the projected token; nothing else holds an AWS credential.
+            # No secret is set here: config load reads each one from Secrets Manager through `secrets.map`. The SDK's
+            # default chain assumes the role with the projected token; nothing else holds an AWS credential.
             - name: AWS_ROLE_ARN
               valueFrom:
                 configMapKeyRef:
@@ -81,11 +85,7 @@ spec:
               port: 3020
             periodSeconds: 10
           resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              memory: 2Gi
+            {{- toYaml .Values.dispatcher.resources | nindent 12 }}
           securityContext:
             runAsUser: 1001
             runAsGroup: 1001
@@ -110,8 +110,7 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: steward-data
-        # The config dir (steward.config.ts, prompts, the overlay template) as the ConfigMap run pods unpack too:
-        # key config.tgz (docs/ops.md, "Running on k3s"). A missing key keeps the pod from starting.
+        # A missing config.tgz key keeps the pod from starting.
         - name: config-bundle
           configMap:
             name: steward-config
@@ -141,14 +140,79 @@ spec:
                   expirationSeconds: 3600
                   path: token
 ---
-# The SQLite job state and the mirror, on a replicated Ceph RBD volume.
+# The SQLite job state and the mirror. Kept when the release is uninstalled.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: steward-data
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   accessModes: ["ReadWriteOnce"]
-  storageClassName: ceph-rbd
+  {{- include "steward.storageClass" . | nindent 2 }}
   resources:
     requests:
-      storage: 20Gi
+      storage: {{ .Values.storage.stewardData }}
+---
+# Webhooks and /health; the public URL reaches it through the ingress, or a node port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: steward
+spec:
+  type: {{ .Values.dispatcher.service.type }}
+  selector:
+    app: steward
+  ports:
+    - name: http
+      port: 3020
+      targetPort: 3020
+      {{- if and (eq .Values.dispatcher.service.type "NodePort") .Values.dispatcher.service.nodePort }}
+      nodePort: {{ .Values.dispatcher.service.nodePort }}
+      {{- end }}
+---
+# The run pods' callbacks (runtime.callbackUrl: http://steward-internal.<namespace>.svc:3021). The NetworkPolicy
+# admits run pods only. The admin API (3022) listens on the pod's loopback and has no Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: steward-internal
+spec:
+  selector:
+    app: steward
+  ports:
+    - name: internal
+      port: 3021
+      targetPort: 3021
+{{- if .Values.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: steward
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tlsSecretName }}
+  tls:
+    - hosts: [{{ required "ingress.host is required" $.Values.ingress.host | quote }}]
+      secretName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ required "ingress.host is required" .Values.ingress.host | quote }}
+      http:
+        paths:
+          # Only the webhooks and /health exist on this port.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: steward
+                port:
+                  number: 3020
+{{- end }}

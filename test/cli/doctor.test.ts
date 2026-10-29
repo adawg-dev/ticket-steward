@@ -467,7 +467,7 @@ describe("steward doctor on the kubernetes runtime", () => {
     expect(names).not.toContain("overlay");
     expect(names).not.toContain("chromium");
     expect(names).not.toContain("port");
-    expect(lines).toContain("[ok] k3s issuer: https://issuer.example: discovery and JWKS (1 key) answer");
+    expect(lines).toContain("[ok] cluster issuer: https://issuer.example: discovery and JWKS (1 key) answer");
     expect(lines).toContain(`[ok] aws role: ${RUNTIME.aws.roleArn} assumed as arn:aws:sts::1:assumed-role/steward/doctor`);
     expect(lines).toContain("[ok] dev secrets: neither the secrets map nor the overlay template names an id");
     expect(lines).toContain(`[ok] overlay template: ${templateDir}: 1 file(s), 0 outbound secret(s)`);

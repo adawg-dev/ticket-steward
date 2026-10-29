@@ -1,5 +1,0 @@
-# The steward's namespace: the dispatcher, MinIO and every run pod. docs/ops.md, "Running on k3s".
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ticket-steward

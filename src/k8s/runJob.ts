@@ -33,7 +33,7 @@ const EGRESS_CONFDIR = "/run/egress-confdir";
 /**
  * The config dir travels as one gzipped tar under this key of `runtime.config.configMap`: ConfigMap keys are flat and
  * the dir is not (the overlay template's `apps/<app>/.env`, prompts). The dispatcher and every run pod unpack it into
- * an emptyDir that the other containers mount read-only (docs/ops.md, "Running on k3s").
+ * an emptyDir that the other containers mount read-only (docs/ops.md, "Running on Kubernetes").
  */
 export const CONFIG_BUNDLE_KEY = "config.tgz";
 export const CONFIG_BUNDLE_DIR = "/etc/steward-config-bundle";

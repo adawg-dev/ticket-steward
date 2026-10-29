@@ -1,4 +1,4 @@
-# MinIO for the steward's sessions (deploy/k8s/base/minio.yaml), built from source. MinIO's open-source server and mc
+# MinIO for the steward's sessions (deploy/helm/ticket-steward/templates/minio.yaml), built from source. MinIO's open-source server and mc
 # are archived: their images and binaries are no longer published, so both are built here from their last release
 # tags, pinned by commit. Build from the repo root:
 #   docker build -f deploy/images/minio.Dockerfile -t <registry>/ticket-steward/minio:RELEASE.2025-10-15T17-29-55Z .
