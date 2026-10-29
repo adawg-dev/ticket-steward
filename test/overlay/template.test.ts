@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SecretFetcher } from "../../src/config/secretSource.js";
-import { overlayTemplateIssues, renderOverlay, writeRenderedOverlay } from "../../src/overlay/template.js";
+import { overlayTemplateIssues, overlayTemplateSummary, renderOverlay, writeRenderedOverlay } from "../../src/overlay/template.js";
 
 let dir: string;
 
@@ -160,6 +160,21 @@ describe("overlayTemplateIssues", () => {
       ".env:1: DEV_X is used to sign requests; the egress proxy cannot stand in for it",
       "apps/web/.env:1: {{secret:DEV_Z}} names no hosts",
     ]);
+  });
+});
+
+describe("overlayTemplateSummary", () => {
+  it("counts the files and names each outbound secret id once, sorted, reading no secret", async () => {
+    const templateDir = await template({
+      ".env": "B={{secret:DEV_Y@a.example}}\nA={{secret:DEV_X@a.example,b.example}}\nL={{local}}\n",
+      "apps/web/.env": "B={{secret:DEV_Y@a.example}}\nS={{signed:DEV_SIGN}}\n",
+    });
+
+    expect(await overlayTemplateSummary(templateDir)).toEqual({
+      files: 2,
+      secretIds: ["DEV_X", "DEV_Y"],
+      issues: ["apps/web/.env:2: DEV_SIGN is used to sign requests; the egress proxy cannot stand in for it"],
+    });
   });
 });
 

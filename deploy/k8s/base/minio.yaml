@@ -1,0 +1,111 @@
+# MinIO holds the Claude Code sessions (bucket steward-sessions, objects sessions/<KEY>/...). Pods sign in through
+# MinIO's STS with a projected service-account token (audience "minio") that MinIO checks against the k3s issuer, and
+# get the steward-sessions policy (minio-policy.json). No access key is stored anywhere: the image makes a new root
+# password on each start, uses it once to create the bucket and the policy, and keeps it in memory only
+# (deploy/images/minio.Dockerfile).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  labels:
+    app: minio
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: minio
+          image: ticket-steward/minio
+          env:
+            - name: K3S_ISSUER
+              valueFrom:
+                configMapKeyRef:
+                  name: steward-cluster
+                  key: issuer
+            - name: MINIO_IDENTITY_OPENID_CONFIG_URL
+              value: $(K3S_ISSUER)/.well-known/openid-configuration
+            - name: MINIO_IDENTITY_OPENID_CLIENT_ID
+              value: minio
+            - name: MINIO_IDENTITY_OPENID_ROLE_POLICY
+              value: steward-sessions
+            - name: MINIO_IDENTITY_OPENID_DISPLAY_NAME
+              value: k3s
+            - name: STEWARD_BUCKET
+              value: steward-sessions
+            - name: STEWARD_POLICY_FILE
+              value: /etc/minio-steward/policy.json
+            - name: MINIO_BROWSER
+              value: "off"
+          ports:
+            - name: s3
+              containerPort: 9000
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: policy
+              mountPath: /etc/minio-steward
+              readOnly: true
+            - name: mc-config
+              mountPath: /tmp/mc
+      volumes:
+        - name: policy
+          configMap:
+            name: minio-policy
+        - name: mc-config
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: ceph-rbd
+        resources:
+          requests:
+            storage: 50Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: 9000

@@ -1,0 +1,129 @@
+# The dispatcher: webhooks, the SQLite job state, one Job per run. One replica, and Recreate so a new pod never runs
+# beside the old one on the same SQLite file; a restart reattaches to the live run pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: steward
+  labels:
+    app: steward
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: steward
+  template:
+    metadata:
+      labels:
+        app: steward
+    spec:
+      serviceAccountName: steward-dispatcher
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        # The PVC's root is root-owned on a new volume; the steward runs as 1001 and doctor expects its dataDir 0700.
+        - name: data-permissions
+          image: ticket-steward/steward
+          command: ["sh", "-c", "chown 1001:1001 /var/lib/ticket-steward && chmod 0700 /var/lib/ticket-steward"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/ticket-steward
+      containers:
+        - name: steward
+          image: ticket-steward/steward
+          args: ["--config", "/etc/ticket-steward/steward.config.ts", "serve"]
+          env:
+            # The SDK's default chain assumes the role with the projected token; nothing else holds an AWS credential.
+            - name: AWS_ROLE_ARN
+              valueFrom:
+                configMapKeyRef:
+                  name: steward-cluster
+                  key: awsRoleArn
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: steward-cluster
+                  key: awsRegion
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: /var/run/secrets/steward/aws/token
+          ports:
+            - name: http
+              containerPort: 3020
+            - name: internal
+              containerPort: 3021
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3020
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/ticket-steward
+            - name: config
+              mountPath: /etc/ticket-steward
+              readOnly: true
+            - name: runtime
+              mountPath: /run/steward
+            - name: aws-token
+              mountPath: /var/run/secrets/steward/aws
+              readOnly: true
+            # For doctor's MinIO STS check; the dispatcher itself reads no session.
+            - name: minio-token
+              mountPath: /var/run/secrets/steward/minio
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: steward-data
+        # The config dir (steward.config.ts, prompts, the overlay template), the same ConfigMap run pods mount.
+        - name: config
+          configMap:
+            name: steward-config
+        # serve writes the admin API's token here: memory only, gone with the pod.
+        - name: runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: aws-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: sts.amazonaws.com
+                  expirationSeconds: 3600
+                  path: token
+        - name: minio-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: minio
+                  expirationSeconds: 3600
+                  path: token
+---
+# The SQLite job state and the mirror, on a replicated Ceph RBD volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: steward-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ceph-rbd
+  resources:
+    requests:
+      storage: 20Gi

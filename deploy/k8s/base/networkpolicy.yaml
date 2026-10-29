@@ -1,0 +1,152 @@
+# Isolation for the namespace (k3s enforces NetworkPolicy with its embedded kube-router). Everything is denied unless a
+# policy below allows it. Run pods are the pods with a steward.run-id label: every run Job's pod, and doctor's probe pod.
+#
+# The service and pod CIDRs in the except lists are k3s's defaults; kustomization.yaml replaces them from the
+# steward-cluster ConfigMap (serviceCidr, podCidr). The API server is reached through the service CIDR or a node IP,
+# both private here, so only the dispatcher, whose egress is open, reaches it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# Run pods: DNS, MinIO's S3 port (session sync), the dispatcher's callback port, and the internet, but no private range,
+# so not the API server, other run pods or anything else in the cluster or on the LAN. No ingress: `steward chat`
+# attaches through the kubelet, not the pod network.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: run-pods
+spec:
+  podSelector:
+    matchExpressions:
+      - key: steward.run-id
+        operator: Exists
+  policyTypes: ["Ingress", "Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: steward
+      ports:
+        - protocol: TCP
+          port: 3021
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 10.43.0.0/16 # serviceCidr
+              - 10.42.0.0/16 # podCidr
+---
+# The private ranges run pods may still reach: keep this list equal to runtime.egressAllowCidrs in steward.config.ts.
+# Empty, it allows nothing. To allow one, add a rule such as:
+#   egress:
+#     - to:
+#         - ipBlock:
+#             cidr: 192.168.10.5/32
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: run-pods-allow-cidrs
+spec:
+  podSelector:
+    matchExpressions:
+      - key: steward.run-id
+        operator: Exists
+  policyTypes: ["Egress"]
+  egress: []
+---
+# The dispatcher: webhooks on 3020 from anywhere (the ingress controller), run callbacks on 3021 from run pods only.
+# Its egress stays open: the API server, Linear, GitLab, AWS, MinIO.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dispatcher
+spec:
+  podSelector:
+    matchLabels:
+      app: steward
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 3020
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: steward.run-id
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: 3021
+  egress:
+    - {}
+---
+# MinIO: S3 from run pods and the dispatcher; out only to DNS and the public issuer (its discovery document and JWKS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minio
+spec:
+  podSelector:
+    matchLabels:
+      app: minio
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: steward.run-id
+                operator: Exists
+        - podSelector:
+            matchLabels:
+              app: steward
+      ports:
+        - protocol: TCP
+          port: 9000
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 10.43.0.0/16 # serviceCidr
+              - 10.42.0.0/16 # podCidr

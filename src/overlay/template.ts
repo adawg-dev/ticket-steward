@@ -77,6 +77,13 @@ const issuesOf = (template: Template): string[] =>
 /** What makes the template unrenderable, as `<file>:<line>: <reason>`; no secret is read. */
 export const overlayTemplateIssues = async (templateDir: string): Promise<string[]> => issuesOf(await readTemplate(templateDir));
 
+/** The template's file count, the secret ids its outbound entries name (sorted, once each) and its issues; no secret is read. */
+export const overlayTemplateSummary = async (templateDir: string): Promise<{ files: number; secretIds: string[]; issues: string[] }> => {
+  const template = await readTemplate(templateDir);
+  const ids = template.flatMap(({ lines }) => lines.flatMap(({ tokens }) => tokens.flatMap(({ entry }) => (entry.kind === "secret" ? [entry.id] : []))));
+  return { files: template.length, secretIds: [...new Set(ids)].sort(), issues: issuesOf(template) };
+};
+
 const randomHex = (bytes: number): string => randomBytes(bytes).toString("hex");
 
 /** `STEWARD_PH_<NAME>_<16 hex>`, NAME being the line's key or, off a `KEY=` line, the secret id without `DEV_`. */

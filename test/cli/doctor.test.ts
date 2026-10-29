@@ -1,13 +1,17 @@
 import { appendFile, chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { join, resolve } from "node:path";
+import { NETWORK_POLICIES } from "../../src/cli/doctorKubernetes.js";
 import { buildProgram } from "../../src/cli/program.js";
+import { loadConfig } from "../../src/config/load.js";
 import type { StdioMcpServerSpec } from "../../src/brain/types.js";
 import type { OrbitExec } from "../../src/orbit/run.js";
 import type { SlotPorts } from "../../src/workspace/slots.js";
 import { fakeSlotRunner, type FakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
+import { MemoryObjectStore } from "../fakes/fakeMinio.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
+import { RUNTIME } from "../k8s/helpers.js";
 import { ExitSignal, makeContext, tmpConfigDir, writeConfig } from "./helpers.js";
 
 let dir: string;
@@ -406,5 +410,71 @@ describe("slot checks", () => {
     const { out } = await slotLines(slotRunner(), { port: 4100 });
     expect(out.startsWith("[fail] config: ")).toBe(true);
     expect(out).toContain("workspace.port was replaced by slots.appPortBase (see docs/ops.md)");
+  });
+});
+
+describe("steward doctor on the kubernetes runtime", () => {
+  it("runs the cluster checks in place of the host's app port, chromium and overlay dir, and starts the probe pod when asked", async () => {
+    await writeFile(join(dir, ".env"), `LINEAR_API_KEY=${API_KEY}\nLINEAR_WEBHOOK_SECRET=whsec\nGITLAB_TOKEN=glpat-token\nANTHROPIC_API_KEY=sk-ant-key\n`);
+    const templateDir = join(dir, "overlay-template");
+    await mkdir(templateDir);
+    await writeFile(join(templateDir, ".env"), "PORT=3000\n");
+    const configPath = await writeConfig(dir, { dataDir: repo.dataDir, overlayDir: repo.overlayDir, fetchUrl: repo.repo, port: await freeTcpPort(), serverPort: await freeTcpPort() });
+    const tokenFile = join(dir, "aws-token");
+    await writeFile(tokenFile, ["{}", JSON.stringify({ iss: "https://issuer.example" }), "sig"].map((part) => Buffer.from(part).toString("base64url")).join("."));
+    vi.stubEnv("AWS_WEB_IDENTITY_TOKEN_FILE", tokenFile);
+    // The file-backed config made Kubernetes; the schema would refuse a .env next to it, which this test does not need.
+    const loadKubernetes: typeof loadConfig = async (opts) => {
+      const loaded = await loadConfig(opts);
+      const { config } = loaded;
+      return {
+        ...loaded,
+        config: { ...config, workspace: { ...config.workspace, overlayTemplateDir: templateDir }, secrets: { source: "aws", region: "eu-west-2", map: {} }, runtime: RUNTIME },
+      };
+    };
+    const created: string[] = [];
+    const issuerFetch: typeof fetch = async (input) => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (url === "https://issuer.example/.well-known/openid-configuration") return Response.json({ issuer: "https://issuer.example", jwks_uri: "https://issuer.example/jwks" });
+      if (url === "https://issuer.example/jwks") return Response.json({ keys: [{}] });
+      return new Response("{}", { status: 200 });
+    };
+    const { ctx, stdout } = makeContext({
+      fetchImpl: issuerFetch,
+      factories: {
+        codehostMcpSpec: fakeCodehostMcpSpec,
+        orbitExec: refusedOrbit,
+        assumeWebIdentity: async () => "arn:aws:sts::1:assumed-role/steward/doctor",
+        minioSignIn: async () => ({ accessKeyId: "AK", secretAccessKey: "SK" }),
+        objectStore: new MemoryObjectStore(),
+        doctorCluster: {
+          networking: { listNamespacedNetworkPolicy: async () => ({ items: NETWORK_POLICIES.map((name) => ({ metadata: { name } })) }) },
+          pods: {
+            createNamespacedPod: async ({ body }) => (created.push(body.metadata?.name ?? ""), body),
+            readNamespacedPod: async () => ({ status: { phase: "Succeeded" } }),
+            readNamespacedPodLog: async () => "probe token: none\nprobe apiserver: unreachable\n",
+            deleteNamespacedPod: async () => ({}),
+          },
+        },
+      },
+    });
+    ctx.loadConfig = loadKubernetes;
+
+    await buildProgram(ctx).parseAsync(["node", "steward", "--config", configPath, "doctor", "--probe-pod"]).catch(() => undefined);
+
+    const lines = stdout().trimEnd().split("\n");
+    const names = lines.map((line) => /^\[\w+\] ([^:]+):/.exec(line)?.[1]);
+    expect(names).not.toContain("overlayDir mode");
+    expect(names).not.toContain("overlay");
+    expect(names).not.toContain("chromium");
+    expect(names).not.toContain("port");
+    expect(lines).toContain("[ok] k3s issuer: https://issuer.example: discovery and JWKS (1 key) answer");
+    expect(lines).toContain(`[ok] aws role: ${RUNTIME.aws.roleArn} assumed as arn:aws:sts::1:assumed-role/steward/doctor`);
+    expect(lines).toContain("[ok] dev secrets: neither the secrets map nor the overlay template names an id");
+    expect(lines).toContain(`[ok] overlay template: ${templateDir}: 1 file(s), 0 outbound secret(s)`);
+    expect(lines).toContain(`[ok] minio sts: signed in at ${RUNTIME.minio.endpoint}; ${RUNTIME.minio.bucket} holds 0 session object(s)`);
+    expect(lines).toContain(`[ok] network policies: ${NETWORK_POLICIES.join(", ")} in ${RUNTIME.namespace}`);
+    expect(lines.at(-1)).toBe("[ok] probe pod: the agent container has no service-account token and cannot reach the API server");
+    expect(created).toHaveLength(1);
   });
 });

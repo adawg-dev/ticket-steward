@@ -11,7 +11,7 @@ import { listProtectedBranches, protectionProblems } from "../codehost/gitlabPro
 import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { codehostMcpSpec } from "../codehost/server.js";
 import type { LoadedConfig } from "../config/load.js";
-import { appPortOf, type SlotsConfig, type StewardConfig } from "../config/schema.js";
+import { appPortOf, kubernetesRuntime, type SlotsConfig, type StewardConfig } from "../config/schema.js";
 import { execOrbit, orbitEnv } from "../orbit/run.js";
 import { orbitRemote, runOrbitTool } from "../orbit/server.js";
 import { listFiles } from "../workspace/files.js";
@@ -20,22 +20,12 @@ import { injectToken, splitCredentials } from "../workspace/mirror.js";
 import { missingOverrideKeys } from "../workspace/overlay.js";
 import { isPortFree } from "../workspace/retention.js";
 import { SlotClient } from "../workspace/slots.js";
+import { flunk, ok, warn, type Check, type CheckResult } from "./check.js";
 import { errorMessage, exitWith, loadFromProgram, println, type CliContext } from "./context.js";
+import { kubernetesChecks, kubernetesDoctorDeps } from "./doctorKubernetes.js";
 import { binPath } from "./paths.js";
 import { withTimeout } from "./probe.js";
 import { openMirror } from "./runtime.js";
-
-type Level = "ok" | "fail" | "warn";
-
-interface CheckResult {
-  level: Level;
-  message: string;
-}
-
-interface Check {
-  name: string;
-  run: () => Promise<CheckResult>;
-}
 
 const HEALTH_TIMEOUT_MS = 3_000;
 const MCP_TIMEOUT_MS = 10_000;
@@ -46,10 +36,6 @@ const SENSITIVE_HOME_DIRS = [".ssh", ".kube"];
 const ViewerResponse = z.object({ data: z.object({ viewer: z.object({ id: z.string(), name: z.string() }) }) });
 const LabelsResponse = z.object({ data: z.object({ issueLabels: z.object({ nodes: z.array(z.object({ name: z.string() })) }) }) });
 const GraphqlErrors = z.object({ errors: z.array(z.object({ extensions: z.object({ code: z.string().optional() }).optional() })) });
-
-const ok = (message: string): CheckResult => ({ level: "ok", message });
-const flunk = (message: string): CheckResult => ({ level: "fail", message });
-const warn = (message: string): CheckResult => ({ level: "warn", message });
 
 const missing = (secrets: Record<string, string | undefined>, keys: string[]): string[] => keys.filter((key) => secrets[key] === undefined || secrets[key] === "");
 
@@ -99,11 +85,22 @@ const secretChecks = ({ config, secrets }: LoadedConfig): Check[] => {
   ];
 };
 
+const overlayCheck = (config: StewardConfig): Check => ({
+  name: "overlay",
+  run: async () => {
+    if (!existsSync(config.workspace.overlayDir)) return flunk(`${config.workspace.overlayDir} missing; run steward overlay sync`);
+    const files = await listFiles(config.workspace.overlayDir);
+    return files.length > 0 ? ok(`${files.length} file(s)`) : flunk("overlay is empty; run steward overlay sync");
+  },
+});
+
+/** On the Kubernetes runtime each run renders its overlay from the template (doctor's "overlay template" check), so overlayDir is unused. */
 const workspaceChecks = (loaded: LoadedConfig): Check[] => {
   const { config } = loaded;
+  const onKubernetes = kubernetesRuntime(config) !== null;
   return [
     modeCheck("dataDir", config.dataDir),
-    modeCheck("overlayDir", config.workspace.overlayDir),
+    ...(onKubernetes ? [] : [modeCheck("overlayDir", config.workspace.overlayDir)]),
     {
       name: "mirror",
       run: async () => {
@@ -114,14 +111,7 @@ const workspaceChecks = (loaded: LoadedConfig): Check[] => {
         return ok(`${mirror.path} fetched; ${config.workspace.baseBranch}@${(await mirror.resolveSha(config.workspace.baseBranch)).slice(0, 7)}`);
       },
     },
-    {
-      name: "overlay",
-      run: async () => {
-        if (!existsSync(config.workspace.overlayDir)) return flunk(`${config.workspace.overlayDir} missing; run steward overlay sync`);
-        const files = await listFiles(config.workspace.overlayDir);
-        return files.length > 0 ? ok(`${files.length} file(s)`) : flunk("overlay is empty; run steward overlay sync");
-      },
-    },
+    ...(onKubernetes ? [] : [overlayCheck(config)]),
     {
       name: "skills",
       run: async () => {
@@ -359,6 +349,16 @@ const portChecks = ({ config }: LoadedConfig, ctx: CliContext): Check[] => {
   ];
 };
 
+const chromiumCheck: Check = {
+  name: "chromium",
+  run: async () => {
+    const browsers = playwrightBrowsersPath();
+    const entries = existsSync(browsers) ? await readdir(browsers) : [];
+    const chromium = entries.filter((entry) => entry.startsWith("chromium"));
+    return chromium.length > 0 ? ok(join(browsers, chromium[0] ?? "")) : flunk(`no chromium under ${browsers}; run npx playwright install chromium`);
+  },
+};
+
 const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
   const { config, configPath } = loaded;
   const healthUrl = `${config.server.publicUrl}/health`;
@@ -389,16 +389,8 @@ const serviceChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => {
       name: "playwright mcp",
       run: async () => ok(createRequire(import.meta.url).resolve("@playwright/mcp/package.json")),
     },
-    {
-      name: "chromium",
-      run: async () => {
-        const browsers = playwrightBrowsersPath();
-        const entries = existsSync(browsers) ? await readdir(browsers) : [];
-        const chromium = entries.filter((entry) => entry.startsWith("chromium"));
-        return chromium.length > 0 ? ok(join(browsers, chromium[0] ?? "")) : flunk(`no chromium under ${browsers}; run npx playwright install chromium`);
-      },
-    },
-    ...portChecks(loaded, ctx),
+    // On Kubernetes, Chromium and the app port are the agent image's and the run pod's; the probe pod covers the run pod.
+    ...(kubernetesRuntime(config) === null ? [chromiumCheck, ...portChecks(loaded, ctx)] : []),
   ];
 };
 
@@ -442,22 +434,27 @@ const runChecks = async (checks: Check[], ctx: CliContext): Promise<boolean> => 
   return failed;
 };
 
-const configChecks = (loaded: LoadedConfig, ctx: CliContext): Check[] => [
-  ...secretChecks(loaded),
-  userCheck,
-  ...workspaceChecks(loaded),
-  ...linearChecks(loaded, ctx),
-  ...implementChecks(loaded, ctx),
-  ...greptileChecks(loaded, ctx),
-  ...serviceChecks(loaded, ctx),
-  ...orbitChecks(loaded, ctx),
-];
+const configChecks = (loaded: LoadedConfig, ctx: CliContext, opts: { probePod: boolean }): Check[] => {
+  const kubernetes = kubernetesRuntime(loaded.config);
+  return [
+    ...secretChecks(loaded),
+    userCheck,
+    ...workspaceChecks(loaded),
+    ...linearChecks(loaded, ctx),
+    ...implementChecks(loaded, ctx),
+    ...greptileChecks(loaded, ctx),
+    ...serviceChecks(loaded, ctx),
+    ...orbitChecks(loaded, ctx),
+    ...(kubernetes === null ? [] : kubernetesChecks(loaded, kubernetes, kubernetesDoctorDeps(ctx, loaded, kubernetes), opts)),
+  ];
+};
 
 export const registerDoctor = (program: Command, ctx: CliContext): void => {
   program
     .command("doctor")
     .description("run every health check, report all of them, exit 1 if any fails")
-    .action(async () => {
+    .option("--probe-pod", "on the kubernetes runtime: start a throwaway run-like pod and check its agent container holds no token and cannot reach the API server")
+    .action(async (opts: { probePod?: boolean }) => {
       let loaded: LoadedConfig;
       try {
         loaded = await loadFromProgram(program, ctx);
@@ -467,6 +464,6 @@ export const registerDoctor = (program: Command, ctx: CliContext): void => {
         return exitWith(ctx, 1);
       }
       println(ctx, `[ok] config: ${loaded.configPath}`);
-      if (await runChecks(configChecks(loaded, ctx), ctx)) exitWith(ctx, 1);
+      if (await runChecks(configChecks(loaded, ctx, { probePod: opts.probePod === true }), ctx)) exitWith(ctx, 1);
     });
 };

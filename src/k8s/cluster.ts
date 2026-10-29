@@ -1,4 +1,5 @@
-import { Attach, BatchV1Api, CoreV1Api, KubeConfig, Watch, type V1Job, type V1Pod } from "@kubernetes/client-node";
+import { Attach, BatchV1Api, CoreV1Api, KubeConfig, NetworkingV1Api, Watch, type V1Job, type V1Pod } from "@kubernetes/client-node";
+import type { DoctorCluster } from "../cli/doctorKubernetes.js";
 import type { PodsApi } from "./chat.js";
 import type { ConfigMapsApi, JobsApi, JobWatch } from "./executor.js";
 
@@ -27,6 +28,13 @@ export const clusterApis = (namespace: string): { batch: JobsApi; core: ConfigMa
         onDone,
       ),
   };
+};
+
+/** What `steward doctor` reads of the namespace (its NetworkPolicies) and the probe pod it starts there. */
+export const doctorApis = (): DoctorCluster => {
+  const config = new KubeConfig();
+  config.loadFromDefault();
+  return { networking: config.makeApiClient(NetworkingV1Api), pods: config.makeApiClient(CoreV1Api) };
 };
 
 /** Attaches this terminal to a container's TTY until the container's process exits or the connection drops. */

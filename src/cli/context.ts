@@ -14,6 +14,7 @@ import type { ObjectStore } from "../sessions/store.js";
 import type { TicketBundle } from "../tracker/types.js";
 import type { Tracker } from "../tracker/types.js";
 import type { SlotRunner } from "../workspace/slots.js";
+import type { AssumeWebIdentity, DoctorCluster, MinioSignIn } from "./doctorKubernetes.js";
 
 export interface TemplateListing {
   scope: string;
@@ -40,9 +41,9 @@ export interface CliFactories {
   slotSystemdSocket?: string;
   /** Stands in for the Orbit CLI in doctor's Orbit checks. */
   orbitExec?: OrbitExec;
-  /** Stands in for Secrets Manager in `render-overlay`. */
+  /** Stands in for Secrets Manager in `render-overlay` and doctor's Kubernetes checks. */
   secretFetcher?: SecretFetcher;
-  /** Stands in for the MinIO bucket in `sessions pull|push|sync`. */
+  /** Stands in for the MinIO bucket in `sessions pull|push|sync` and doctor's Kubernetes checks. */
   objectStore?: ObjectStore;
   /** Stands in for the interactive Claude Code process `steward chat` runs; resolves to its exit code. */
   spawnInteractive?: SpawnInteractive;
@@ -50,6 +51,10 @@ export interface CliFactories {
   cluster?: { batch: JobsApi; core: ConfigMapsApi; pods?: PodsApi; watch?: JobWatch };
   /** Stands in for `steward chat`'s attach to the run pod's TTY on the Kubernetes runtime. */
   attachTty?: AttachTty;
+  /** Stand in for the cluster, AWS STS and MinIO STS in doctor's Kubernetes checks. */
+  doctorCluster?: DoctorCluster;
+  assumeWebIdentity?: AssumeWebIdentity;
+  minioSignIn?: MinioSignIn;
 }
 
 export type SpawnInteractive = (command: string, args: string[], options: { cwd: string; env: Record<string, string> }) => Promise<number>;

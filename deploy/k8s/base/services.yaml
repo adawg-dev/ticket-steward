@@ -1,0 +1,26 @@
+# Webhooks and /health; the cluster's ingress routes the public URL here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: steward
+spec:
+  selector:
+    app: steward
+  ports:
+    - name: http
+      port: 3020
+      targetPort: 3020
+---
+# The run pods' callbacks (runtime.callbackUrl: http://steward-internal.ticket-steward.svc:3021). The NetworkPolicy
+# admits run pods only. The admin API (3022) listens on the pod's loopback and has no Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: steward-internal
+spec:
+  selector:
+    app: steward
+  ports:
+    - name: internal
+      port: 3021
+      targetPort: 3021

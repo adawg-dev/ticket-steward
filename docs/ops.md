@@ -746,6 +746,146 @@ queries): Orbit is enabled per user, and the token's bot user is not one. Until 
 `orbit remote` and the `orbit_*` tools return that error; the local graph works regardless. `glab orbit` with a
 person's own login is unaffected.
 
+### 1.13 Running on k3s
+
+The Kubernetes runtime (`runtime.kind: "kubernetes"`): the steward is a dispatcher Deployment, and each run (implement,
+fix, chat) is a Job whose pod has an agent container with no credential, plus keyproxy, tools, egress, Postgres,
+Redis, RabbitMQ and session-sync sidecars. Secrets come from AWS Secrets Manager through the pods' projected
+service-account tokens, and Claude Code sessions live in MinIO in the cluster. The design is
+`docs/superpowers/specs/2026-10-28-k3s-steward-design.md`; the manifests are `deploy/k8s/base` (kustomize).
+
+| Object | Image | Role |
+| --- | --- | --- |
+| Deployment `steward` (1 replica, `Recreate`) | `deploy/images/steward.Dockerfile` | `steward serve`: webhooks on 3020, run callbacks on 3021, the admin API on `127.0.0.1:3022`; SQLite and the mirror on the PVC `steward-data` (Ceph RBD, 20 Gi) |
+| StatefulSet `minio` | `deploy/images/minio.Dockerfile` | the `steward-sessions` bucket on a Ceph RBD volume (50 Gi); STS sign-in with the k3s issuer |
+| Job `run-<runId>` per run | agent: `deploy/images/agent.Dockerfile`; sidecars: the steward image, `ops/egress/Dockerfile`, `runtime.images.postgres/redis/rabbitmq` | one run; the agent container gets only the runner token, which can post this run's report and nothing else |
+
+**k3s.** The service-account issuer must be a public HTTPS URL that AWS (and MinIO) can fetch, so start every k3s
+server with:
+
+```bash
+--kube-apiserver-arg=service-account-issuer=https://k3s-oidc.example.com
+--kube-apiserver-arg=service-account-jwks-uri=https://k3s-oidc.example.com/openid/v1/jwks
+```
+
+Changing the issuer invalidates the tokens already issued; pods get new ones as the kubelet rotates them (within an
+hour). k3s enforces NetworkPolicy with its embedded kube-router unless it was started with
+`--disable-network-policy`. The manifests use a StorageClass named `ceph-rbd` (ReadWriteOnce, replicated); rename
+it in `dispatcher.yaml` and `minio.yaml` if yours differs.
+
+**Publishing discovery.** The API server serves the discovery document and the JWKS only to authenticated clients,
+so copy both to the issuer URL's static host (any HTTPS server; content type `application/json`):
+
+```bash
+kubectl get --raw /.well-known/openid-configuration > openid-configuration
+kubectl get --raw /openid/v1/jwks > jwks
+# upload as https://k3s-oidc.example.com/.well-known/openid-configuration and …/openid/v1/jwks
+curl -fsS https://k3s-oidc.example.com/.well-known/openid-configuration   # its "issuer" must equal the URL above
+```
+
+Republish the JWKS whenever the service-account signing key changes (a k3s key rotation); until then every
+sign-in fails with an invalid token.
+
+**IAM.** `deploy/aws/steward-role.tf.example` registers the issuer as an OIDC provider (client id
+`sts.amazonaws.com`) and creates the role `ticket-steward`, trusted by `system:serviceaccount:ticket-steward:steward-dispatcher`
+and `…:steward-run` and allowed `secretsmanager:GetSecretValue` on `DEV_*` in the region. Copy it into your
+Terraform, set `k3s_issuer_url` and `region`, and `terraform apply`; its output `steward_role_arn` is
+`runtime.aws.roleArn` and `awsRoleArn` below. The steward's own tokens are `DEV_` entries like any other (e.g.
+`DEV_STEWARD_LINEAR_API_KEY`, `DEV_STEWARD_GITLAB_TOKEN`), each a string or a one-key JSON object, as kickoff's
+`preview.py` reads them. No access key is created anywhere.
+
+**Images.** Build from the repo root and push to a registry the nodes pull from:
+
+```bash
+docker build -f deploy/images/steward.Dockerfile -t "$REGISTRY/ticket-steward/steward:$TAG" .
+IMAGE="$REGISTRY/ticket-steward/agent:$TAG" deploy/images/build-agent.sh ~/kickoff dev   # git -C ~/kickoff fetch first
+docker build -t "$REGISTRY/ticket-steward/egress:$TAG" ops/egress
+docker build -f deploy/images/minio.Dockerfile -t "$REGISTRY/ticket-steward/minio:RELEASE.2025-10-15T17-29-55Z" .
+```
+
+- The steward image is the Compose image without Chromium, pnpm or psql; it keeps git, `glab` and Orbit for the
+  tools sidecar and doctor.
+- The agent image carries the steward (for `steward run-pod`), Claude Code from the Agent SDK, Node 24, pnpm
+  11.13.0, git, psql, Playwright's Chromium, `glab` 1.125.0 and Orbit 0.161.0 with the checksums of `Dockerfile`, and
+  a pnpm store prefetched (`pnpm fetch`) from the lockfile and workspace file of kickoff's base branch, taken from
+  the git ref, not the working tree. Rebuild it when kickoff's lockfile changes, or on a schedule; a run's
+  `pnpm install` then fetches only the difference. Nothing a run writes reaches another run.
+- MinIO's open-source server is archived and no longer published as an image or binary, so its image is built from
+  the last release tags of `minio` and `mc`, pinned by commit. It makes a new root password on each start, uses it to
+  create the bucket and the `steward-sessions` policy (`deploy/k8s/base/minio-policy.json`), and keeps it in memory
+  only; no MinIO key exists outside that container.
+
+**Config.** In `steward.config.ts`:
+
+```ts
+secrets: { source: "aws", region: "eu-west-2", map: { LINEAR_API_KEY: "DEV_STEWARD_LINEAR_API_KEY", GITLAB_TOKEN: "DEV_STEWARD_GITLAB_TOKEN", /* … */ } },
+workspace: { /* … */ overlayTemplateDir: "/etc/ticket-steward/overlay-template" },
+runtime: {
+  kind: "kubernetes",
+  namespace: "ticket-steward",
+  images: { steward: "…/steward:TAG", agent: "…/agent:TAG", egress: "…/egress:TAG",
+            postgres: "timescale/timescaledb-ha:pg17-ts2.27-all", redis: "redis:7-alpine", rabbitmq: "rabbitmq:4.2.0-management" },
+  maxConcurrent: 2,
+  callbackUrl: "http://steward-internal.ticket-steward.svc:3021",
+  minio: { endpoint: "http://minio.ticket-steward.svc:9000" },
+  aws: { roleArn: "arn:aws:iam::<account>:role/ticket-steward", region: "eu-west-2" },
+  resources: { agent: { cpu: "4", memory: "8Gi" } },
+  egressAllowCidrs: [],
+},
+```
+
+The config dir goes into the ConfigMap `steward-config`, which the dispatcher and every run pod mount read-only at
+`/etc/ticket-steward`: `kubectl -n ticket-steward create configmap steward-config --from-file=<config dir>`
+(re-create it and restart the Deployment after a change). ConfigMap keys are flat, so the dir's files sit side by
+side; `--from-file` of a dir skips its subdirectories. Open item for the cut-over: the overlay template's nested files
+(`apps/<app>/.env`) need the run pods' `config` volume to map keys to paths (`items`), which it does not do yet. Secrets come only from Secrets Manager (config load requires `secrets.source: "aws"` here); keep no `.env`
+in the config dir, since run pods mount it.
+
+**Apply.** Set the `steward-cluster` literals in `deploy/k8s/base/kustomization.yaml` (or an overlay): `issuer` (the
+URL above, no trailing slash), `awsRoleArn`, `awsRegion`, and `serviceCidr`/`podCidr` if k3s does not use its
+defaults (`10.43.0.0/16`, `10.42.0.0/16`), which kustomize writes into the NetworkPolicies' except lists. Set the
+`images` to what you pushed. Then:
+
+```bash
+kubectl apply -k deploy/k8s/base
+kubectl -n ticket-steward create configmap steward-config --from-file=<config dir>
+kubectl -n ticket-steward exec deploy/steward -- steward mirror init
+kubectl -n ticket-steward exec deploy/steward -- steward doctor --probe-pod
+```
+
+Route the public webhook URL to the Service `steward` port 3020 with your ingress. The NetworkPolicies
+(`networkpolicy.yaml`) deny everything in the namespace that they do not allow:
+
+- run pods reach DNS, MinIO's 9000, the dispatcher's 3021 and the internet, never the RFC1918 ranges or the
+  cluster's service and pod CIDRs, so not the API server, other run pods or the LAN;
+- a private range a run must reach goes in `run-pods-allow-cidrs` and in `runtime.egressAllowCidrs`, kept equal;
+- only run pods reach the dispatcher's 3021; anyone reaches its 3020;
+- MinIO answers run pods and the dispatcher, and reaches out only to the public issuer;
+- only the dispatcher, whose egress is open, reaches the API server. Its role (`rbac.yaml`) covers Jobs,
+  ConfigMaps, pods, attach, exec and logs in this namespace, and reading NetworkPolicies, nothing cluster-scoped.
+
+**Doctor** on this runtime skips the host-only checks (`overlayDir`, the overlay, Chromium, the app port) and adds:
+
+- `k3s issuer`: the issuer claim of the dispatcher's AWS token is a public HTTPS URL whose discovery document names
+  it and whose JWKS has keys;
+- `aws role`: `runtime.aws.roleArn` can be assumed with that token;
+- `dev secrets`: every id in `secrets.map` and the overlay template is present and not empty (ids only are printed);
+- `overlay template`: no `{{signed:…}}` entry or other issue;
+- `minio sts`: the dispatcher signs in to MinIO with its `minio`-audience token and lists `sessions/`;
+- `network policies`: the five policies of `networkpolicy.yaml` exist;
+- `probe pod` (with `--probe-pod`): a throwaway pod like a run pod's agent container (the `steward-run` account, the
+  run-id label, the agent image) reports no token under `/var/run/secrets` and no answer from the API server; it is
+  deleted afterwards.
+
+**Troubleshooting.**
+
+- `aws role` fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`: the trust policy's `sub` or `aud`
+  does not match, or the provider URL differs from the token's `iss` (a trailing slash counts).
+- `minio sts` fails with `InvalidIdentityToken`: MinIO could not fetch the issuer's discovery or JWKS (its egress is
+  public only), or the token's audience is not `minio`.
+- `probe pod` reaches the API server: NetworkPolicy is not enforced (k3s with `--disable-network-policy`, or another
+  CNI without policy support), or a node's public IP serves 6443; restrict that at the node firewall.
+
 ## 2. Why the overlay holds sandbox credentials
 
 The brain is a coding agent with shell access inside a real checkout, with real env files,
