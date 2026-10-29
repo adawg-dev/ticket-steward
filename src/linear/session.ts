@@ -2,6 +2,7 @@ import { renderMedia } from "../codehost/media.js";
 import type { StoredImplement } from "../implement/result.js";
 import { logger } from "../log.js";
 import type { RunChannels } from "../run/channel.js";
+import { STOPPED_JOB_ERROR } from "../run/execute.js";
 import type { RunHooks } from "../run/executor.js";
 import type { Settings } from "../settings/schema.js";
 import type { Stores } from "../store/index.js";
@@ -222,7 +223,7 @@ export const mergeRequestOpened = async (deps: LinearPanelDeps, issueId: string,
 /** What answering intake needs besides the panel: the jobs (a steer that finds no run becomes a chat) and the run channels. */
 export interface IntakeAnswerDeps extends LinearPanelDeps {
   stores: Pick<Stores, "agentSessions" | "jobs">;
-  channels?: Pick<RunChannels, "active" | "steer" | "stop">;
+  channels?: Pick<RunChannels, "active" | "steer" | "stop" | "stopWhenOpened">;
 }
 
 /** An agent API that posts nothing: steering and stopping still act on the run when Linear is not wired. */
@@ -241,6 +242,35 @@ type SessionEvent = Extract<LinearEvent, { kind: "session.created" | "session.pr
 const chatInstead = (deps: IntakeAnswerDeps, event: Extract<LinearEvent, { kind: "session.prompted" }>): void => {
   const { issueId, identifier, teamKey, sessionId } = event;
   deps.stores.jobs.enqueue({ kind: "linear", run: "chat", issueId, identifier, teamKey, sessionId, message: event.body, author: event.authorName });
+};
+
+/** The job kinds that run a brain, and so answer a stop themselves once their run opens. */
+const BRAIN_KINDS: readonly string[] = ["implement", "fix", "chat"];
+
+/**
+ * Stops all of the ticket's work: the open run through its channel; a queued implement or chat is failed before it
+ * runs; a queued fix, or a running job whose run has not opened its channel yet (or has ended, and it is publishing),
+ * gets a stop held for its run. True when a run will answer the stop itself; else `canceled` says whether a queued job
+ * was failed here.
+ */
+const stopTicket = (deps: IntakeAnswerDeps, issueId: string, runId: string | null): { runAnswers: boolean; canceled: boolean } => {
+  const { jobs } = deps.stores;
+  const holdStop = (jobId: number): boolean => {
+    if (deps.channels === undefined) return false;
+    deps.channels.stopWhenOpened(jobId);
+    return true;
+  };
+  let runAnswers = runId !== null && deps.channels?.stop(runId) === true;
+  let canceled = false;
+  for (const job of jobs.queuedForIssue(issueId)) {
+    if (!BRAIN_KINDS.includes(job.kind)) continue;
+    // A fix belongs to its loop: its run stopping hands the loop back, which failing it here would not.
+    if (job.kind !== "fix" && jobs.cancelQueued(job.id, STOPPED_JOB_ERROR)) canceled = true;
+    else runAnswers = holdStop(job.id) || runAnswers;
+  }
+  const running = jobs.runningForIssue(issueId);
+  if (!runAnswers && running !== null && BRAIN_KINDS.includes(running.kind)) runAnswers = holdStop(running.id);
+  return { runAnswers, canceled };
 };
 
 /** The panel's first word on a session event, or a steer or stop handed to the ticket's open run. */
@@ -264,10 +294,13 @@ const answerSession = async (deps: IntakeAnswerDeps, api: LinearAgentApi, event:
       if (runId !== null && deps.channels?.steer(runId, steerText(event.authorName, event.body)) === true) return post({ type: "thought", body: PANEL_TEXT.steered });
       chatInstead(deps, event);
       return post({ type: "thought", body: PANEL_TEXT.reading });
-    case "stop":
-      // A running run answers the stop itself ("Stopped. Where I got to: …"); with none, this is the one response.
-      if (runId !== null && deps.channels?.stop(runId) === true) return;
-      return post({ type: "response", body: PANEL_TEXT.nothingToStop });
+    case "stop": {
+      // A run answers the stop itself ("Stopped. Where I got to: …"), or its job its own last word if the stop came too
+      // late; without one, this is the one response.
+      const { runAnswers, canceled } = stopTicket(deps, event.issueId, runId);
+      if (runAnswers) return;
+      return post(canceled ? stoppedResponse(null, null) : { type: "response", body: PANEL_TEXT.nothingToStop });
+    }
     default:
       return;
   }

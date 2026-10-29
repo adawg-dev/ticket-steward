@@ -189,6 +189,8 @@ const CLAIM = "UPDATE jobs SET status = 'running', attempts = attempts + 1, wake
 export class JobStore {
   private readonly insert;
   private readonly selectQueued;
+  private readonly selectQueuedForIssue;
+  private readonly cancelOne;
   private readonly existsSucceeded;
   private readonly claimOldest;
   private readonly claimOne;
@@ -232,6 +234,11 @@ export class JobStore {
     );
     this.selectQueued = db.prepare<[string, JobKind], JobRow>(
       "SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' AND kind = ? ORDER BY id LIMIT 1",
+    );
+    this.selectQueuedForIssue = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE issue_id = ? AND status = 'queued' ORDER BY id");
+    // Only a job still queued: one a worker claimed meanwhile is running and must be stopped through its run.
+    this.cancelOne = db.prepare<[string, string, number]>(
+      "UPDATE jobs SET status = 'failed', error = ?, finished_at = ?, not_before = NULL, wake_requested = 0 WHERE id = ? AND status = 'queued'",
     );
     this.existsSucceeded = db.prepare<[string, JobKind], { found: number }>(
       // A handed-back implement job also finishes succeeded; only one that pushed a branch implemented the ticket.
@@ -360,6 +367,16 @@ export class JobStore {
   findQueued(issueId: string, kind: JobKind = "implement"): Job | null {
     const row = this.selectQueued.get(issueId, kind);
     return row === undefined ? null : toJob(row);
+  }
+
+  /** The ticket's queued jobs, oldest first. */
+  queuedForIssue(issueId: string): Job[] {
+    return this.selectQueuedForIssue.all(issueId).map(toJob);
+  }
+
+  /** Fails a job that is still queued, so it never runs; false when it is not queued (a worker may have just claimed it). */
+  cancelQueued(id: number, error: string): boolean {
+    return this.cancelOne.run(error, nowIso(), id).changes === 1;
   }
 
   hasSucceeded(issueId: string, kind: JobKind = "implement"): boolean {

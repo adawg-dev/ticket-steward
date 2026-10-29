@@ -87,7 +87,7 @@ export const localExecutor = (deps: PipelineDeps): RunExecutor => ({
     const runDeps: PipelineDeps = signal === undefined ? deps : { ...deps, signal };
     const { channels } = deps;
     const onLine = hooks.onLine ?? (() => undefined);
-    channels?.open(spec.runId, onLine, spec.issueId);
+    channels?.open(spec.runId, onLine, spec.issueId, spec.jobId);
     const steering = channels === undefined ? null : drainChannel(channels, spec.runId);
     const env = buildBrainEnv(deps.secrets, deps.config.brain, jobPort(deps), sessionsDir(deps.config), deps.config.implement?.commitAuthor);
     const workspace: { worktree: Worktree | null } = { worktree: null };

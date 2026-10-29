@@ -18,15 +18,27 @@ interface Channel {
 /**
  * The dispatcher's side of every open run: the brain's (redacted) message lines go out to the run's `onLine`, and steer
  * and stop commands queue until the executor takes them (`next`). The local executor drains it into the detached runner;
- * a run pod reaches it through the internal run API. Commands for a run that is not open are refused, not queued.
+ * a run pod reaches it through the internal run API. Commands for a run that is not open are refused, not queued; a
+ * stop for a job whose run has not opened yet is held for it (`stopWhenOpened`).
  */
 export class RunChannels {
   private readonly channels = new Map<string, Channel>();
+  /** Jobs stopped before their run opened a channel (queued, or claimed and still preparing): their run opens stopped. */
+  private readonly pendingStops = new Set<number>();
 
-  /** Opens the run's channel; `issueId` lets `active` find it. Reopening keeps nothing of an earlier channel. */
-  open(runId: string, onLine: (line: string) => void, issueId: string | null = null): void {
+  /**
+   * Opens the run's channel; `issueId` lets `active` find it. Reopening keeps nothing of an earlier channel. A stop held
+   * for `jobId` is queued at once, so the brain stops as soon as it starts.
+   */
+  open(runId: string, onLine: (line: string) => void, issueId: string | null = null, jobId: number | null = null): void {
     this.close(runId);
-    this.channels.set(runId, { issueId, onLine, queue: [], waiter: null });
+    const stopped = jobId !== null && this.pendingStops.delete(jobId);
+    this.channels.set(runId, { issueId, onLine, queue: stopped ? [{ type: "stop" }] : [], waiter: null });
+  }
+
+  /** Holds a stop for the job until its run opens; a job that ends without opening a run never takes it. */
+  stopWhenOpened(jobId: number): void {
+    this.pendingStops.add(jobId);
   }
 
   /** Ends the run's channel: a waiting `next` answers empty, and queued commands are dropped. */

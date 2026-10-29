@@ -30,7 +30,7 @@ export interface ServerDeps {
   /** Set with `greptile` or `chat` on GitLab: chat intake checks a note author's access and answers notes it cannot serve. */
   gitlab?: GitLabMrApi;
   /** The open runs' channels: a Linear prompt steers the ticket's open run, and its stop stops it. */
-  channels?: Pick<RunChannels, "active" | "steer" | "stop">;
+  channels?: Pick<RunChannels, "active" | "steer" | "stop" | "stopWhenOpened">;
   /** Scrubs what the panel is told; the run redactor in `serve`. */
   redactor?: { redact(text: string): string };
 }

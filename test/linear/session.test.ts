@@ -7,6 +7,7 @@ import { linearIntake } from "../../src/linear/intake.js";
 import { logger } from "../../src/log.js";
 import { answerLinearIntake, failureContent, implementFinish, linearSessionFor, mergeRequestOpened, PANEL_TEXT, steerText, stoppedResponse } from "../../src/linear/session.js";
 import { RunChannels } from "../../src/run/channel.js";
+import { STOPPED_JOB_ERROR } from "../../src/run/execute.js";
 import { seedSettings, type Settings } from "../../src/settings/schema.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { StewardConfig } from "../../src/config/schema.js";
@@ -191,6 +192,55 @@ describe("answerLinearIntake", () => {
     expect(result).toEqual({ action: "stop" });
     expect(linear.activities().map((call) => call.content)).toEqual([{ type: "response", body: PANEL_TEXT.nothingToStop }]);
     expect(stores.jobs.list({ limit: 10 })).toEqual([]);
+  });
+
+  it("fails an implement still queued when the stop comes, and answers once that it stopped", async () => {
+    const delegation = created();
+    const { jobId } = await linearIntake(intakeDeps(), delegation);
+    const stop = prompted("", true);
+    const channels = new RunChannels();
+    await answerLinearIntake({ ...panelDeps(), channels }, stop, await linearIntake(intakeDeps(), stop));
+    expect(stores.jobs.get(jobId ?? 0)).toMatchObject({ status: "failed", error: STOPPED_JOB_ERROR });
+    expect(stores.jobs.claimNext()).toBeNull();
+    expect(linear.activities().map((call) => call.content).at(-1)).toEqual(stoppedResponse(null, null));
+    expect(linear.activities().map((call) => call.content)).not.toContainEqual({ type: "response", body: PANEL_TEXT.nothingToStop });
+    // Nothing is held for it: the job never opens a run.
+    channels.open(`${jobId ?? 0}-1`, () => undefined, "issue-1", jobId ?? 0);
+    expect(await channels.next(`${jobId ?? 0}-1`, 0)).toEqual([]);
+  });
+
+  it("holds a stop for an implement claimed but not yet running its brain, and leaves the answer to its run", async () => {
+    const delegation = created();
+    const { jobId } = await linearIntake(intakeDeps(), delegation);
+    expect(stores.jobs.claimNext()?.id).toBe(jobId);
+    const channels = new RunChannels();
+    const stop = prompted("", true);
+    await answerLinearIntake({ ...panelDeps(), channels }, stop, await linearIntake(intakeDeps(), stop));
+    expect(stores.jobs.get(jobId ?? 0)?.status).toBe("running");
+    expect(linear.activities().map((call) => call.content.type)).not.toContain("response");
+    // The executor opens the run's channel: the brain takes the stop as soon as it starts.
+    channels.open(`${jobId ?? 0}-1`, () => undefined, "issue-1", jobId ?? 0);
+    expect(await channels.next(`${jobId ?? 0}-1`, 0)).toEqual([{ type: "stop" }]);
+  });
+
+  it("stops the open run and fails the chat queued behind it, leaving the one answer to the run", async () => {
+    const channels = new RunChannels();
+    channels.open("7-1", () => undefined, "issue-1", 7);
+    const chatId = stores.jobs.enqueue({ kind: "linear", run: "chat", ...ticket, sessionId: "session-1", message: "and the docs?", author: "Ada" });
+    await answerLinearIntake({ ...panelDeps(), channels }, prompted("", true), { action: "stop" });
+    expect(await channels.next("7-1", 0)).toEqual([{ type: "stop" }]);
+    expect(stores.jobs.get(chatId)).toMatchObject({ status: "failed", error: STOPPED_JOB_ERROR });
+    expect(linear.calls).toEqual([]);
+  });
+
+  it("holds a stop for a queued fix, whose run hands its loop back, instead of failing it", async () => {
+    const fixId = stores.jobs.enqueue({ kind: "loop", step: "fix", loopId: 3, ...ticket });
+    const channels = new RunChannels();
+    await answerLinearIntake({ ...panelDeps(), channels }, prompted("", true), { action: "stop" });
+    expect(stores.jobs.get(fixId)?.status).toBe("queued");
+    expect(linear.calls).toEqual([]);
+    channels.open(`${fixId}-1`, () => undefined, "issue-1", fixId);
+    expect(await channels.next(`${fixId}-1`, 0)).toEqual([{ type: "stop" }]);
   });
 
   it("says the message waits while a person holds the ticket in a terminal session", async () => {

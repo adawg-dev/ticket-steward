@@ -69,6 +69,20 @@ describe("RunChannels", () => {
     channels.close("7-1");
     expect(channels.active("issue-1")).toBeNull();
   });
+
+  it("holds a stop for a job until its run opens, then queues it once, for that job only", async () => {
+    const channels = new RunChannels();
+    channels.stopWhenOpened(7);
+
+    channels.open("8-1", () => undefined, "issue-2", 8);
+    expect(await channels.next("8-1", 0)).toEqual([]);
+
+    channels.open("7-1", () => undefined, "issue-1", 7);
+    expect(await channels.next("7-1", 0)).toEqual([{ type: "stop" }]);
+
+    channels.open("7-2", () => undefined, "issue-1", 7);
+    expect(await channels.next("7-2", 0)).toEqual([]);
+  });
 });
 
 describe("drainChannel", () => {

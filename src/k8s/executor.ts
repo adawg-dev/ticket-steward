@@ -293,7 +293,7 @@ export const kubernetesExecutor = (p: {
       let run = runs.get(spec.runId);
       if (run !== undefined && !run.adopted) throw new Error(`run ${spec.runId} is already executing`);
       // Open before the pod exists: it may post lines, or someone steer it, as soon as it starts.
-      p.channels?.open(spec.runId, hooks.onLine ?? (() => undefined), spec.issueId);
+      p.channels?.open(spec.runId, hooks.onLine ?? (() => undefined), spec.issueId, spec.jobId);
       let result: { report: RunReport; work: WorkReport };
       try {
         if (run !== undefined) run.adopted = false;
