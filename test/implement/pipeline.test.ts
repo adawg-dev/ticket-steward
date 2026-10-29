@@ -225,7 +225,7 @@ describe("runImplement", () => {
 
     const input = brain.calls[0];
     expect(input === undefined ? null : pushTargetOf(input)).toEqual({
-      jobId: ctx.jobId, worktreePath: input?.workspacePath, identifier: "API-1", issueId: "issue-1", mode: "create", branch: null,
+      jobId: ctx.jobId, worktreePath: input?.workspacePath, identifier: "API-1", issueId: "issue-1", title: "Adapter drops the last chunk", mode: "create", branch: null,
       baseSha: await git(repo.repo, ["rev-parse", "main"]), loopId: null, port,
     });
   });

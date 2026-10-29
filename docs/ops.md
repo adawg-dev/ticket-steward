@@ -1046,7 +1046,7 @@ journalctl -u ticket-steward --since -1h
 curl -s https://steward.example.com/health | jq
 steward doctor
 steward jobs --status publish_failed
-steward templates                 # the Linear issue templates, for allowlisted teams
+steward templates                 # the Linear issue templates, for allowlisted teams (through serve's admin API)
 ```
 
 Stopping: `systemctl stop ticket-steward` sends SIGTERM. The worker stops claiming,

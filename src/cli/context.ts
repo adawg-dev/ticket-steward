@@ -4,23 +4,20 @@ import type { Brain } from "../brain/types.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { codehostMcpSpec } from "../codehost/server.js";
 import type { CodeHost } from "../codehost/types.js";
-import { loadConfig, type LoadedConfig, type SecretName } from "../config/load.js";
+import { loadConfig, SecretsSchema, type LoadedConfig, type SecretName } from "../config/load.js";
 import type { SecretFetcher } from "../config/secretSource.js";
 import type { PodsApi } from "../k8s/chat.js";
 import type { AttachTty } from "../k8s/cluster.js";
 import type { ConfigMapsApi, JobsApi, JobWatch } from "../k8s/executor.js";
 import type { OrbitExec } from "../orbit/run.js";
 import type { ObjectStore } from "../sessions/store.js";
-import type { TicketBundle } from "../tracker/types.js";
-import type { Tracker } from "../tracker/types.js";
+import type { TemplateListing, Tracker } from "../tracker/types.js";
 import type { SlotRunner } from "../workspace/slots.js";
 import type { AssumeWebIdentity, DoctorCluster, MinioSignIn } from "./doctorKubernetes.js";
 
-export interface TemplateListing {
-  scope: string;
-  template: TicketBundle["templates"][number];
-}
+export type { TemplateListing } from "../tracker/types.js";
 
+/** The dispatcher's template listing behind the admin API's `/api/templates`. */
 export interface TemplateLister {
   listTemplates(teamKeys: string[]): Promise<TemplateListing[]>;
 }
@@ -93,15 +90,23 @@ export const fail = (ctx: CliContext, message: string, code = 1): never => {
 
 export const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+/** Every secret but the Linear app's: the CLI never holds a Linear credential, so its commands load these at most. */
+export const CLI_SECRET_NAMES: readonly SecretName[] = SecretsSchema.keyof().options.filter((name) => !name.startsWith("LINEAR_"));
+
 /**
  * Loads the config named by the root `--config` option, or the one in the current directory; `withoutSecrets` reads
- * none, `secrets` only those names.
+ * none, `secrets` only those names, and by default `CLI_SECRET_NAMES`. Only `linear` (serve, which holds the Linear
+ * token, and doctor, which checks the app's credentials) reads every secret.
  */
-export const loadFromProgram = (program: Command, ctx: CliContext, opts: { withoutSecrets?: boolean; secrets?: readonly SecretName[] } = {}): Promise<LoadedConfig> => {
+export const loadFromProgram = (
+  program: Command,
+  ctx: CliContext,
+  opts: { withoutSecrets?: boolean; secrets?: readonly SecretName[]; linear?: boolean } = {},
+): Promise<LoadedConfig> => {
   const { config } = program.opts<{ config?: string }>();
+  if (opts.withoutSecrets === true) return ctx.loadConfig({ ...(config === undefined ? {} : { configPath: config }), withoutSecrets: true });
   return ctx.loadConfig({
     ...(config === undefined ? {} : { configPath: config }),
-    ...(opts.withoutSecrets === true ? { withoutSecrets: true } : {}),
-    ...(opts.secrets === undefined ? {} : { secretNames: opts.secrets }),
+    ...(opts.linear === true ? {} : { secretNames: opts.secrets ?? CLI_SECRET_NAMES }),
   });
 };

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { kubernetesRuntime, type StewardConfig } from "../config/schema.js";
 import { ADMIN_HOST, ADMIN_PORT, ADMIN_TOKEN_FILE } from "../server/admin.js";
 import { SettingsSchema, type Settings, type SettingsPatch } from "../settings/schema.js";
-import type { TicketBundle } from "../tracker/types.js";
+import type { TemplateListing, TicketBundle } from "../tracker/types.js";
 import type { CliContext } from "./context.js";
 
 const PROBE_TIMEOUT_MS = 2_000;
@@ -70,6 +70,11 @@ const TicketBundleSchema: z.ZodType<TicketBundle> = z.object({
   templates: z.array(z.object({ name: z.string(), description: z.string(), body: z.string(), requiredFields: z.array(z.string()) })),
 });
 
+const TemplateListingSchema: z.ZodType<TemplateListing> = z.object({
+  scope: z.string(),
+  template: z.object({ name: z.string(), description: z.string(), body: z.string(), requiredFields: z.array(z.string()) }),
+});
+
 const ChatOpenedSchema = z.object({ runId: z.string(), pod: z.string(), container: z.string(), leaseId: z.number() });
 const ChatClosedSchema = z.object({ released: z.boolean(), ok: z.boolean().nullable(), error: z.string().nullable(), unpushed: z.string().nullable() });
 const ErrorBody = z.object({ error: z.string() });
@@ -110,6 +115,8 @@ export interface AdminClient {
   closeChat(key: string): Promise<ChatClosed>;
   /** The ticket (issue key or UUID) as the dispatcher reads it from Linear; the CLI holds no Linear token. */
   ticketBundle(key: string): Promise<TicketBundle>;
+  /** The issue templates of the workspace and the allowlisted teams, as the dispatcher reads them from Linear. */
+  templates(): Promise<TemplateListing[]>;
   /** The runtime settings in effect. */
   settings(): Promise<Settings>;
   /** Applies the patch (audited as `admin-cli`); resolves to the settings now in effect. */
@@ -159,6 +166,7 @@ export const adminClient = (fetchImpl: typeof fetch, p: { token: string; port?: 
     },
     closeChat: (key) => request(ChatClosedSchema, "DELETE", ticketPath(key)),
     ticketBundle: (key) => request(TicketBundleSchema, "GET", `/api/tickets/${encodeURIComponent(key)}/bundle`),
+    templates: async () => (await request(z.object({ templates: z.array(TemplateListingSchema) }), "GET", "/api/templates")).templates,
     settings: () => request(SettingsSchema, "GET", "/api/settings"),
     setSettings: (patch) => request(SettingsSchema, "PATCH", "/api/settings", patch),
   };

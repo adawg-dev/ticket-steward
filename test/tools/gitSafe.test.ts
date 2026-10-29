@@ -131,7 +131,7 @@ describe("git on an agent's worktree", () => {
         ledger: storeLedger({ stores, tracker: new FakeTracker([issue]) }),
         redactor: new Redactor([]),
       },
-      target: { jobId: stores.jobs.enqueue({ kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: "started", action: "implement" }), worktreePath: worktree.path, identifier: "API-1", issueId: "issue-1", mode: "create", branch: null, baseSha: repo.sha, loopId: null, port: 4100 },
+      target: { jobId: stores.jobs.enqueue({ kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: "started", action: "implement" }), worktreePath: worktree.path, identifier: "API-1", issueId: "issue-1", title: "Adapter drops the last chunk", mode: "create", branch: null, baseSha: repo.sha, loopId: null, port: 4100 },
       branchType: "fix",
     });
 

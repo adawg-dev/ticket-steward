@@ -1,6 +1,7 @@
 import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
 import { transaction } from "../store/index.js";
+import type { Tracker } from "../tracker/types.js";
 import type { PushTarget } from "./target.js";
 
 /** Where a push starts: a new branch on the job's base, or the branch's last steward-pushed head; or why it cannot. */
@@ -26,7 +27,12 @@ export interface PushLedger {
   revert(target: PushTarget, id: number): Promise<void>;
 }
 
-type LedgerDeps = Pick<PipelineDeps, "stores" | "tracker">;
+/**
+ * The ticket is read with the dispatcher's tracker. The push server `steward mcp push` runs for the local executor holds
+ * no Linear credential (`tracker: null`): it names a first push's branch from the title the run started with, and the
+ * dispatcher settles a ticket closed meanwhile after the run (`publishImplement`, the loop's evaluation).
+ */
+type LedgerDeps = Pick<PipelineDeps, "stores"> & { tracker: Pick<Tracker, "fetchTicket"> | null };
 
 /** The job's or loop's push record before this push, put back if the push does not land. */
 type Prior = { kind: "loop"; loopId: number; pendingPush: { sha: string; pushed: boolean } | null } | { kind: "job"; jobId: number; branch: string | null; commitSha: string | null; pushed: boolean };
@@ -93,7 +99,7 @@ const startOf = ({ stores }: Pick<LedgerDeps, "stores">, target: PushTarget): Pu
   return { kind: "fastForward", branch: target.branch, base: target.baseSha };
 };
 
-/** The steward's own ledger: its store and its tracker. Priors live with the ledger, for the one push server it serves. */
+/** The steward's own ledger: its store and, in the dispatcher, its tracker. Priors live with the ledger, for the one push server it serves. */
 export const storeLedger = (deps: LedgerDeps): PushLedger => {
   const { stores } = deps;
   const priors = new Map<number, Prior>();
@@ -103,6 +109,7 @@ export const storeLedger = (deps: LedgerDeps): PushLedger => {
       return startOf(deps, target);
     },
     ticket: async (target) => {
+      if (deps.tracker === null) return { title: target.title ?? target.identifier, closed: null };
       const ticket = await deps.tracker.fetchTicket(target.issueId);
       return { title: ticket.title, closed: closedReason(target.identifier, ticket.state) };
     },

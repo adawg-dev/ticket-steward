@@ -449,7 +449,7 @@ export const registerDoctor = (program: Command, ctx: CliContext): void => {
     .action(async (opts: { probePod?: boolean }) => {
       let loaded: LoadedConfig;
       try {
-        loaded = await loadFromProgram(program, ctx);
+        loaded = await loadFromProgram(program, ctx, { linear: true });
       } catch (err) {
         println(ctx, `[fail] config: ${errorMessage(err)}`);
         await runChecks([userCheck], ctx);

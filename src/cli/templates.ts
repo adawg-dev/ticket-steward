@@ -1,40 +1,23 @@
-import type { Template } from "@linear/sdk";
 import type { Command } from "commander";
-import type { Secrets } from "../config/load.js";
-import { createLinearClient, createLinearToken, toTemplateSummary } from "../tracker/linear/index.js";
-import { loadFromProgram, println, type CliContext, type TemplateLister, type TemplateListing } from "./context.js";
-
-const WORKSPACE_SCOPE = "workspace";
-
-const issueTemplates = (scope: string, templates: Template[]): TemplateListing[] =>
-  templates.filter((template) => template.type === "issue").map((template) => ({ scope, template: toTemplateSummary(template) }));
-
-/** Lists workspace templates and the templates of the allowlisted teams (every team when the allowlist is empty). */
-export const linearTemplateLister = (secrets: Secrets): TemplateLister => ({
-  listTemplates: async (teamKeys) => {
-    // A token for this listing only, revoked once it is done.
-    const token = createLinearToken(secrets);
-    try {
-      const client = createLinearClient(await token.get());
-      const [organization, teams] = await Promise.all([client.organization, client.teams()]);
-      const selected = teams.nodes.filter((team) => teamKeys.length === 0 || teamKeys.includes(team.key));
-      const listings = issueTemplates(WORKSPACE_SCOPE, (await organization.templates()).nodes);
-      for (const team of selected) listings.push(...issueTemplates(team.key, (await team.templates()).nodes));
-      return listings;
-    } finally {
-      await token.revoke().catch(() => undefined);
-    }
-  },
-});
+import { connectAdmin } from "./client.js";
+import { errorMessage, fail, loadFromProgram, println, type CliContext, type TemplateListing } from "./context.js";
+import { NO_ADMIN_API } from "./runtime.js";
 
 export const registerTemplates = (program: Command, ctx: CliContext): void => {
   program
     .command("templates")
-    .description("list issue templates for the workspace and allowlisted teams")
+    .description("list issue templates for the workspace and allowlisted teams, as steward serve reads them from Linear")
     .action(async () => {
-      const { config, secrets } = await loadFromProgram(program, ctx);
-      const lister = ctx.factories?.templates ?? linearTemplateLister(secrets);
-      const listings = await lister.listTemplates(config.tracker.teams);
+      // The dispatcher reads Linear with its own token; the CLI holds no Linear credential.
+      const { config } = await loadFromProgram(program, ctx, { withoutSecrets: true });
+      const client = await connectAdmin(ctx, config);
+      if (client === null) return fail(ctx, NO_ADMIN_API);
+      let listings: TemplateListing[];
+      try {
+        listings = await client.templates();
+      } catch (err) {
+        return fail(ctx, errorMessage(err));
+      }
       if (listings.length === 0) return println(ctx, "no issue templates found");
       for (const { scope, template } of listings) {
         println(ctx, `${scope}\t${template.name}\trequired: ${template.requiredFields.join(", ")}`);

@@ -10,7 +10,7 @@ import { logger } from "../log.js";
 import { SettingsSchema } from "../settings/schema.js";
 import { SettingsError, type SettingsStore } from "../settings/store.js";
 import type { Job, JobStatus, Loop, Stores } from "../store/index.js";
-import type { TicketBundle } from "../tracker/types.js";
+import type { TemplateListing, TicketBundle } from "../tracker/types.js";
 
 /** The admin API's port, bound to 127.0.0.1 only: the CLI in the dispatcher pod (`kubectl exec … steward …`) is its client. */
 export const ADMIN_PORT = 3022;
@@ -52,6 +52,8 @@ export interface AdminDeps {
   resolveTicket: (key: string) => Promise<{ id: string; identifier: string }>;
   /** The resolved issue as Linear has it, read with the dispatcher's token: the CLI holds none. */
   fetchTicket: (issueId: string) => Promise<TicketBundle>;
+  /** The issue templates of the workspace and the allowlisted teams, read with the dispatcher's token. */
+  listTemplates?: () => Promise<TemplateListing[]>;
   chat?: ChatLauncher;
 }
 
@@ -195,6 +197,15 @@ export const buildAdminServer = (deps: AdminDeps): FastifyInstance => {
       return await deps.fetchTicket(ticket.id);
     } catch (err) {
       return reply.code(502).send({ error: `${ticket.identifier} could not be read from Linear: ${errorMessage(err)}` });
+    }
+  });
+
+  app.get("/api/templates", async (_request, reply) => {
+    if (deps.listTemplates === undefined) return reply.code(501).send({ error: "this dispatcher lists no templates" });
+    try {
+      return { templates: await deps.listTemplates() };
+    } catch (err) {
+      return reply.code(502).send({ error: `the templates could not be read from Linear: ${errorMessage(err)}` });
     }
   });
 

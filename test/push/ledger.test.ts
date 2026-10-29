@@ -38,6 +38,7 @@ const targetOf = (over: Partial<PushTarget> = {}): PushTarget => ({
   worktreePath: "/work/ticket-API-1",
   identifier: "API-1",
   issueId: "issue-1",
+  title: "Adapter drops the last chunk",
   mode: "create",
   branch: null,
   baseSha: BASE,
@@ -157,10 +158,18 @@ describe("storeLedger records", () => {
 });
 
 describe("storeLedger ticket", () => {
-  it("gives the title, and the closed reason once the ticket is done", async () => {
-    expect(await ledger.ticket(targetOf())).toEqual({ title: "Adapter drops the last chunk", closed: null });
+  it("gives the title, and the closed reason once the ticket is done, as the tracker reads them", async () => {
+    expect(await ledger.ticket(targetOf({ title: "The title the run started with" }))).toEqual({ title: "Adapter drops the last chunk", closed: null });
 
     tracker.addIssue({ ...issue, state: { name: "Done", type: "completed" } });
     expect(await ledger.ticket(targetOf())).toEqual({ title: "Adapter drops the last chunk", closed: "API-1 is Done; Ticket Steward does not work on Done or Canceled tickets" });
+  });
+
+  it("without a tracker (the local push server, which holds no Linear credential): the target's title, never closed", async () => {
+    const local = storeLedger({ stores, tracker: null });
+    tracker.addIssue({ ...issue, state: { name: "Done", type: "completed" } });
+
+    expect(await local.ticket(targetOf({ title: "The title the run started with" }))).toEqual({ title: "The title the run started with", closed: null });
+    expect(await local.ticket(targetOf({ mode: "fastForward", branch: BRANCH, title: null }))).toEqual({ title: "API-1", closed: null });
   });
 });

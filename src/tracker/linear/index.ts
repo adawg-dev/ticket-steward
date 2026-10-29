@@ -4,6 +4,7 @@ import { LinearTracker } from "./client.js";
 
 export { createClientCredentialsToken, LINEAR_APP_SCOPES, LinearCredentialsRejectedError, type LinearToken } from "./auth.js";
 export { createLinearClient, LinearTracker } from "./client.js";
+export { listIssueTemplates } from "./templateList.js";
 export { toTemplateSummary } from "./templates.js";
 export { parseEvent, verifySignature } from "./webhook.js";
 

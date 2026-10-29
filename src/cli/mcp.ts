@@ -7,8 +7,13 @@ import { pushFromWorktree, type PushResult } from "../push/service.js";
 import { startPushMcpServer } from "../push/server.js";
 import { PushTargetSchema, type PushTarget } from "../push/target.js";
 import { openStores } from "../store/index.js";
-import { errorMessage, fail, type CliContext } from "./context.js";
-import { buildRedactor, openMirror, openTracker } from "./runtime.js";
+import { CLI_SECRET_NAMES, errorMessage, fail, type CliContext } from "./context.js";
+import { buildRedactor, openMirror } from "./runtime.js";
+
+/** The code host's tokens only: the server reads recent changes, nothing else. */
+export const CODEHOST_SECRET_NAMES = ["GITLAB_TOKEN", "GITHUB_TOKEN"] as const;
+/** Orbit's GitLab token only. */
+export const ORBIT_SECRET_NAMES = ["GITLAB_TOKEN"] as const;
 
 export const registerMcp = (program: Command, ctx: CliContext): void => {
   const mcp = program.command("mcp").description("internal MCP servers spawned for the brain");
@@ -21,7 +26,7 @@ export const registerMcp = (program: Command, ctx: CliContext): void => {
     .action(async (opts: { workspace: string; sha: string }) => {
       const { config: configPath } = program.opts<{ config?: string }>();
       if (configPath === undefined) return fail(ctx, "mcp codehost requires --config <absolute path to steward.config.ts>");
-      const { config, secrets } = await ctx.loadConfig({ configPath });
+      const { config, secrets } = await ctx.loadConfig({ configPath, secretNames: CODEHOST_SECRET_NAMES });
       await startCodeHostMcpServer({ codehost: createCodeHost(config.codehost, secrets), worktreePath: opts.workspace, sha: opts.sha });
     });
 
@@ -38,9 +43,10 @@ export const registerMcp = (program: Command, ctx: CliContext): void => {
       } catch (err) {
         return fail(ctx, `mcp push: invalid --target: ${errorMessage(err)}`);
       }
-      const loaded = await ctx.loadConfig({ configPath });
+      // Every secret but the Linear app's: the push reads the ticket from the target, never from Linear.
+      const loaded = await ctx.loadConfig({ configPath, secretNames: CLI_SECRET_NAMES });
       const redactor = await buildRedactor(loaded);
-      const ledger = storeLedger({ stores: openStores(loaded.config.dataDir), tracker: openTracker(loaded, ctx).tracker });
+      const ledger = storeLedger({ stores: openStores(loaded.config.dataDir), tracker: null });
       const deps = { config: loaded.config, secrets: loaded.secrets, mirror: openMirror(loaded), ledger, redactor };
       await startPushMcpServer({
         push: (request) =>
@@ -57,7 +63,7 @@ export const registerMcp = (program: Command, ctx: CliContext): void => {
     .action(async (opts: { workspace: string }) => {
       const { config: configPath } = program.opts<{ config?: string }>();
       if (configPath === undefined) return fail(ctx, "mcp orbit requires --config <absolute path to steward.config.ts>");
-      const { config, secrets } = await ctx.loadConfig({ configPath });
+      const { config, secrets } = await ctx.loadConfig({ configPath, secretNames: ORBIT_SECRET_NAMES });
       await startOrbitMcpServer(orbitRemote({ exec: execOrbit, dataDir: config.dataDir, worktreePath: opts.workspace, codehost: config.codehost, secrets }));
     });
 };

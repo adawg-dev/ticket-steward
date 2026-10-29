@@ -175,6 +175,29 @@ describe("admin API tickets", () => {
     expect(down.statusCode).toBe(502);
     expect(down.json()).toEqual({ error: "API-9 could not be read from Linear: Linear is down" });
   });
+
+  it("lists the issue templates the dispatcher reads from Linear", async () => {
+    const listing = { scope: "API", template: { name: "Bugs", description: "Bug report", body: "**Evidence**", requiredFields: ["Evidence"] } };
+    await app.close();
+    let fails = false;
+    app = buildAdminServer({
+      token: TOKEN, stores, settings, resolveTicket, fetchTicket,
+      listTemplates: () => (fails ? Promise.reject(new Error("Linear is down")) : Promise.resolve([listing])),
+    });
+
+    const response = await call("GET", "/api/templates");
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ templates: [listing] });
+    fails = true;
+    const down = await call("GET", "/api/templates");
+    expect(down.statusCode).toBe(502);
+    expect(down.json()).toEqual({ error: "the templates could not be read from Linear: Linear is down" });
+    expect((await call("GET", "/api/templates", null)).statusCode).toBe(401);
+  });
+
+  it("answers 501 to a template listing when the dispatcher has none", async () => {
+    expect((await call("GET", "/api/templates")).statusCode).toBe(501);
+  });
 });
 
 describe("admin API chat", () => {

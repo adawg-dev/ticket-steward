@@ -62,7 +62,7 @@ const reportFor = (runId: string): RunReport => ({ runId, ok: true, error: null,
 const startRun = (identifier: string): { spec: RunSpec; runner: string; tools: string } => {
   const jobId = stores.jobs.enqueue({ kind: "cli", issueId: `issue-${identifier}`, identifier, teamKey: "API" });
   const runId = `${jobId}-1`;
-  const push: PushTarget = { jobId, worktreePath: "/w", identifier, issueId: `issue-${identifier}`, mode: "create", branch: null, baseSha: SHA, loopId: null, port: 3000 };
+  const push: PushTarget = { jobId, worktreePath: "/w", identifier, issueId: `issue-${identifier}`, title: "Adapter drops the last chunk", mode: "create", branch: null, baseSha: SHA, loopId: null, port: 3000 };
   const spec = podSpecFor({ runId, jobId, identifier, push });
   specs.set(runId, spec);
   return { spec, runner: stores.runTokens.issue(runId, "runner"), tools: stores.runTokens.issue(runId, "tools") };

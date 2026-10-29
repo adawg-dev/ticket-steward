@@ -77,6 +77,7 @@ const createTarget = (over: Partial<PushTarget> = {}): PushTarget => ({
   worktreePath: worktree.path,
   identifier: "API-1",
   issueId: "issue-1",
+  title: "Adapter drops the last chunk",
   mode: "create",
   branch: null,
   baseSha: repo.sha,

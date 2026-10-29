@@ -13,7 +13,7 @@ import { errorMessage, fail, loadFromProgram, println, type CliContext } from ".
 import { reportOutcome, runInline, tailJob, terminalOutcome, TAIL_POLL_MS, withRunLock } from "./inline.js";
 import { artifactsDir, jobsDir, workRoot } from "./paths.js";
 import { answers, localHealthUrl, sleep } from "./probe.js";
-import { buildRuntime, CLI_SECRET_NAMES } from "./runtime.js";
+import { buildRuntime } from "./runtime.js";
 
 const DEFAULT_LIMIT = 20;
 const HEALTH_TIMEOUT_MS = 2_000;
@@ -100,7 +100,7 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .option("--status <status>", `filter by status (${STATUSES.join(", ")})`, parseStatus)
     .option("--limit <n>", "maximum rows", parseId, DEFAULT_LIMIT)
     .action(async (opts: { status?: JobStatus; limit: number }) => {
-      const { config } = await loadFromProgram(program, ctx);
+      const { config } = await loadFromProgram(program, ctx, { withoutSecrets: true });
       const filter = { ...(opts.status === undefined ? {} : { status: opts.status }), limit: opts.limit };
       const client = await admin(ctx, config);
       const rows = client === null ? openStores(config.dataDir).jobs.list(filter) : await client.listJobs(filter);
@@ -114,7 +114,7 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .description("job row (with its stored result), attempts, transcript paths and artifacts")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
-      const { config } = await loadFromProgram(program, ctx);
+      const { config } = await loadFromProgram(program, ctx, { withoutSecrets: true });
       const client = await admin(ctx, config);
       if (client !== null) {
         const detail = await client.job(id);
@@ -132,7 +132,7 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .description("run the job again: requeue it when serve is running, otherwise run inline; publish-only when an implement result is stored")
     .argument("<id>", "job id", parseId)
     .action(async (id: number) => {
-      const loaded = await loadFromProgram(program, ctx, { secrets: CLI_SECRET_NAMES });
+      const loaded = await loadFromProgram(program, ctx);
       const client = await admin(ctx, loaded.config);
       if (client !== null) {
         try {
@@ -160,7 +160,7 @@ export const registerJobs = (program: Command, ctx: CliContext): void => {
     .command("gc")
     .description("run retention now: worktrees, job directories, deliveries")
     .action(async () => {
-      const loaded = await loadFromProgram(program, ctx);
+      const loaded = await loadFromProgram(program, ctx, { withoutSecrets: true });
       const { config } = loaded;
       await withRunLock({ loaded }, ctx, async () => {
         const stores = openStores(config.dataDir);

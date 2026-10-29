@@ -68,7 +68,7 @@ describe("brainInput", () => {
   });
 
   it("adds the push server, with its target and no secrets, only for a run that may push", () => {
-    const target = { jobId: 12, worktreePath: worktree.path, identifier: "API-1", issueId: "issue-1", mode: "create" as const, branch: null, baseSha: "b".repeat(40), loopId: null, port: 4100 };
+    const target = { jobId: 12, worktreePath: worktree.path, identifier: "API-1", issueId: "issue-1", title: "Adapter drops the last chunk", mode: "create" as const, branch: null, baseSha: "b".repeat(40), loopId: null, port: 4100 };
     const push = brainInput(fullDeps, paths, worktree, "prompt", {}, "implement", { push: target }).mcpServers.push;
     expect(push?.args).toEqual(["/bin/steward", "mcp", "push", "--config", "/etc/steward/config.json", "--target", JSON.stringify(target)]);
     expect(Object.keys(push?.env ?? {}).sort()).toEqual(["HOME", "PATH"]);

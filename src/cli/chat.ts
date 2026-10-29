@@ -19,7 +19,7 @@ import type { Slot } from "../workspace/slots.js";
 import { connectAdmin, type AdminClient, type ChatClosed } from "./client.js";
 import { errorMessage, exitWith, fail, loadFromProgram, println, type CliContext, type SpawnInteractive } from "./context.js";
 import { jobsDir, mirrorPath, workRoot } from "./paths.js";
-import { buildRuntime, CLI_SECRET_NAMES, type Runtime } from "./runtime.js";
+import { buildRuntime, type Runtime } from "./runtime.js";
 
 const NO_FREE_SLOT = "no slot is free: every slot runs a job or another chat. Retry when one finishes, or pass --no-slot to chat without slot services";
 
@@ -186,7 +186,7 @@ export const registerChat = (program: Command, ctx: CliContext): void => {
     .argument("<ticket>", "issue key or UUID")
     .option("--no-slot", "chat without slot services (the app's containers) instead of leasing a slot")
     .action(async (key: string, opts: { slot: boolean }) => {
-      const loaded = await loadFromProgram(program, ctx, { secrets: CLI_SECRET_NAMES });
+      const loaded = await loadFromProgram(program, ctx);
       const { config } = loaded;
       if (config.brain.kind !== "claude-code") return fail(ctx, 'steward chat requires brain.kind "claude-code"');
       const kubernetes = kubernetesRuntime(config);
@@ -228,7 +228,7 @@ export const registerChat = (program: Command, ctx: CliContext): void => {
       try {
         let denyPaths = opts.deny;
         if (denyPaths === undefined) {
-          const loaded = await loadFromProgram(program, ctx);
+          const loaded = await loadFromProgram(program, ctx, { withoutSecrets: true });
           denyPaths = brainDenyPaths(loaded.config, loaded.configPath, mirrorPath(loaded.config.dataDir));
         }
         decision = evaluateHook(await readAll(ctx.stdin ?? process.stdin), { workspacePath: opts.workspace, artifactsDir: opts.artifacts, denyPaths });

@@ -74,6 +74,7 @@ describe("pushMcpSpec", () => {
       worktreePath: "/var/lib/ticket-steward/work/ticket-API-1",
       identifier: "API-1",
       issueId: "issue-1",
+      title: "Adapter drops the last chunk",
       mode: "create",
       branch: null,
       baseSha: "b".repeat(40),

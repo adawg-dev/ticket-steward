@@ -66,6 +66,12 @@ export interface TicketBundle {
   templates: Array<{ name: string; description: string; body: string; requiredFields: string[] }>;
 }
 
+/** An issue template and where it lives: `workspace`, or the key of the team that owns it. */
+export interface TemplateListing {
+  scope: string;
+  template: TicketBundle["templates"][number];
+}
+
 /** Reads tickets as the steward's Linear app; the dispatcher alone holds its token. */
 export interface Tracker {
   kind: "linear";

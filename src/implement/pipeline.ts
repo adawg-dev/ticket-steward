@@ -208,7 +208,7 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
   // The first push creates the ticket's branch on the base; a dry run (no job row) gets no push tool.
   const push: PushTarget | null = ctx.dryRun
     ? null
-    : { jobId: ctx.jobId, worktreePath, identifier: ctx.identifier, issueId: ctx.issueId, mode: "create", branch: null, baseSha, loopId: null, port: jobPort(deps) };
+    : { jobId: ctx.jobId, worktreePath, identifier: ctx.identifier, issueId: ctx.issueId, title: bundle.title, mode: "create", branch: null, baseSha, loopId: null, port: jobPort(deps) };
   const spec: RunSpec = {
     version: 1,
     runId: runIdOf(ctx),

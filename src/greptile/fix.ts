@@ -286,7 +286,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
 
   // The agent pushes onto the loop's head through the push tool; the target is fixed here, never chosen by the agent.
   const push: PushTarget = {
-    jobId: ctx.jobId, worktreePath, identifier: loop.identifier, issueId: loop.issueId,
+    jobId: ctx.jobId, worktreePath, identifier: loop.identifier, issueId: loop.issueId, title: null,
     mode: "fastForward", branch: loop.branch, baseSha: loop.baseSha, loopId: loop.id, port: jobPort(deps),
   };
   const spec: RunSpec = {

@@ -4,7 +4,7 @@ import { createBrain } from "../brain/index.js";
 import type { Brain, BrainInput, BrainRun } from "../brain/types.js";
 import { createGitLabMr } from "../codehost/gitlabMr.js";
 import { createCodeHost } from "../codehost/index.js";
-import { SecretsSchema, type LoadedConfig, type SecretName } from "../config/load.js";
+import type { LoadedConfig } from "../config/load.js";
 import { kubernetesRuntime } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import type { RunExecutor } from "../run/executor.js";
@@ -46,10 +46,7 @@ export const buildRedactor = async (loaded: LoadedConfig): Promise<Redactor> => 
   return new Redactor(collectSecretValues(loaded.secrets, overlayFiles));
 };
 
-/** Every secret but the Linear app's: the CLI never holds a Linear credential, so its commands load these only. */
-export const CLI_SECRET_NAMES: readonly SecretName[] = SecretsSchema.keyof().options.filter((name) => !name.startsWith("LINEAR_"));
-
-/** The dispatcher's tracker and the app token it holds in memory; only `serve` (and the push server it runs) opens it. */
+/** The dispatcher's tracker and the app token it holds in memory; only `serve` opens it. */
 export const openTracker = (loaded: LoadedConfig, ctx: CliContext): { tracker: Tracker; linearToken?: LinearToken } => {
   if (ctx.factories?.tracker !== undefined) return { tracker: ctx.factories.tracker };
   const linearToken = createLinearToken(loaded.secrets);

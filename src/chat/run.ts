@@ -88,7 +88,7 @@ export const sessionPushTarget = (
   const baseSha = baseShaOf(deps, session);
   if (baseSha === null) return undefined;
   return {
-    jobId: run.jobId, worktreePath: worktree.path, identifier: run.identifier, issueId: run.issueId,
+    jobId: run.jobId, worktreePath: worktree.path, identifier: run.identifier, issueId: run.issueId, title: null,
     mode: "fastForward", branch: session.branch, baseSha, loopId: session.loopId, port: run.port,
   };
 };

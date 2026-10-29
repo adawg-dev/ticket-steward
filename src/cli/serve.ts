@@ -13,8 +13,9 @@ import { SettingsStore } from "../settings/store.js";
 import { buildServer } from "../server/app.js";
 import { buildInternalServer, INTERNAL_PORT } from "../server/internal.js";
 import type { Stores } from "../store/index.js";
+import { listIssueTemplates } from "../tracker/linear/index.js";
 import { startWorker, type WorkerDeps } from "../worker/index.js";
-import { errorMessage, exitWith, fail, loadFromProgram, println, type CliContext } from "./context.js";
+import { errorMessage, exitWith, fail, loadFromProgram, println, type CliContext, type TemplateLister } from "./context.js";
 import { buildRuntime, type Runtime } from "./runtime.js";
 
 /**
@@ -66,12 +67,19 @@ export const reapChats = async (chat: KubernetesChat, stores: Pick<Stores, "leas
   return () => clearInterval(timer);
 };
 
+/** The dispatcher's template listing, with the app token it holds; `steward templates` reads it through the admin API. */
+const templateLister = (runtime: Runtime, ctx: CliContext): TemplateLister | undefined => {
+  if (ctx.factories?.templates !== undefined) return ctx.factories.templates;
+  const token = runtime.linearToken;
+  return token === undefined ? undefined : { listTemplates: (teamKeys) => listIssueTemplates(token, teamKeys) };
+};
+
 export const registerServe = (program: Command, ctx: CliContext): void => {
   program
     .command("serve")
     .description("run the webhook server and the job worker; takes run.lock")
     .action(async () => {
-      const runtime = await buildRuntime(await loadFromProgram(program, ctx), ctx, { serve: true });
+      const runtime = await buildRuntime(await loadFromProgram(program, ctx, { linear: true }), ctx, { serve: true });
       const { config, secrets } = runtime.loaded;
       const { kubernetes } = runtime;
       const internal = kubernetes === undefined ? null : internalServer(runtime, kubernetes);
@@ -95,7 +103,16 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
           const token = await writeAdminToken(k8s.runtimeDir);
           const { stores, tracker, chat } = runtime;
           const settings = new SettingsStore(stores.db, seedSettings(config));
-          admin = buildAdminServer({ token, stores, settings, resolveTicket: (key) => tracker.resolveIssueId(key), fetchTicket: (issueId) => tracker.fetchTicket(issueId), ...(chat === undefined ? {} : { chat }) });
+          const templates = templateLister(runtime, ctx);
+          admin = buildAdminServer({
+            token,
+            stores,
+            settings,
+            resolveTicket: (key) => tracker.resolveIssueId(key),
+            fetchTicket: (issueId) => tracker.fetchTicket(issueId),
+            ...(templates === undefined ? {} : { listTemplates: () => templates.listTemplates(config.tracker.teams) }),
+            ...(chat === undefined ? {} : { chat }),
+          });
           await admin.listen({ port: ADMIN_PORT, host: ADMIN_HOST });
         } catch (err) {
           stopReaping();

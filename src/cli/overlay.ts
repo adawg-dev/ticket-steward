@@ -15,7 +15,7 @@ export const registerOverlay = (program: Command, ctx: CliContext): void => {
     .requiredOption("--from <path>", "checkout whose env files hold the sandbox credentials")
     .option("--allow-pattern <re>", "accept values matching this pattern even when a deny pattern matches (repeatable)", collect, [])
     .action(async (opts: { from: string; allowPattern: string[] }) => {
-      const { config } = await loadFromProgram(program, ctx);
+      const { config } = await loadFromProgram(program, ctx, { withoutSecrets: true });
       const { copied, refused } = await syncOverlayFromCheckout(opts.from, config.workspace.overlayDir, {
         denyPatterns: DENY_PATTERNS,
         allowPatterns: opts.allowPattern.map((pattern) => new RegExp(pattern)),

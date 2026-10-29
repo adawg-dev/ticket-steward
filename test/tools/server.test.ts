@@ -28,7 +28,7 @@ const spec: RunSpec = {
   output: "implement",
   resumeSessionId: null,
   limits: { timeoutMinutes: 60, maxTurns: 200, setupTimeoutMinutes: 20 },
-  push: { jobId: 7, worktreePath: "/var/lib/ticket-steward/work/ticket-API-1", identifier: "API-1", issueId: "issue-1", mode: "create", branch: null, baseSha: SHA, loopId: null, port: 3000 },
+  push: { jobId: 7, worktreePath: "/var/lib/ticket-steward/work/ticket-API-1", identifier: "API-1", issueId: "issue-1", title: "Adapter drops the last chunk", mode: "create", branch: null, baseSha: SHA, loopId: null, port: 3000 },
   setup: [],
   checks: [],
   interactive: false,

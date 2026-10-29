@@ -34,7 +34,7 @@ const specFor = (patch: Partial<RunSpec> = {}): RunSpec => ({
   output: "implement",
   resumeSessionId: null,
   limits: { timeoutMinutes: 1, maxTurns: 5, setupTimeoutMinutes: 1 },
-  push: { jobId: 7, worktreePath: repo, identifier: "API-1", issueId: "issue-1", mode: "create", branch: null, baseSha: base, loopId: null, port: 3000 },
+  push: { jobId: 7, worktreePath: repo, identifier: "API-1", issueId: "issue-1", title: "Adapter drops the last chunk", mode: "create", branch: null, baseSha: base, loopId: null, port: 3000 },
   setup: [],
   checks: [],
   interactive: false,

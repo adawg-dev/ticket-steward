@@ -6,6 +6,8 @@ import type { StdioMcpServerSpec } from "../brain/types.js";
  * What one run may push, fixed by the steward when it spawns the push server. Carries no secrets: it travels on the
  * `claude` command line. `branch` is null for implement's first push (the agent names the branch type then); `baseSha`
  * is the job's or loop's original base, used for `{{baseSha}}` in the checks and as the base a create pushes onto.
+ * `title` is the ticket's title when the run started, which names a first push's branch where the push server reads no
+ * ticket (the local executor's, which holds no Linear credential); null for a push onto an existing branch.
  * `port` is the run's app port, so the steward's checks see the same env as the run's setup.
  */
 export const PushTargetSchema = z.object({
@@ -13,6 +15,7 @@ export const PushTargetSchema = z.object({
   worktreePath: z.string().min(1),
   identifier: z.string().min(1),
   issueId: z.string().min(1),
+  title: z.string().nullable(),
   mode: z.enum(["create", "fastForward"]),
   branch: z.string().min(1).nullable(),
   baseSha: z.string().regex(/^[0-9a-f]{40}$/),
