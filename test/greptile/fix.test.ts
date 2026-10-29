@@ -62,6 +62,7 @@ const changed = (discussionId: string): FixResult => ({
   summary: "Added the null check the review asked for.",
   checksRun: ["tsc: ok"],
   failureDetail: null,
+  media: [],
 });
 
 const declined = (discussionId: string): FixResult => ({
@@ -70,7 +71,10 @@ const declined = (discussionId: string): FixResult => ({
   summary: "Declined: the finding does not apply.",
   checksRun: [],
   failureDetail: null,
+  media: [],
 });
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
 
 let repo: TmpRepo;
 let stores: Stores;
@@ -267,6 +271,29 @@ describe("runFix", () => {
     expect(loop).toMatchObject({ round: 1, headSha: pushed, state: "awaiting_review", sessionId: "session-2", pendingPush: null, waitStartedAt: null, reviewCountAtTrigger: null });
     expect(loop.history).toEqual([{ round: 0, headSha, score: 3, pipeline: "success", fixed: 1, declined: 0, outcome: "changed" }]);
     expect(queuedAwaits()).toEqual([{ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "await" }]);
+  });
+
+  it("posts the round's screenshots in a note on the MR once its threads are answered, and stores them with the round", async () => {
+    const id = createLoop();
+    const brain = editing({ result: { ...changed(finding), media: [{ path: "after.png", caption: "The last chunk now renders" }] } });
+    const deps: PipelineDeps = {
+      ...makeDeps(brain),
+      runBrain: async (_config, input) => {
+        await writeFile(join(input.artifactsDir, "after.png"), PNG);
+        return brain.run(input, () => undefined);
+      },
+    };
+    const ctx = claim(id);
+
+    expect(await runFix(ctx, deps)).toEqual({ status: "succeeded" });
+
+    expect(gitlab.uploads).toEqual([{ project: 42, filename: "after.png", bytes: PNG.length }]);
+    expect(stores.jobs.get(ctx.jobId)?.fixResult?.media).toEqual({ embeds: [{ caption: "The last chunk now renders", markdown: "![after.png](/uploads/1/after.png)" }], rejected: [] });
+    expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes[0]).toContain("Round 1: Added the null check the review asked for.");
+    expect(gitlab.notes[0]).toContain("**Screenshots and recordings**\n\nThe last chunk now renders\n\n![after.png](/uploads/1/after.png)");
+    expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "round 0 media after=start"));
+    expect(loopOf(id)).toMatchObject({ round: 1, state: "awaiting_review" });
   });
 
   it("declines every finding: no push, replies and resolves, then asks Greptile for a review", async () => {

@@ -35,6 +35,9 @@ export class FakeGitLabMr implements GitLabMrApi {
   readonly notes: string[] = [];
   readonly replies: Array<{ discussionId: string; body: string }> = [];
   readonly resolved: string[] = [];
+  /** Files uploadFile received, by project and name. */
+  readonly uploads: Array<{ project: number | string; filename: string; bytes: number }> = [];
+  private failingUploads = 0;
   private nextId = 1;
   private failingNotes = 0;
   private failingReplies = 0;
@@ -127,5 +130,19 @@ export class FakeGitLabMr implements GitLabMrApi {
 
   async jobTraceTail(_project: number | string, jobId: number, lines: number): Promise<string> {
     return (this.traces.get(jobId) ?? "").replace(/\n+$/, "").split("\n").slice(-lines).join("\n");
+  }
+
+  /** The next uploadFile throws, as GitLab being down would. */
+  failNextUpload(): void {
+    this.failingUploads += 1;
+  }
+
+  async uploadFile(project: number | string, filename: string, data: Uint8Array): Promise<{ markdown: string }> {
+    if (this.failingUploads > 0) {
+      this.failingUploads -= 1;
+      throw new Error("GitLab down");
+    }
+    this.uploads.push({ project, filename, bytes: data.length });
+    return { markdown: `![${filename}](/uploads/${this.uploads.length}/${filename})` };
   }
 }

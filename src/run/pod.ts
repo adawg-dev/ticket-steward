@@ -6,6 +6,7 @@ import { z } from "zod";
 import { buildWorkspaceEnv } from "../brain/env.js";
 import type { runBrainDetached } from "../brain/spawn.js";
 import { INTERRUPTED_ERROR, type McpServerSpec } from "../brain/types.js";
+import { MediaItemSchema, rejectAll, MediaUploadsSchema, type MediaUploads } from "../codehost/media.js";
 import type { BrainConfig } from "../config/schema.js";
 import { Redactor } from "../core/redact.js";
 import { errorMessage, MINUTE_MS, playwrightMcpSpec, SETUP_TAIL_BYTES } from "../core/workspace.js";
@@ -102,7 +103,7 @@ export const podMcpServers = (spec: RunSpec, toolsUrl: string = TOOLS_URL): Reco
   const http = (name: string): McpServerSpec => ({ type: "http", url: `${base}/mcp/${name}` });
   return {
     codehost: http("codehost"),
-    playwright: playwrightMcpSpec(),
+    playwright: playwrightMcpSpec(spec.artifactsDir),
     orbit: http("orbit"),
     ...(spec.push === null ? {} : { push: http("push") }),
   };
@@ -220,6 +221,35 @@ export const finishTools = async (p: { toolsUrl: string; fetchImpl: typeof fetch
   if (!response.ok) throw new Error(`the tools sidecar answered ${response.status} to /finish`);
 };
 
+/** How long the tools sidecar gets to check and upload the result's media (up to ten files of 25 MB). */
+export const ATTACH_MEDIA_MS = 5 * MINUTE_MS;
+
+const MediaOutputSchema = z.object({ media: z.array(MediaItemSchema) });
+
+/**
+ * Has the tools sidecar attach the media the result lists (`POST /media`): the agent container holds no GitLab access.
+ * Null when the result lists none; every item is listed as not attached when the sidecar cannot attach them.
+ */
+export const attachMedia = async (p: { toolsUrl: string; fetchImpl: typeof fetch; output: unknown; timeoutMs?: number; signal?: AbortSignal }): Promise<MediaUploads | null> => {
+  const parsed = MediaOutputSchema.safeParse(p.output);
+  if (!parsed.success || parsed.data.media.length === 0) return null;
+  const { media } = parsed.data;
+  try {
+    const response = await p.fetchImpl(`${p.toolsUrl.replace(/\/+$/, "")}/media`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ media }),
+      redirect: "error",
+      // A shutdown stops it: the pod's grace period is for the work report and the session, not for uploads.
+      signal: AbortSignal.any([AbortSignal.timeout(p.timeoutMs ?? ATTACH_MEDIA_MS), ...(p.signal === undefined ? [] : [p.signal])]),
+    });
+    if (!response.ok) throw new Error(`the tools sidecar answered ${response.status}`);
+    return MediaUploadsSchema.parse(await response.json());
+  } catch (err) {
+    return rejectAll(media, `upload failed: ${errorMessage(err)}`);
+  }
+};
+
 /**
  * Delivers the run's report to the dispatcher (`POST …/internal/runs/<runId>/report`) with the run's runner token,
  * retrying while the dispatcher is away (`postCallback`). A report lost here fails the Job, and the dispatcher requeues
@@ -308,8 +338,8 @@ const failedReport = (spec: RunSpec, error: string): RunReport => ({
 
 /**
  * The agent container's run: waits for the sidecars, lays the overlay into the worktree that git-init cloned, serves the
- * check endpoint, runs `executeRun` with the pod's env and MCP servers, then has the tools sidecar post the work report
- * and posts the run report itself, retrying while the dispatcher is away. Rejects only when the report could not be
+ * check endpoint, runs `executeRun` with the pod's env and MCP servers, then has the tools sidecar attach the result's
+ * media and post the work report, and posts the run report itself, retrying while the dispatcher is away. Rejects only when the report could not be
  * delivered.
  */
 export const runPod = async (p: PodRun): Promise<RunReport> => {
@@ -335,6 +365,10 @@ export const runPod = async (p: PodRun): Promise<RunReport> => {
     });
   } catch (err) {
     report = p.signal?.aborted === true ? { ...failedReport(spec, INTERRUPTED_ERROR), interrupted: true } : failedReport(spec, errorMessage(err));
+  }
+  if (report.ok) {
+    const media = await attachMedia({ toolsUrl: p.toolsUrl, fetchImpl: p.fetchImpl, output: report.output, ...(p.signal === undefined ? {} : { signal: p.signal }) });
+    if (media !== null) report = { ...report, media };
   }
   try {
     await finishTools({ toolsUrl: p.toolsUrl, fetchImpl: p.fetchImpl, timeoutMs: finishToolsMs(p.checksTimeoutMs) });

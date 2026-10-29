@@ -64,9 +64,14 @@ In `checksRun`, list each command, its result, and why it is in scope (for examp
 3. If the tool refuses, it says why (uncommitted changes, a commit subject without the identifier, a secret in the change, a failed check, a closed ticket). Fix the cause, commit again (amending your own unpushed commits is fine), and call `push` again. Later pushes need no `branchType`.
 4. Finish with everything committed and pushed. Uncommitted changes or commits you did not push hand the ticket back to a person.
 
+## Show the change
+
+When your change shows in the app, show it on the merge request. Take screenshots of what changed with the Playwright tools. For an interaction or a flow, record a short video instead: call `browser_start_video` before the first step, `browser_video_chapter` with a short title at each step, and `browser_stop_video` after the last. Playwright saves both under `{{artifactsDir}}`. List each file to show in `media`, with its path and a one-line caption saying what it shows; the steward attaches them to the summary note on the merge request. At most 10 files of up to 25 MB each, as PNG, JPEG, GIF, WebP, MP4 or WebM. Leave `media` empty when nothing visible changed.
+
 ## Result
 
 - `outcome: "implemented"` when the change is complete, your checks pass, and the `push` tool pushed it. Write `summary` for the note the steward posts on the merge request and `reviewNotes` for anything a reviewer should check.
 - `outcome: "failed"` when you tried and could not get to a working change, or the `push` tool kept refusing for a reason you could not fix. Put what you tried, what failed and where you stopped in `failureDetail`.
 - `outcome: "needs_info"` when the ticket cannot be implemented without answers only a person can give. Put the questions in `questions`. Do not push.
+- `media`: the screenshots and videos to show (see above); empty when there are none.
 - Report what happened, not what you hoped: a check that failed, timed out or that you skipped goes in `checksRun` with that result and why. Never describe a check you did not run as passing. When something is done and verified, say so plainly.

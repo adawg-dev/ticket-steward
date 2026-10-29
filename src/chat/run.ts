@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { chatPromptPath } from "../cli/paths.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
+import { attachedMedia, renderMedia } from "../codehost/media.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { readRepoPartial, renderPrompt } from "../core/prompt.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
@@ -231,8 +232,14 @@ const recordDecisions = (deps: Pick<PipelineDeps, "stores" | "redactor">, sessio
   }
 };
 
-/** The finish half, from the executor's report and the work it found: retry, or store and post the reply with what was left unpushed. */
-const finishChat = (
+/** The reply with the screenshots and recordings the run attached, if any. */
+const withMedia = (reply: string, media: string[]): string => (media.length === 0 ? reply : `${reply}\n\n${media.join("\n")}`);
+
+/**
+ * The finish half, from the executor's report and the work it found: retry, or store and post the reply with the media
+ * the agent attached and what was left unpushed.
+ */
+const finishChat = async (
   ctx: RunContext,
   deps: PipelineDeps,
   gitlab: GitLabMrApi,
@@ -244,11 +251,11 @@ const finishChat = (
   const { report, work } = executed;
   if (report.setupFailed) {
     patchAttempt(ctx, deps, { setupTail: setupTailOf(report) });
-    return Promise.resolve(report.interrupted ? { status: "failed", error: INTERRUPTED_ERROR, retryable: true } : { status: "failed", error: report.error ?? "setup failed", retryable: true });
+    return report.interrupted ? { status: "failed", error: INTERRUPTED_ERROR, retryable: true } : { status: "failed", error: report.error ?? "setup failed", retryable: true };
   }
   patchAttempt(ctx, deps, { transcriptPath: spec.transcriptPath, ...(report.usage === null ? {} : { usage: report.usage }) });
   // An interrupted run resumes from the session it started from; the partial turn is lost.
-  if (report.interrupted) return Promise.resolve({ status: "failed", error: INTERRUPTED_ERROR, retryable: true });
+  if (report.interrupted) return { status: "failed", error: INTERRUPTED_ERROR, retryable: true };
   if (report.sessionId !== null) {
     // The next chat, fix round or `steward chat` resumes where this one ended.
     if (session.loopId !== null) deps.stores.loops.update(session.loopId, { sessionId: report.sessionId });
@@ -266,7 +273,9 @@ const finishChat = (
     return decide(ctx, deps, gitlab, trigger, { reply: withLeftover("The agent's answer could not be read.", leftover), warning: `the agent's result was invalid: ${validated.error}` });
   }
   recordDecisions(deps, session, validated.result.decisions);
-  return decide(ctx, deps, gitlab, trigger, { reply: withLeftover(validated.result.reply, leftover), warning: leftover === "" ? null : "the agent left unpushed work" });
+  const media = renderMedia(await attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab, project: trigger.projectId }));
+  const reply = withLeftover(withMedia(validated.result.reply, media), leftover);
+  return decide(ctx, deps, gitlab, trigger, { reply, warning: leftover === "" ? null : "the agent left unpushed work" });
 };
 
 /** The brain run: prepare, execute (in-process or in a run pod), finish. */

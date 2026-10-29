@@ -27,6 +27,7 @@ const IMPLEMENT_PROMPT = fileURLToPath(new URL("../../prompts/implement.md", imp
 const LABELS = { implement: "ready-for-agent", needsInfo: "needs-info", readyForHuman: "ready-for-human", implemented: "agent-implemented", approved: "agent-approved" };
 const BRANCH = "fix/API-1-adapter-drops-the-last-chunk";
 const DISCUSSION = "disc-1";
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
 
 const issue: TicketBundle = {
   id: "issue-1",
@@ -404,6 +405,33 @@ describe("runChat through an executor", () => {
       { discussionId: DISCUSSION, body: `Started on it.\n\nLeft in the agent's worktree, not pushed:\n\n\`\`\`\na1b2c3d API-1: wip\n\`\`\`\n\n${CHAT_MARKER}` },
     ]);
     expect(stores.loops.get(loopId)?.sessionId).toBe("session-x");
+  });
+
+  it("ends the reply with the screenshots a run pod's tools sidecar attached", async () => {
+    const loopId = createLoop();
+    const attached = { embeds: [{ caption: "The new empty state", markdown: "![empty.png](/uploads/9/empty.png)" }], rejected: [] };
+    const executor = executing({ output: { reply: "Here it is.", media: [{ path: "empty.png", caption: "The new empty state" }] }, media: attached });
+
+    expect(await runChat(claim(loopId), { ...makeDeps(new FakeBrain()), executor })).toEqual({ status: "succeeded" });
+
+    expect(gitlab.uploads).toEqual([]);
+    expect(gitlab.replies[0]?.body).toBe(`Here it is.\n\n**Screenshots and recordings**\n\nThe new empty state\n\n![empty.png](/uploads/9/empty.png)\n\n${CHAT_MARKER}`);
+  });
+
+  it("uploads the screenshots the agent left in the artifacts dir when the executor attached none", async () => {
+    const loopId = createLoop();
+    const local: RunExecutor = {
+      execute: async (spec) => {
+        await mkdir(spec.artifactsDir, { recursive: true });
+        await writeFile(join(spec.artifactsDir, "empty.png"), PNG);
+        return executing({ output: { reply: "Here it is.", media: [{ path: "empty.png", caption: "The new empty state" }] } }).execute(spec);
+      },
+    };
+
+    expect(await runChat(claim(loopId), { ...makeDeps(new FakeBrain()), executor: local })).toEqual({ status: "succeeded" });
+
+    expect(gitlab.uploads).toEqual([{ project: 42, filename: "empty.png", bytes: PNG.length }]);
+    expect(gitlab.replies[0]?.body).toContain("The new empty state\n\n![empty.png](/uploads/1/empty.png)");
   });
 
   it("hands the executor a chat spec on the pushed branch that resumes the session and carries no secret", async () => {

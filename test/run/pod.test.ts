@@ -55,21 +55,31 @@ interface Received {
 }
 
 /** A local HTTP server that records every request and answers `status` (200 by default) with `answer`'s JSON. */
-const recorder = async (answer: (req: Received) => unknown, status: (req: Received) => number = () => 200): Promise<{ url: string; port: number; received: Received[]; server: Server }> => {
+interface Recorder {
+  url: string;
+  port: number;
+  received: Received[];
+  server: Server;
+  answer: (req: Received) => unknown;
+  status: (req: Received) => number;
+}
+
+const recorder = async (answer: (req: Received) => unknown, status: (req: Received) => number = () => 200): Promise<Recorder> => {
   const received: Received[] = [];
+  const self: Pick<Recorder, "answer" | "status"> = { answer, status };
   const server = createServer((req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       const entry = { method: req.method ?? "", path: req.url ?? "", authorization: req.headers.authorization ?? "", body: Buffer.concat(chunks).toString("utf8") };
       received.push(entry);
-      res.writeHead(status(entry), { "content-type": "application/json" });
-      res.end(JSON.stringify(answer(entry)));
+      res.writeHead(self.status(entry), { "content-type": "application/json" });
+      res.end(JSON.stringify(self.answer(entry)));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}`, port, received, server };
+  return Object.assign(self, { url: `http://127.0.0.1:${port}`, port, received, server });
 };
 
 /** A loopback port nothing listens on now: `--checks-listen` takes a real port, as in the pod. */
@@ -129,6 +139,7 @@ describe("podMcpServers", () => {
     expect(servers.push).toEqual({ type: "http", url: "http://127.0.0.1:4181/mcp/push" });
     expect(servers.orbit).toEqual({ type: "http", url: "http://127.0.0.1:4181/mcp/orbit" });
     expect(servers.playwright).toMatchObject({ command: process.execPath });
+    expect(servers.playwright?.type === "http" ? [] : servers.playwright?.args).toEqual(expect.arrayContaining(["--caps=devtools", "--output-dir", join(root, "jobs", "7", "artifacts")]));
   });
 
   it("gives a run without a push target no push tool", () => {
@@ -331,6 +342,35 @@ describe("steward run-pod", () => {
     expect(input.mcpServers.push).toEqual({ type: "http", url: `${tools.url}/mcp/push` });
     expect(input.denyPaths).toEqual([EGRESS_CA_DIR]);
     expect(await readFile(join(repo, "apps", "api", ".env"), "utf8")).toContain("STEWARD_PH_STRIPE_SECRET_KEY_");
+  });
+
+  it("has the tools sidecar attach the result's media and carries what it attached in the report", async () => {
+    const uploads = { embeds: [{ caption: "After", markdown: "![a.png](/uploads/1/a.png)" }], rejected: [{ name: "x.exe", reason: "not an image or video" }] };
+    const { args, tools, callback } = await setUp(specFor());
+    const media = [{ path: "a.png", caption: "After" }, { path: "x.exe", caption: "No" }];
+    const brain = new FakeBrain({ result: { outcome: "implemented", media }, sessionId: "session-2" });
+    const test = makeContext({ fetchImpl: fetch, factories: { brain } });
+    tools.answer = (req) => (req.path === "/media" ? uploads : { runId: "7-1", unpushed: "", pushedSha: null });
+
+    await buildProgram(test.ctx).parseAsync(args);
+
+    expect(tools.received.map((r) => `${r.method} ${r.path}`)).toEqual(["POST /media", "POST /finish"]);
+    expect(JSON.parse(tools.received[0]?.body ?? "")).toEqual({ media });
+    expect(JSON.parse(callback.received[0]?.body ?? "")).toMatchObject({ ok: true, media: uploads });
+  });
+
+  it("lists every item as not attached when the tools sidecar cannot attach them", async () => {
+    const { args, tools, callback } = await setUp(specFor());
+    const brain = new FakeBrain({ result: { outcome: "implemented", media: [{ path: "shots/a.png", caption: "After" }] } });
+    const test = makeContext({ fetchImpl: fetch, factories: { brain } });
+    tools.status = (req) => (req.path === "/media" ? 502 : 200);
+
+    await buildProgram(test.ctx).parseAsync(args);
+
+    const report = JSON.parse(callback.received[0]?.body ?? "") as { ok: boolean; media: { embeds: unknown[]; rejected: Array<{ name: string; reason: string }> } };
+    expect(report.ok).toBe(true);
+    expect(report.media.embeds).toEqual([]);
+    expect(report.media.rejected).toEqual([{ name: "a.png", reason: expect.stringContaining("upload failed") }]);
   });
 
   it("reports a failed setup without running the brain", async () => {

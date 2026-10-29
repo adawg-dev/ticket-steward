@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MediaListSchema, MediaUploadsSchema } from "../codehost/media.js";
 import type { Finding } from "./summary.js";
 
 export const FixResultSchema = z.object({
@@ -8,6 +9,8 @@ export const FixResultSchema = z.object({
   summary: z.string(),
   checksRun: z.array(z.string()),
   failureDetail: z.string().nullable(),
+  /** Screenshots and recordings of the round's change, for the merge request. */
+  media: MediaListSchema,
 });
 export type FixResult = z.infer<typeof FixResultSchema>;
 
@@ -52,5 +55,7 @@ export const StoredFixSchema = z.object({
   score: z.number().int(),
   reviewCount: z.number().int().nullable(),
   pipeline: z.string().nullable(),
+  /** The result's media as attached to the project, posted in the round's note; absent when the result listed none. */
+  media: MediaUploadsSchema.optional(),
 });
 export type StoredFix = z.infer<typeof StoredFixSchema>;

@@ -32,6 +32,8 @@ export interface GitLabMrApi {
   failedJobs(project: ProjectRef, pipelineId: number): Promise<FailedJob[]>;
   /** The last `lines` lines of the job's trace. */
   jobTraceTail(project: ProjectRef, jobId: number, lines: number): Promise<string>;
+  /** Uploads a file to the project (`POST /projects/:id/uploads`); its Markdown embeds it in any note on the project. */
+  uploadFile(project: ProjectRef, filename: string, data: Uint8Array): Promise<{ markdown: string }>;
 }
 
 /** GitLab project and group access tokens post as bot users named `project_<id>_bot_<hex>` or `group_<id>_bot_<hex>`. */
@@ -80,6 +82,7 @@ const BridgeSchema = z.object({ downstream_pipeline: z.object({ id: z.number() }
 const UserSchema = z.object({ username: z.string() });
 const TokenSchema = z.object({ scopes: z.array(z.string()) });
 const MemberSchema = z.object({ access_level: z.number() });
+const UploadSchema = z.object({ markdown: z.string() });
 
 export interface GitLabMrClientOptions {
   baseUrl: string;
@@ -202,6 +205,12 @@ export class GitLabMrClient implements GitLabMrApi {
     return trace.replace(/\n+$/, "").split("\n").slice(-lines).join("\n");
   }
 
+  async uploadFile(project: ProjectRef, filename: string, data: Uint8Array): Promise<{ markdown: string }> {
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(data)]), filename);
+    return { markdown: UploadSchema.parse(await (await this.request("POST", `${this.projectPath(project)}/uploads`, form)).json()).markdown };
+  }
+
   private async failedJobsAt(project: ProjectRef, pipelineId: number, depth: number): Promise<FailedJob[]> {
     const base = `${this.projectPath(project)}/pipelines/${pipelineId}`;
     const jobs = (await this.paged(`${base}/jobs?scope[]=failed`, JobSchema)).map((job) => ({ id: job.id, name: job.name, stage: job.stage, webUrl: job.web_url }));
@@ -236,13 +245,14 @@ export class GitLabMrClient implements GitLabMrApi {
     return all;
   }
 
-  /** GitLab.com limits note creation to about 60 per minute per user; a 429 waits out Retry-After. */
+  /** GitLab.com limits note creation to about 60 per minute per user; a 429 waits out Retry-After. A form goes as multipart, anything else as JSON. */
   private async request(method: string, path: string, body?: unknown): Promise<Response> {
+    const json = body !== undefined && !(body instanceof FormData);
     for (let attempt = 0; ; attempt += 1) {
       const response = await this.fetchImpl(`${this.api}${path}`, {
         method,
-        headers: { "PRIVATE-TOKEN": this.token, ...(body === undefined ? {} : { "content-type": "application/json" }) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        headers: { "PRIVATE-TOKEN": this.token, ...(json ? { "content-type": "application/json" } : {}) },
+        ...(body instanceof FormData ? { body } : json ? { body: JSON.stringify(body) } : {}),
       });
       if (response.status === 429 && attempt < MAX_RETRIES) {
         const seconds = Number(response.headers.get("retry-after") ?? "1");

@@ -77,8 +77,12 @@ export const patchAttempt = (ctx: RunContext, deps: PipelineDeps, patch: Attempt
   if (current !== undefined) deps.stores.attempts.patch(current.id, patch);
 };
 
-/** Playwright's MCP server over stdio: it drives the browser in the agent's own process tree, so it never runs in a sidecar. */
-export const playwrightMcpSpec = (): StdioMcpServerSpec => {
+/**
+ * Playwright's MCP server over stdio: it drives the browser in the agent's own process tree, so it never runs in a sidecar.
+ * Its devtools tools record video (`browser_start_video`, `browser_video_chapter`, `browser_stop_video`); screenshots and
+ * videos land in the run's artifacts dir, where the agent lists them as the result's `media`.
+ */
+export const playwrightMcpSpec = (artifactsDir: string): StdioMcpServerSpec => {
   const packagePath = createRequire(import.meta.url).resolve("@playwright/mcp/package.json");
   const { bin } = PlaywrightPackage.parse(JSON.parse(readFileSync(packagePath, "utf8")));
   const relative = typeof bin === "string" ? bin : Object.values(bin)[0];
@@ -86,7 +90,7 @@ export const playwrightMcpSpec = (): StdioMcpServerSpec => {
   return {
     command: process.execPath,
     // Console output at info level ran to 100k+ characters per call; warnings and errors are what bugs show up as.
-    args: [join(dirname(packagePath), relative), "--console-level", "warning"],
+    args: [join(dirname(packagePath), relative), "--console-level", "warning", "--caps=devtools", "--output-dir", artifactsDir],
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), ...playwrightEnv() },
   };
 };
@@ -224,7 +228,7 @@ export const brainInput = (
     ...(config.brain.kind === "openai-agents" && config.brain.reasoningEffort !== undefined ? { reasoningEffort: config.brain.reasoningEffort } : {}),
     mcpServers: {
       codehost: codehostMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path, sha: worktree.sha }),
-      playwright: playwrightMcpSpec(),
+      playwright: playwrightMcpSpec(paths.artifactsDir),
       orbit: orbitMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, worktreePath: worktree.path }),
       // Only a run that may push gets the push tool; its target is fixed here, never chosen by the agent.
       ...(opts.push === undefined ? {} : { push: pushMcpSpec({ binPath: deps.binPath, configPath: deps.configPath, target: opts.push }) }),

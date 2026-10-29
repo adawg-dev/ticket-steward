@@ -54,7 +54,8 @@ const postImplementSummary = async (deps: PipelineDeps, loop: Loop, discussions:
   if (discussions.some((discussion) => discussion.notes.some((note) => note.body.includes(marker)))) return;
   const stored = deps.stores.jobs.get(loop.implementJobId)?.implementResult ?? null;
   if (stored === null || stored.result === null || stored.handback !== null) return;
-  await noteOnce(deps, loop, marker, buildImplementSummary({ jobId: loop.implementJobId, identifier: loop.identifier, result: stored.result }));
+  const media = stored.media === undefined ? {} : { media: stored.media };
+  await noteOnce(deps, loop, marker, buildImplementSummary({ jobId: loop.implementJobId, identifier: loop.identifier, result: stored.result, ...media }));
 };
 
 /** The next poll: one interval out, but no later than just past the wait's deadline, so a timeout never overruns by a poll. */

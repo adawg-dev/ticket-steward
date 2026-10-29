@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MediaUploadsSchema } from "../codehost/media.js";
 import { PushTargetSchema } from "../push/target.js";
 
 /**
@@ -66,6 +67,11 @@ export const RunReportSchema = z.object({
   sessionId: z.string().min(1).nullable(),
   output: z.unknown(),
   usage: UsageSchema.nullable(),
+  /**
+   * The result's media as the run pod's tools sidecar attached them; absent when the run attached none (the local
+   * runtime, whose finish attaches them from the artifacts dir itself).
+   */
+  media: MediaUploadsSchema.exactOptional(),
 });
 
 export type RunReport = z.infer<typeof RunReportSchema>;

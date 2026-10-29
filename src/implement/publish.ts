@@ -1,3 +1,4 @@
+import { renderMedia, type MediaUploads } from "../codehost/media.js";
 import type { LabelsConfig } from "../config/schema.js";
 import { closedReason } from "../core/intake.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
@@ -7,15 +8,20 @@ import type { ImplementResult, StoredImplement } from "./result.js";
 
 const list = (items: string[]): string[] => items.filter((item) => item.trim() !== "").map((item) => `- ${item.trim()}`);
 
-/** The implement summary the Greptile loop posts on the MR once it finds it: what changed, review notes and checks run. */
-export const buildImplementSummary = (input: { jobId: number; identifier: string; result: ImplementResult }): string => {
+/**
+ * The implement summary the Greptile loop posts on the MR once it finds it: what changed, review notes, checks run, and
+ * the screenshots and recordings the job attached.
+ */
+export const buildImplementSummary = (input: { jobId: number; identifier: string; result: ImplementResult; media?: MediaUploads }): string => {
   const { result } = input;
+  const media = renderMedia(input.media);
   return [
     `Ticket Steward implemented ${input.identifier} (job ${input.jobId}).`,
     "",
     result.summary.trim(),
     ...(result.reviewNotes.length > 0 ? ["", "**For the reviewer**", ...list(result.reviewNotes)] : []),
     ...(result.checksRun.length > 0 ? ["", "**Checks the agent ran**", ...list(result.checksRun)] : []),
+    ...(media.length > 0 ? ["", ...media] : []),
   ].join("\n");
 };
 

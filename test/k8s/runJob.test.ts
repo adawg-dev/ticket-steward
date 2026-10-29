@@ -113,6 +113,13 @@ describe("buildRunJob", () => {
       expect(allContainers(job).filter((container) => (container.volumeMounts ?? []).some((mount) => mount.name === volume)).map((container) => container.name).sort()).toEqual([...owners]);
     }
   });
+
+  it("lets the tools sidecar read the job dir, where the agent leaves its screenshots and videos, but not write to it", () => {
+    const job = build();
+    const jobMount = (name: string) => named(job, name).volumeMounts?.find((mount) => mount.name === "job");
+    expect(jobMount("agent")).toEqual({ name: "job", mountPath: "/var/lib/ticket-steward/jobs/7" });
+    expect(jobMount("tools")).toEqual({ name: "job", mountPath: "/var/lib/ticket-steward/jobs/7", readOnly: true });
+  });
 });
 
 describe("the runtime config", () => {

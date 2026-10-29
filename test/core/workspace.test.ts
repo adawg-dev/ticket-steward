@@ -83,6 +83,12 @@ describe("brainInput", () => {
     vi.unstubAllEnvs();
   });
 
+  it("gives Playwright its devtools (video) and saves its screenshots and videos in the artifacts dir", () => {
+    const args = brainInput(fullDeps, paths, worktree, "prompt", {}, "implement").mcpServers.playwright?.args ?? [];
+    expect(args).toContain("--caps=devtools");
+    expect(args.slice(args.indexOf("--output-dir"), args.indexOf("--output-dir") + 2)).toEqual(["--output-dir", paths.artifactsDir]);
+  });
+
   it("adds the Orbit server with no secrets and points the agent's own orbit at the data dir's graph", () => {
     const input = brainInput(fullDeps, paths, worktree, "prompt", { PATH: "/bin" }, "implement");
     expect(input.mcpServers.orbit?.args).toEqual(["/bin/steward", "mcp", "orbit", "--config", "/etc/steward/config.json", "--workspace", worktree.path]);

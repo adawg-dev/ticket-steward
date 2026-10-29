@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Command } from "commander";
+import { GitLabMrClient } from "../codehost/gitlabMr.js";
 import { createCodeHost } from "../codehost/index.js";
+import { rejectAll, uploadMedia } from "../codehost/media.js";
 import { execOrbit } from "../orbit/run.js";
 import { orbitRemote } from "../orbit/server.js";
 import { httpCheckRunner } from "../push/checks.js";
@@ -31,7 +33,7 @@ const readSpec = async (path: string): Promise<RunSpec> => RunSpecSchema.parse(J
 export const registerTools = (program: Command, ctx: CliContext): void => {
   program
     .command("tools")
-    .description("run pod sidecar: serves the code host, push and Orbit MCP tools over HTTP on 127.0.0.1 with the steward's credentials")
+    .description("run pod sidecar: serves the code host, push and Orbit MCP tools, and attaches the result's media, over HTTP on 127.0.0.1 with the steward's credentials")
     .requiredOption("--spec <file>", "the run's spec (JSON)")
     .option("--listen <address>", "127.0.0.1:<port> to listen on", `${TOOLS_HOST}:${TOOLS_PORT}`)
     .option("--guard <file>", "render-overlay's guard file: the overlay's real values and placeholders, which no commit may carry")
@@ -82,6 +84,12 @@ export const registerTools = (program: Command, ctx: CliContext): void => {
           const work = { ...read, unpushed: redactor.redact(read.unpushed) };
           await postWork({ baseUrl: callbackUrl, token, work, warn: (message) => void ctx.stderr.write(`tools: ${message}\n`) });
           return work;
+        },
+        // The agent container cannot reach GitLab: the result's media are checked and uploaded here, from the shared job dir.
+        media: (items) => {
+          const gitlabToken = secrets.GITLAB_TOKEN;
+          if (config.codehost.kind !== "gitlab" || gitlabToken === undefined || gitlabToken === "") return Promise.resolve(rejectAll(items, "media is attached on GitLab only"));
+          return uploadMedia(new GitLabMrClient({ baseUrl: config.codehost.baseUrl, token: gitlabToken }), config.codehost.project, spec.artifactsDir, items);
         },
       });
       println(ctx, `tools listening on ${server.url}`);

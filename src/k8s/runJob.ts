@@ -144,7 +144,8 @@ export const buildRunJob = (spec: RunSpec, p: {
       image: runtime.images.steward,
       command: steward("tools", "--spec", specFile, "--guard", `${GUARD_DIR}/guard.json`),
       env: [...awsEnv, ...env({ [CALLBACK_URL_ENV]: runtime.callbackUrl, [TOOLS_TOKEN_ENV]: p.tokens.tools })],
-      volumeMounts: [awsToken, config, specMount, mount("guard", GUARD_DIR, true), mount("work", workRoot)],
+      // The job dir read-only: it attaches the screenshots and videos the agent left in the artifacts dir.
+      volumeMounts: [awsToken, config, specMount, mount("guard", GUARD_DIR, true), mount("work", workRoot), mount("job", jobDir, true)],
     }),
     // The run's throwaway services answer on the pod's loopback only.
     sidecar({

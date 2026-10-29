@@ -2,6 +2,7 @@ import { request } from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { MediaItem, MediaUploads } from "../../src/codehost/media.js";
 import type { OrbitRemote } from "../../src/orbit/server.js";
 import type { PushResult } from "../../src/push/service.js";
 import type { RunSpec, WorkReport } from "../../src/run/protocol.js";
@@ -39,11 +40,22 @@ const work: WorkReport = { runId: "7-1", unpushed: "", pushedSha: SHA };
 
 let server: ToolsServer | null = null;
 
-const start = async (runSpec: RunSpec): Promise<ToolsServer> => {
+const uploads: MediaUploads = { embeds: [{ caption: "After", markdown: "![a.png](/uploads/1/a.png)" }], rejected: [] };
+const attached: MediaItem[][] = [];
+
+const start = async (runSpec: RunSpec, opts: { media?: boolean } = {}): Promise<ToolsServer> => {
   server = await startToolsServer({
     listen: { host: "127.0.0.1", port: 0 },
     routes: toolRoutes({ spec: runSpec, codehost: new FakeCodeHost(), orbit, push: () => () => Promise.resolve(pushed) }),
     finish: () => Promise.resolve(work),
+    ...(opts.media === false
+      ? {}
+      : {
+          media: (items: MediaItem[]) => {
+            attached.push(items);
+            return Promise.resolve(uploads);
+          },
+        }),
   });
   return server;
 };
@@ -69,6 +81,7 @@ const post = (url: string, headers: Record<string, string>, body = ""): Promise<
 afterEach(async () => {
   await server?.close();
   server = null;
+  attached.length = 0;
 });
 
 describe("the tools sidecar", () => {
@@ -114,6 +127,28 @@ describe("the tools sidecar", () => {
     expect(await response.json()).toEqual(work);
   });
 
+  it("attaches the result's media and answers with what it attached", async () => {
+    const { url } = await start(spec);
+    const media = [{ path: "a.png", caption: "After" }];
+
+    const response = await fetch(`${url}/media`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ media }) });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(uploads);
+    expect(attached).toEqual([media]);
+  });
+
+  it("answers 400 to a media body that is not { media }, and 404 when it cannot attach media", async () => {
+    const { url } = await start(spec);
+    expect((await fetch(`${url}/media`, { method: "POST", body: JSON.stringify({ files: ["a.png"] }) })).status).toBe(400);
+    expect((await fetch(`${url}/media`, { method: "GET" })).status).toBe(405);
+    expect(attached).toEqual([]);
+    await server?.close();
+
+    const without = await start(spec, { media: false });
+    expect((await fetch(`${without.url}/media`, { method: "POST", body: JSON.stringify({ media: [] }) })).status).toBe(404);
+  });
+
   it("refuses a request with a foreign Host or any Origin, on /finish and the MCP routes alike", async () => {
     const { url } = await start(spec);
     const port = new URL(url).port;
@@ -122,6 +157,7 @@ describe("the tools sidecar", () => {
 
     for (const headers of [{ host: `rebound.example:${port}` }, { host: "127.0.0.1:1" }, { origin: "http://rebound.example" }, { origin: "null" }]) {
       expect(await post(`${url}/finish`, headers)).toBe(403);
+      expect(await post(`${url}/media`, headers, JSON.stringify({ media: [] }))).toBe(403);
       expect(await post(`${url}/mcp/orbit`, { ...mcp, ...headers }, body)).toBe(403);
     }
     expect(await post(`${url}/finish`, { host: `localhost:${port}` })).toBe(200);

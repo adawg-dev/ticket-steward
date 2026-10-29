@@ -37,6 +37,7 @@ const implemented: ImplementResult = {
   checksRun: ["tsc: ok"],
   questions: [],
   failureDetail: null,
+  media: [],
 };
 
 let dir: string;

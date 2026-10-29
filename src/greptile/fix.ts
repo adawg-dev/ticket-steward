@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { BOT_USER, type GitLabMrApi, type MergeRequestInfo, type MrDiscussion } from "../codehost/gitlabMr.js";
+import { attachedMedia, type MediaUploads } from "../codehost/media.js";
 import type { GreptileConfig } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
@@ -17,7 +18,7 @@ import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store
 import type { TicketBundle } from "../tracker/types.js";
 import { collectCiFailures, type CiFailure } from "./ci.js";
 import { renderFixPrompt } from "./prompt.js";
-import { publishHandback, publishStop, publishThreads, requestReview } from "./publish.js";
+import { publishHandback, publishRoundMedia, publishStop, publishThreads, requestReview } from "./publish.js";
 import { validateFixResult, type FixResult, type StoredFix } from "./result.js";
 import { findSummary, openFindings, type Finding } from "./summary.js";
 
@@ -139,6 +140,8 @@ const publishChanged = async (fix: Fix, stored: StoredFix, result: FixResult, mr
   }
   const replied = await publishThreads(deps, reload(fix), result, pending.sha);
   if (replied.status !== "succeeded") return replied;
+  const noted = await publishRoundMedia(deps, reload(fix), result.summary, stored.media);
+  if (noted.status !== "succeeded") return noted;
   return nextRound(
     fix,
     { headSha: pending.sha, reviewCountAtTrigger: null, adoptedFrom: null, pendingPush: null },
@@ -156,6 +159,8 @@ const publishNoChanges = async (fix: Fix, stored: StoredFix, result: FixResult):
   }
   const replied = await publishThreads(fix.deps, fix.loop, result, null);
   if (replied.status !== "succeeded") return replied;
+  const noted = await publishRoundMedia(fix.deps, fix.loop, result.summary, stored.media);
+  if (noted.status !== "succeeded") return noted;
   const requested = await requestReview(fix.deps, fix.loop);
   if (requested.status !== "succeeded") return requested;
   return nextRound(fix, { reviewCountAtTrigger: stored.reviewCount }, round(fix, stored, result, "no_changes"));
@@ -184,16 +189,30 @@ const handingBack = (facts: RoundFacts, result: FixResult | null, reason: string
 });
 
 /**
- * The decision for a valid result: hand back, or publish a `changed` or `no_changes` round. The steward never commits or
- * pushes for the agent: a change counts only once the push tool pushed it, and work the executor found unpushed hands back.
+ * The decision for a valid result: hand back, or publish a `changed` or `no_changes` round with the media `attach` gives.
+ * The steward never commits or pushes for the agent: a change counts only once the push tool pushed it, and work the
+ * executor found unpushed hands back.
  */
-const handleResult = (fix: Fix, work: WorkReport, facts: RoundFacts, result: FixResult, open: number, mr: MergeRequestInfo): Promise<JobOutcome> => {
+const handleResult = async (
+  fix: Fix,
+  work: WorkReport,
+  facts: RoundFacts,
+  result: FixResult,
+  open: number,
+  mr: MergeRequestInfo,
+  attach: () => Promise<MediaUploads | undefined>,
+): Promise<JobOutcome> => {
+  // Attached once, before the round is stored: a retry posts the stored embeds and never uploads again.
+  const published = async (): Promise<StoredFix> => {
+    const media = await attach();
+    return { ...facts, result, handback: null, ...(media === undefined ? {} : { media }) };
+  };
   if (result.outcome === "failed") return decide(fix, handingBack(facts, result, "the agent could not finish", result.failureDetail ?? ""), mr);
   const leftover = fix.deps.redactor.redact(work.unpushed);
   if (result.outcome === "changed") {
     if (work.pushedSha === null) return decide(fix, handingBack(facts, result, "the agent did not push its change", leftover), mr);
     if (leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", leftover), mr);
-    return decide(fix, { ...facts, result, handback: null }, mr);
+    return decide(fix, await published(), mr);
   }
   if (work.pushedSha !== null) return decide(fix, handingBack(facts, result, "the agent pushed a change but reported no changes", work.pushedSha), mr);
   if (leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", leftover), mr);
@@ -203,7 +222,7 @@ const handleResult = (fix: Fix, work: WorkReport, facts: RoundFacts, result: Fix
   if (fix.loop.history.at(-1)?.outcome === "no_changes") {
     return decide(fix, handingBack(facts, result, "the agent and Greptile disagree two rounds running", result.summary), mr);
   }
-  return decide(fix, { ...facts, result, handback: null }, mr);
+  return decide(fix, await published(), mr);
 };
 
 /** A prepared round: the spec to execute, and what its finish judges the result against. */
@@ -319,7 +338,9 @@ const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: 
 
   const validated = validateFixResult(report.output, findings);
   if (!validated.ok) return decide(fix, handingBack(facts, null, "the agent's result was invalid", validated.error), mr);
-  return handleResult(fix, work, facts, validated.result, findings.length, mr);
+  const attach = (): Promise<MediaUploads | undefined> =>
+    attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab: fix.gitlab, project: mr.projectId });
+  return handleResult(fix, work, facts, validated.result, findings.length, mr, attach);
 };
 
 /** A fresh round: prepare, execute (in-process or in a run pod), finish. */

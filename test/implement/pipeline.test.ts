@@ -20,6 +20,7 @@ import { SlotClient } from "../../src/workspace/slots.js";
 import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
+import { FakeGitLabMr } from "../fakes/fakeGitLabMr.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
@@ -48,6 +49,7 @@ const issue: TicketBundle = {
 const trigger: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: issue.description, stateType: "unstarted", action: "implement" };
 
 const BRANCH = "fix/API-1-adapter-drops-the-last-chunk";
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
 
 const implemented: ImplementResult = {
   outcome: "implemented",
@@ -56,6 +58,7 @@ const implemented: ImplementResult = {
   checksRun: ["tsc: ok"],
   questions: [],
   failureDetail: null,
+  media: [],
 };
 
 let repo: TmpRepo;
@@ -314,6 +317,45 @@ describe("runImplement", () => {
     expect(job?.pushedAt).not.toBeNull();
     expect(stores.pushes.forJob(ctx.jobId)).toMatchObject([{ sha: job?.commitSha, pushedAt: expect.any(String) }]);
     expect(tracker.labelsOf("issue-1")).toEqual(["agent-implemented"]);
+  });
+
+  it("attaches the screenshots the agent listed and stores what it attached with the result, for the MR summary", async () => {
+    const media = [{ path: "after.png", caption: "The adapter's output after the fix" }, { path: "tool.exe", caption: "Not media" }];
+    const brain = agentBrain({ ...implemented, media });
+    const gitlab = new FakeGitLabMr();
+    const deps = { ...depsFor(brain), gitlab };
+    const runBrain = async (config: unknown, input: BrainInput): Promise<BrainRun> => {
+      await writeFile(join(input.artifactsDir, "after.png"), PNG);
+      await writeFile(join(input.artifactsDir, "tool.exe"), "MZ");
+      return brain.runBrain(config, input);
+    };
+    const ctx = claim();
+
+    expect(await runImplement(ctx, { ...deps, runBrain })).toEqual({ status: "succeeded" });
+
+    expect(gitlab.uploads).toEqual([{ project: "acme/repo", filename: "after.png", bytes: PNG.length }]);
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.media).toEqual({
+      embeds: [{ caption: "The adapter's output after the fix", markdown: "![after.png](/uploads/1/after.png)" }],
+      rejected: [{ name: "tool.exe", reason: "not an image or video (png, jpg, jpeg, gif, webp, mp4, webm)" }],
+    });
+  });
+
+  it("keeps what a run pod's tools sidecar attached instead of uploading again", async () => {
+    const attached = { embeds: [{ caption: "After", markdown: "![a.png](/uploads/9/a.png)" }], rejected: [] };
+    const brain = agentBrain({ ...implemented, media: [{ path: "a.png", caption: "After" }] });
+    const gitlab = new FakeGitLabMr();
+    const pod: RunExecutor = {
+      execute: async (spec) => {
+        const run = await localExecutor(depsFor(brain)).execute(spec);
+        return { ...run, report: { ...run.report, media: attached } };
+      },
+    };
+    const ctx = claim();
+
+    expect(await runImplement(ctx, { ...depsFor(brain), gitlab, executor: pod })).toEqual({ status: "succeeded" });
+
+    expect(gitlab.uploads).toEqual([]);
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.media).toEqual(attached);
   });
 
   it("hands back to needs-info without touching git", async () => {

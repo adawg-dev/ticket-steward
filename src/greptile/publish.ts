@@ -1,3 +1,4 @@
+import { renderMedia, type MediaUploads } from "../codehost/media.js";
 import type { PipelineDeps } from "../core/deps.js";
 import type { JobOutcome } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
@@ -105,6 +106,21 @@ export const publishStop = (deps: PipelineDeps, loop: Loop, reason: string, note
     { state: "stopped" },
     { status: "succeeded", warning: `stopped: ${reason}` },
   );
+};
+
+/**
+ * The round's note: its summary and the screenshots and recordings the fix attached, once per round and life of the loop.
+ * Nothing is posted for a round without media; its threads' replies say what it did.
+ */
+export const publishRoundMedia = async (deps: PipelineDeps, loop: Loop, summary: string, media: MediaUploads | undefined): Promise<JobOutcome> => {
+  const lines = renderMedia(media);
+  if (lines.length === 0) return { status: "succeeded" };
+  try {
+    await noteOnce(deps, loop, LOOP_MARKER(loop.id, `round ${loop.round} media ${lifetime(loop)}`), [`Round ${loop.round + 1}: ${summary.trim()}`, "", ...lines].join("\n"));
+  } catch (err) {
+    return { status: "publish_failed", error: `round note: ${errorMessage(err)}` };
+  }
+  return { status: "succeeded" };
 };
 
 /**

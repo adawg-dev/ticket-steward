@@ -54,8 +54,13 @@ When you push, the steward runs these itself, and a failure refuses the push:
 This ticket has no pushed branch, so you cannot push changes from this conversation. Do not edit or commit files. If the message asks for a code change, say in your reply that code changes need the ticket's implement label.
 
 {{/canPush}}
+## Show the change
+
+When what you changed or are asked about shows in the app, show it on the merge request. Take screenshots of what changed with the Playwright tools. For an interaction or a flow, record a short video instead: call `browser_start_video` before the first step, `browser_video_chapter` with a short title at each step, and `browser_stop_video` after the last. Playwright saves both under `{{artifactsDir}}`. List each file to show in `media`, with its path and a one-line caption saying what it shows; the steward attaches them below your reply. At most 10 files of up to 25 MB each, as PNG, JPEG, GIF, WebP, MP4 or WebM. Leave `media` empty when nothing visible changed.
+
 ## Result
 
 - `reply`: your answer to {{author}}, in Markdown, posted in the same discussion on the merge request. Say what you found or changed, and name the commit you pushed, if any.
 - `decisions`: lasting instructions {{author}} gave in this message about how the merge request must stay ("keep the v1 endpoint", "don't rename the queue"), one line each, restated from what they said. Only what they said, never what you infer, and not one-off requests you carried out. Leave out the ones already listed above. Empty when there are none.
+- `media`: the screenshots and videos to show (see above); empty when there are none.
 - Report what happened, not what you hoped: a check that failed, timed out or that you skipped goes in your reply with that result and why. Never describe a check you did not run as passing. When something is done and verified, say so plainly.

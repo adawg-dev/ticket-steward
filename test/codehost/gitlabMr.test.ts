@@ -157,4 +157,24 @@ describe("GitLabMrClient", () => {
       "GET https://g/api/v4/personal_access_tokens/self",
     ]);
   });
+
+  it("uploads a file to the project as multipart and returns its Markdown", async () => {
+    const seen: Array<{ url: string; method: string; contentType: string | null; file: { name: string; bytes: number } | null }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const body = init?.body;
+      const file = body instanceof FormData ? body.get("file") : null;
+      seen.push({
+        url: String(input),
+        method: init?.method ?? "GET",
+        contentType: new Headers(init?.headers).get("content-type"),
+        file: file instanceof File ? { name: file.name, bytes: file.size } : null,
+      });
+      return reply(201, { alt: "after", url: "/uploads/abc/after.png", full_path: "/-/project/42/uploads/abc/after.png", markdown: "![after](/uploads/abc/after.png)" });
+    };
+
+    const uploaded = await client(fetchImpl).uploadFile("acme/repo", "after.png", new Uint8Array([1, 2, 3]));
+
+    expect(uploaded).toEqual({ markdown: "![after](/uploads/abc/after.png)" });
+    expect(seen).toEqual([{ url: "https://g/api/v4/projects/acme%2Frepo/uploads", method: "POST", contentType: null, file: { name: "after.png", bytes: 3 } }]);
+  });
 });

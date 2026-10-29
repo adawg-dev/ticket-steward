@@ -52,6 +52,17 @@ describe.each(prompts)("the $name prompt", ({ render }) => {
     expect(out).toContain("Start long-running processes (the app, a dev server, a watcher) only when a check needs them");
     expect(out).toContain("- Report what happened, not what you hoped:");
   });
+
+  it("asks for screenshots of a visible change and a video of a flow, saved in the artifacts dir and listed in media", async () => {
+    const out = await render();
+    expect(out).toContain("## Show the change");
+    expect(out).toContain("`browser_start_video` before the first step, `browser_video_chapter`");
+    expect(out).toContain("`browser_stop_video` after the last");
+    expect(out).toMatch(/Playwright saves both under `\/(jobs\/1\/)?art(ifacts)?`/);
+    expect(out).toContain("At most 10 files of up to 25 MB each");
+    expect(out).toContain("- `media`:");
+    expect(out.indexOf("## Show the change")).toBeLessThan(out.indexOf("## Result"));
+  });
 });
 
 describe("readRepoPartial", () => {

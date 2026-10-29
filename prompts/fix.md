@@ -111,6 +111,10 @@ Do not repeat them across the repository; spend your own checks on behaviour.
 3. If the tool refuses, it says why (uncommitted changes, a commit subject without the identifier, a merge commit, a secret in the change, a failed check, a closed ticket, a branch that moved). Fix the cause, commit again (amending your own unpushed commits is fine), and call `push` again.
 4. Finish with everything committed and pushed. Uncommitted changes or commits you did not push hand the ticket back to a person.
 
+## Show the change
+
+When this round's change shows in the app, show it on the merge request. Take screenshots of what changed with the Playwright tools. For an interaction or a flow, record a short video instead: call `browser_start_video` before the first step, `browser_video_chapter` with a short title at each step, and `browser_stop_video` after the last. Playwright saves both under `{{artifactsDir}}`. List each file to show in `media`, with its path and a one-line caption saying what it shows; the steward attaches them to the round's note on the merge request. At most 10 files of up to 25 MB each, as PNG, JPEG, GIF, WebP, MP4 or WebM. Leave `media` empty when nothing visible changed.
+
 ## Result
 
 - `outcome: "changed"` when you edited files to address findings or failures, and the `push` tool pushed them.
@@ -119,5 +123,6 @@ Do not repeat them across the repository; spend your own checks on behaviour.
 - `threads`: one entry per thread above, with its `discussionId`, `action` (`fixed` or `declined`) and a non-empty `reply` that says what you did or why you declined. No duplicates, none missing.
 - `summary`: a short account of the round for the merge request.
 - `checksRun`: each command, its result, and why it is in scope.
+- `media`: the screenshots and videos to show (see above); empty when there are none.
 - Report what happened, not what you hoped: a check that failed, timed out or that you skipped goes in `checksRun` with that result and why. Never describe a check you did not run as passing. When something is done and verified, say so plainly.
 - `failureDetail`: null unless the outcome is `failed`.

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MediaListSchema, MediaUploadsSchema } from "../codehost/media.js";
 
 export const ImplementResultSchema = z.object({
   outcome: z.enum(["implemented", "failed", "needs_info"]),
@@ -7,6 +8,8 @@ export const ImplementResultSchema = z.object({
   checksRun: z.array(z.string()),
   questions: z.array(z.string()),
   failureDetail: z.string().nullable(),
+  /** Screenshots and recordings of the change, for the merge request. */
+  media: MediaListSchema,
 });
 export type ImplementResult = z.infer<typeof ImplementResultSchema>;
 
@@ -38,5 +41,7 @@ export const StoredImplementSchema = z.object({
   handback: HandbackSchema.nullable(),
   /** The base the job's branch was cut from, so a retry can start the fix loop; absent on results stored before the push tool. */
   baseSha: z.string().optional(),
+  /** The result's media as attached to the project, embedded in the MR summary; absent when the result listed none. */
+  media: MediaUploadsSchema.optional(),
 });
 export type StoredImplement = z.infer<typeof StoredImplementSchema>;

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/types.js";
+import { attachedMedia } from "../codehost/media.js";
 import type { ImplementConfig } from "../config/schema.js";
 import { renderTicketMarkdown } from "../core/context.js";
 import type { PipelineDeps } from "../core/deps.js";
@@ -239,20 +240,30 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
     return { status: "succeeded", warning: `dry run: no push tool; the agent's work on ${baseSha.slice(0, 7)}:\n${work.unpushed === "" ? "nothing" : work.unpushed}` };
   }
 
+  // Attached once, before anything is stored: a retry publishes the stored embeds and never uploads again.
+  const media = await attachedMedia({
+    attached: report.media,
+    items: result.media,
+    artifactsDir: spec.artifactsDir,
+    gitlab: deps.gitlab,
+    project: deps.config.codehost.kind === "gitlab" ? deps.config.codehost.project : null,
+  });
+  const withMedia = media === undefined ? {} : { media };
+
   // The agent pushed through the push tool; the steward only reads the outcome, and never commits or pushes for it.
   let landed: boolean;
   try {
     landed = await pushLanded(ctx, deps, paths, configured.remote);
   } catch (err) {
     // Stored first, so the retry settles the push (publishImplementOnly) instead of running the brain again.
-    deps.stores.jobs.saveImplementResult(ctx.jobId, { result, handback: null, baseSha });
+    deps.stores.jobs.saveImplementResult(ctx.jobId, { result, handback: null, baseSha, ...withMedia });
     return { status: "publish_failed", error: `push: ${errorMessage(err)}` };
   }
   const detail = deps.redactor.redact(work.unpushed);
   if (!landed) return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent did not push its change", detail), baseSha });
   if (work.unpushed !== "") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent left unpushed work", detail), baseSha });
 
-  const stored: StoredImplement = { result, handback: null, baseSha };
+  const stored: StoredImplement = { result, handback: null, baseSha, ...withMedia };
   // Stored before the loop starts, so a crash from here on retries via publishImplementOnly, which starts it once.
   deps.stores.jobs.saveImplementResult(ctx.jobId, stored);
   startLoopFor(ctx, deps, paths, baseSha);

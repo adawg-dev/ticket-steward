@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MediaListSchema } from "../codehost/media.js";
 
 /** The hidden marker on every steward chat reply; intake never answers a note carrying it, so the steward never answers itself. */
 export const CHAT_MARKER = "<!-- ticket-steward:chat -->";
@@ -6,12 +7,14 @@ export const CHAT_MARKER = "<!-- ticket-steward:chat -->";
 export const NO_SESSION_REPLY = "No agent session is attached to this merge request.";
 
 /**
- * What the resumed agent answers: the text the steward posts in the note's discussion, and the lasting instructions the
- * person gave about the MR ("keep X", "don't Y"), one line each, restated from what they said (empty when none).
+ * What the resumed agent answers: the text the steward posts in the note's discussion, the lasting instructions the
+ * person gave about the MR ("keep X", "don't Y"), one line each, restated from what they said (empty when none), and
+ * screenshots or recordings to show with the reply.
  */
 export const ChatResultSchema = z.object({
   reply: z.string(),
   decisions: z.array(z.string()).default([]),
+  media: MediaListSchema,
 });
 export type ChatResult = z.infer<typeof ChatResultSchema>;
 

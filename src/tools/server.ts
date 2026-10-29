@@ -3,6 +3,8 @@ import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { z } from "zod";
+import { MediaItemSchema, type MediaItem, type MediaUploads } from "../codehost/media.js";
 import { CODEHOST_SERVER_INFO, registerCodeHostTools } from "../codehost/server.js";
 import type { CodeHost } from "../codehost/types.js";
 import { errorMessage } from "../core/workspace.js";
@@ -52,6 +54,26 @@ export interface ToolsServer {
 }
 
 const MCP_PREFIX = "/mcp/";
+/** A media request names at most a few files; anything larger is not one. */
+const MAX_MEDIA_BODY_BYTES = 64 * 1024;
+const MediaRequestSchema = z.object({ media: z.array(MediaItemSchema) });
+
+/** The request's JSON body, or null when it is larger than `limit` or not JSON. */
+const readJson = async (req: IncomingMessage, limit: number): Promise<unknown> => {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    size += buffer.length;
+    if (size > limit) return null;
+    chunks.push(buffer);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return null;
+  }
+};
 
 const answer = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { "content-type": "application/json" });
@@ -81,11 +103,18 @@ export const fromThePod = (req: IncomingMessage, port: number): boolean =>
   req.headers.origin === undefined && (req.headers.host === `${TOOLS_HOST}:${port}` || req.headers.host === `localhost:${port}`);
 
 /**
- * Serves the run's MCP routes at `/mcp/<name>` over Streamable HTTP, and `POST /finish`, which returns the run's work
- * report once `finish` has computed and delivered it. A request with a foreign Host or any Origin is 403, anything else 404. Errors never carry a credential: the tools
- * mask theirs, and `finish` reports git's scrubbed messages.
+ * Serves the run's MCP routes at `/mcp/<name>` over Streamable HTTP, `POST /finish`, which returns the run's work
+ * report once `finish` has computed and delivered it, and with `media`, `POST /media` (`{ media }`, the result's list),
+ * which attaches the files to the code host and answers with what it attached. A request with a foreign Host or any Origin
+ * is 403, anything else 404. Errors never carry a credential: the tools mask theirs, and `finish` reports git's scrubbed
+ * messages.
  */
-export const startToolsServer = async (p: { listen: { host: string; port: number }; routes: ToolRoutes; finish: () => Promise<WorkReport> }): Promise<ToolsServer> => {
+export const startToolsServer = async (p: {
+  listen: { host: string; port: number };
+  routes: ToolRoutes;
+  finish: () => Promise<WorkReport>;
+  media?: (items: MediaItem[]) => Promise<MediaUploads>;
+}): Promise<ToolsServer> => {
   let port = 0;
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (!fromThePod(req, port)) return answer(res, 403, { error: "the tools sidecar answers the pod's loopback only" });
@@ -97,6 +126,13 @@ export const startToolsServer = async (p: { listen: { host: string; port: number
       } catch (err) {
         return answer(res, 502, { error: errorMessage(err) });
       }
+    }
+    if (path === "/media") {
+      if (p.media === undefined) return answer(res, 404, { error: "this run cannot attach media" });
+      if (req.method !== "POST") return answer(res, 405, { error: "POST only" });
+      const parsed = MediaRequestSchema.safeParse(await readJson(req, MAX_MEDIA_BODY_BYTES));
+      if (!parsed.success) return answer(res, 400, { error: "the body must be { media: [{ path, caption }] }" });
+      return answer(res, 200, await p.media(parsed.data.media));
     }
     const route = path.startsWith(MCP_PREFIX) && Object.hasOwn(p.routes, path.slice(MCP_PREFIX.length)) ? p.routes[path.slice(MCP_PREFIX.length)] : undefined;
     if (route === undefined) return answer(res, 404, { error: `no route ${path}` });

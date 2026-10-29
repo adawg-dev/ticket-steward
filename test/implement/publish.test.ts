@@ -31,6 +31,7 @@ const implemented: ImplementResult = {
   checksRun: ["tsc: ok"],
   questions: [],
   failureDetail: null,
+  media: [],
 };
 
 const labeled: TriggerEvent = { kind: "issue.labeled", issueId: "issue-1", identifier: "API-1", teamKey: "API", deliveryId: "d-1", description: "", stateType: "started", action: "implement" };
@@ -94,6 +95,25 @@ describe("buildImplementSummary", () => {
         "",
         "**Checks the agent ran**",
         "- tsc: ok",
+      ].join("\n"),
+    );
+  });
+
+  it("ends with the screenshots and videos the job attached, and what it could not attach", () => {
+    const media = { embeds: [{ caption: "After", markdown: "![a.png](/uploads/1/a.png)" }], rejected: [{ name: "x.exe", reason: "not an image or video" }] };
+    expect(buildImplementSummary({ jobId: 3, identifier: "API-1", result: { ...implemented, reviewNotes: [], checksRun: [] }, media })).toBe(
+      [
+        "Ticket Steward implemented API-1 (job 3).",
+        "",
+        "Flush the buffer before closing the stream.",
+        "",
+        "**Screenshots and recordings**",
+        "",
+        "After",
+        "",
+        "![a.png](/uploads/1/a.png)",
+        "",
+        "Not attached: `x.exe` (not an image or video)",
       ].join("\n"),
     );
   });

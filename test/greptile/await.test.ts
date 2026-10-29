@@ -15,6 +15,7 @@ import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr, fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freshDataDir } from "../store/helpers.js";
+import type { MediaUploads } from "../../src/codehost/media.js";
 
 const NOW = new Date("2026-10-27T12:00:00.000Z");
 const SHA = "c".repeat(40);
@@ -46,6 +47,7 @@ const implemented: ImplementResult = {
   checksRun: ["tsc: ok"],
   questions: [],
   failureDetail: null,
+  media: [],
 };
 
 const summaryBody = (score: number, sha = SHA): string =>
@@ -96,17 +98,17 @@ const makeDeps = (): PipelineDeps => ({
 });
 
 /** A finished implement job for the loop to come from, with the result its push stored. */
-const implementJob = (): number => {
+const implementJob = (media?: MediaUploads): number => {
   const jobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
   stores.jobs.claimById(jobId);
-  stores.jobs.saveImplementResult(jobId, { result: implemented, handback: null });
+  stores.jobs.saveImplementResult(jobId, { result: implemented, handback: null, ...(media === undefined ? {} : { media }) });
   stores.jobs.finish(jobId, { status: "succeeded" });
   return jobId;
 };
 
-const createLoop = (labelDriven = true): number =>
+const createLoop = (labelDriven = true, media?: MediaUploads): number =>
   stores.loops.create({
-    issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: implementJob(), branch: "api-1-fix", baseSha: "a".repeat(40),
+    issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: implementJob(media), branch: "api-1-fix", baseSha: "a".repeat(40),
     headSha: SHA, worktreeName: "API-1-1", labelDriven, sessionId: "session-1",
   });
 
@@ -199,6 +201,15 @@ describe("runAwaitReview", () => {
     expect(note).toContain("**For the reviewer**\n- Check the streaming test.");
     expect(note).toContain("**Checks the agent ran**\n- tsc: ok");
     expect(note).toContain(LOOP_MARKER(id, "implement-summary"));
+  });
+
+  it("embeds the screenshots and videos the implement job attached in its summary", async () => {
+    const id = createLoop(true, { embeds: [{ caption: "The settings page after the change", markdown: "![after.png](/uploads/1/after.png)" }], rejected: [] });
+    gitlab.openMr = fakeMergeRequest({ sha: SHA });
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.notes[0]).toContain("**Screenshots and recordings**\n\nThe settings page after the change\n\n![after.png](/uploads/1/after.png)");
   });
 
   it("posts nothing while no MR is open", async () => {
