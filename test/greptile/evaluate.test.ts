@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { evaluateRound, type RoundInput } from "../../src/greptile/evaluate.js";
-import type { Finding, GreptileSummary } from "../../src/greptile/summary.js";
+import type { MrDiscussion, MrNote } from "../../src/codehost/gitlabMr.js";
+import { evaluateRound, startedBy, workList, type RoundInput, type WorkItem } from "../../src/greptile/evaluate.js";
+import type { GreptileSummary } from "../../src/greptile/summary.js";
+import { DEFAULT_SETTINGS } from "../../src/settings/schema.js";
 import type { Loop } from "../../src/store/loops.js";
 import type { GreptileConfig } from "../../src/config/schema.js";
 import { fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
@@ -9,7 +11,7 @@ const SHA = "c".repeat(40);
 const NOW = new Date("2026-10-27T12:00:00Z");
 const minutesAgo = (m: number): string => new Date(NOW.getTime() - m * 60_000).toISOString();
 
-const settings: GreptileConfig = {
+const config: GreptileConfig = {
   botUsername: "greptile-bot", maxRounds: 5, prompt: "p", pollSeconds: 60, mrTimeoutMinutes: 60,
   reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 60, ciLogLines: 200,
 };
@@ -17,17 +19,18 @@ const loop = (over: Partial<Loop> = {}): Loop => ({
   id: 1, issueId: "i", identifier: "API-1", teamKey: "API", implementJobId: 1, branch: "api-1-fix", baseSha: "a".repeat(40),
   headSha: SHA, worktreeName: "w", labelDriven: false, projectId: 42, mrIid: 7, mrUrl: null, sessionId: null, round: 1,
   state: "awaiting_review", history: [], decisions: [], waitStartedAt: minutesAgo(1), reviewCountAtTrigger: null, adoptedFrom: null,
-  pendingPush: null, handedBackAt: null, pendingNotesSince: null, endedAt: null, createdAt: minutesAgo(100), ...over,
+  pendingPush: null, handedBackAt: null, pendingNotesSince: null, botRounds: 0, endedAt: null, createdAt: minutesAgo(100), ...over,
 });
 const summary = (over: Partial<GreptileSummary> = {}): GreptileSummary => ({
   body: "", score: 5, reviewCount: 2, lastReviewedSha: SHA.slice(0, 7), updatedAt: minutesAgo(1), source: "note", ...over,
 });
-const finding: Finding = { discussionId: "d1", body: "b", filePath: null, lineStart: null, lineEnd: null, suggestedCode: null };
+const item = (over: Partial<WorkItem> = {}): WorkItem => ({ discussionId: "d1", author: "greptile-bot", isBot: true, body: "b", position: null, ...over });
+const personItem = item({ discussionId: "d2", author: "ada", isBot: false, body: "Why a map here?" });
 
 const baseInput = (over: Partial<RoundInput> = {}): RoundInput => ({
-  loop: loop(), settings, now: NOW, ticketClosed: false,
+  loop: loop(), config, settings: DEFAULT_SETTINGS, now: NOW, ticketClosed: false,
   mr: fakeMergeRequest({ sha: SHA, headPipeline: { id: 9, sha: SHA, status: "success" } }),
-  summary: summary(), findings: [], greptileStatus: null, ...over,
+  greptile: summary(), workList: [], startedBy: "bot", greptileStatus: null, ...over,
 });
 const withPipeline = (status: string, sha = SHA) => fakeMergeRequest({ sha: SHA, headPipeline: { id: 9, sha, status } });
 
@@ -43,7 +46,7 @@ describe("evaluateRound", () => {
     const at = (minutes: number): Date => new Date(started.getTime() + minutes * 60_000);
     const waiting = (over: Partial<RoundInput>) => evaluateRound(baseInput({ loop: loop({ waitStartedAt: started.toISOString() }), ...over }));
     expect(waiting({ mr: null })).toEqual({ kind: "wait", waitingFor: "mr", deadline: at(60) });
-    expect(waiting({ summary: null })).toEqual({ kind: "wait", waitingFor: "review", deadline: at(30) });
+    expect(waiting({ greptile: null })).toEqual({ kind: "wait", waitingFor: "review", deadline: at(30) });
     expect(waiting({ mr: fakeMergeRequest({ sha: SHA }) })).toEqual({ kind: "wait", waitingFor: "pipeline", deadline: at(60) });
     expect(evaluateRound(baseInput({ mr: null, loop: loop({ waitStartedAt: null }) }))).toEqual({ kind: "wait", waitingFor: "mr", deadline: null });
   });
@@ -69,15 +72,15 @@ describe("evaluateRound", () => {
     }
   });
   it("6: waits for the review, then hands back past the timeout", () => {
-    expect(evaluateRound(baseInput({ summary: null }))).toMatchObject({ kind: "wait", waitingFor: "review" });
-    expect(evaluateRound(baseInput({ summary: summary({ lastReviewedSha: "d".repeat(7) }) }))).toMatchObject({ kind: "wait", waitingFor: "review" });
-    const stale = baseInput({ summary: null, loop: loop({ waitStartedAt: minutesAgo(31) }) });
+    expect(evaluateRound(baseInput({ greptile: null }))).toMatchObject({ kind: "wait", waitingFor: "review" });
+    expect(evaluateRound(baseInput({ greptile: summary({ lastReviewedSha: "d".repeat(7) }) }))).toMatchObject({ kind: "wait", waitingFor: "review" });
+    const stale = baseInput({ greptile: null, loop: loop({ waitStartedAt: minutesAgo(31) }) });
     expect(evaluateRound(stale)).toEqual({ kind: "handback", reason: "Greptile did not review ccccccc" });
   });
   it("6: a review count equal to the count at trigger is not finished", () => {
-    const input = baseInput({ loop: loop({ reviewCountAtTrigger: 2 }), summary: summary({ reviewCount: 2 }) });
+    const input = baseInput({ loop: loop({ reviewCountAtTrigger: 2 }), greptile: summary({ reviewCount: 2 }) });
     expect(evaluateRound(input)).toMatchObject({ kind: "wait", waitingFor: "review" });
-    expect(evaluateRound({ ...input, summary: summary({ reviewCount: 3 }) })).toMatchObject({ kind: "passed" });
+    expect(evaluateRound({ ...input, greptile: summary({ reviewCount: 3 }) })).toMatchObject({ kind: "passed" });
   });
   it("7: waits for an unfinished pipeline, then hands back past the timeout", () => {
     for (const status of ["created", "pending", "running", "waiting_for_resource", "preparing"]) {
@@ -95,18 +98,87 @@ describe("evaluateRound", () => {
       expect(evaluateRound(baseInput({ mr: withPipeline(status) }))).toEqual({ kind: "handback", reason: `the pipeline for ccccccc is ${status}` });
     }
   });
-  it("8/10: a 4/5 with a green pipeline and no findings gets a fix", () => {
-    const s = summary({ score: 4 });
-    expect(evaluateRound(baseInput({ summary: s }))).toEqual({ kind: "fix", summary: s, findings: [], pipelineFailed: false });
+  it("passes a Greptile 5/5 on the head whose round only bots started, even with bot notes left", () => {
+    expect(evaluateRound(baseInput({ workList: [item()], startedBy: "bot" }))).toEqual({ kind: "passed", summary: summary() });
   });
-  it("8/10: findings get a fix even at 5/5", () => {
-    expect(evaluateRound(baseInput({ findings: [finding] }))).toMatchObject({ kind: "fix", findings: [finding] });
+  it("passes at the pass score setting, not only at 5/5", () => {
+    const settings = { ...DEFAULT_SETTINGS, "greptile.passScore": 4 };
+    expect(evaluateRound(baseInput({ settings, greptile: summary({ score: 4 }), workList: [item()] }))).toMatchObject({ kind: "passed" });
+    expect(evaluateRound(baseInput({ greptile: summary({ score: 4 }), workList: [item()] }))).toMatchObject({ kind: "fix" });
   });
-  it("10: a 5/5 with a failed pipeline gets a fix with pipelineFailed", () => {
-    expect(evaluateRound(baseInput({ mr: withPipeline("failed") }))).toMatchObject({ kind: "fix", pipelineFailed: true });
+  it("gives a person's unanswered note a fix even at Greptile 5/5", () => {
+    const list = [item(), personItem];
+    expect(evaluateRound(baseInput({ workList: list, startedBy: "person" }))).toEqual({ kind: "fix", workList: list, startedBy: "person", pipelineFailed: false });
   });
-  it("9: hands back once maxRounds is reached", () => {
-    const d = evaluateRound(baseInput({ summary: summary({ score: 4 }), loop: loop({ round: 5 }) }));
-    expect(d).toEqual({ kind: "handback", reason: "Greptile scored 4/5 after 5 fix rounds (pipeline success)" });
+  it("does not pass a Greptile 5/5 on a red pipeline", () => {
+    expect(evaluateRound(baseInput({ mr: withPipeline("failed") }))).toEqual({ kind: "fix", workList: [], startedBy: "bot", pipelineFailed: true });
+  });
+  it("passes with Greptile off, nothing to answer and a green pipeline, without waiting for a review", () => {
+    const settings = { ...DEFAULT_SETTINGS, "greptile.enabled": false };
+    expect(evaluateRound(baseInput({ settings, greptile: null }))).toEqual({ kind: "passed", summary: null });
+    expect(evaluateRound(baseInput({ settings, greptile: null, workList: [item({ author: "ci-bot" })] }))).toMatchObject({ kind: "fix" });
+  });
+  it("passes a Greptile 4/5 once nothing is left to answer and the pipeline is green", () => {
+    expect(evaluateRound(baseInput({ greptile: summary({ score: 4 }) }))).toMatchObject({ kind: "passed" });
+  });
+  it("hands back a bot-started round once the bot rounds reach the cap", () => {
+    const d = evaluateRound(baseInput({ greptile: summary({ score: 3 }), workList: [item()], loop: loop({ botRounds: 5 }) }));
+    expect(d).toEqual({ kind: "handback", reason: "stopped after 5 rounds started by bots; a person's comment starts another" });
+    const red = evaluateRound(baseInput({ mr: withPipeline("failed"), loop: loop({ botRounds: 5 }) }));
+    expect(red).toMatchObject({ kind: "handback" });
+  });
+  it("gives a person-started round a fix past the bot-round cap", () => {
+    const d = evaluateRound(baseInput({ greptile: summary({ score: 3 }), workList: [personItem], startedBy: "person", loop: loop({ botRounds: 5, round: 12 }) }));
+    expect(d).toMatchObject({ kind: "fix", startedBy: "person" });
+  });
+  it("caps at the greptile.maxRounds setting", () => {
+    const settings = { ...DEFAULT_SETTINGS, "greptile.maxRounds": 2 };
+    expect(evaluateRound(baseInput({ settings, workList: [item()], greptile: summary({ score: 3 }), loop: loop({ botRounds: 1 }) }))).toMatchObject({ kind: "fix" });
+    expect(evaluateRound(baseInput({ settings, workList: [item()], greptile: summary({ score: 3 }), loop: loop({ botRounds: 2 }) }))).toMatchObject({ kind: "handback" });
+  });
+});
+
+const note = (author: string, body: string, over: Partial<MrNote> = {}): MrNote => ({
+  id: 1, body, author, system: false, resolvable: true, resolved: false, type: "DiffNote", createdAt: NOW.toISOString(), updatedAt: NOW.toISOString(),
+  position: null, ...over,
+});
+const discussion = (id: string, ...notes: MrNote[]): MrDiscussion => ({ id, notes });
+
+describe("workList", () => {
+  const position = { newPath: "src/a.ts", oldPath: "src/a.ts", newLine: 4, oldLine: null };
+
+  it("lists unresolved discussions whose latest note is not the steward's, people's and bots' alike", () => {
+    const list = workList([
+      discussion("d1", note("greptile-bot", "Null check missing", { position })),
+      discussion("d2", note("ada", "Why a map?", { resolvable: false, type: null })),
+      discussion("d3", note("project_42_bot_0123abcd", "Coverage dropped")),
+    ], "steward-bot", ["greptile-bot"]);
+    expect(list).toEqual([
+      { discussionId: "d1", author: "greptile-bot", isBot: true, body: "Null check missing", position },
+      { discussionId: "d2", author: "ada", isBot: false, body: "Why a map?", position: null },
+      { discussionId: "d3", author: "project_42_bot_0123abcd", isBot: true, body: "Coverage dropped", position: null },
+    ]);
+  });
+  it("skips resolved discussions, those the steward answered last, system notes and Greptile's summary", () => {
+    const list = workList([
+      discussion("d1", note("greptile-bot", "Fixed already", { resolved: true })),
+      discussion("d2", note("greptile-bot", "Null check"), note("Steward-Bot", "Added it.")),
+      discussion("d3", note("ada", "changed the description", { system: true })),
+      discussion("d4", note("greptile-bot", "### Confidence Score: 3/5", { resolvable: false })),
+      discussion("d5", note("ada", "/agent explain", { resolvable: false }), note("other", "Answer\n\n<!-- ticket-steward:chat -->")),
+    ], "steward-bot", ["greptile-bot"]);
+    expect(list).toEqual([]);
+  });
+  it("lists a thread a person answered after the steward, with the conversation since the first note", () => {
+    const [entry] = workList([
+      discussion("d1", note("greptile-bot", "Null check missing", { position }), note("steward-bot", "Added it."), note("ada", "Also log it", { system: false })),
+    ], "steward-bot", ["greptile-bot"]);
+    expect(entry).toMatchObject({ discussionId: "d1", author: "ada", isBot: false, position });
+    expect(entry?.body).toBe("**greptile-bot:** Null check missing\n\n**steward-bot:** Added it.\n\n**ada:** Also log it");
+  });
+  it("says a round is a person's when any item on its list is a person's", () => {
+    expect(startedBy([])).toBe("bot");
+    expect(startedBy([item()])).toBe("bot");
+    expect(startedBy([item(), personItem])).toBe("person");
   });
 });

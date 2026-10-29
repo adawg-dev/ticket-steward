@@ -5,8 +5,9 @@ import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import { runAwaitReview } from "../../src/greptile/await.js";
-import { LOOP_MARKER, publishHandback, requestReview } from "../../src/greptile/publish.js";
+import { LOOP_MARKER, publishHandback } from "../../src/greptile/publish.js";
 import type { ImplementResult } from "../../src/implement/result.js";
+import { seedSettings } from "../../src/settings/schema.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { Mirror } from "../../src/workspace/mirror.js";
@@ -275,6 +276,58 @@ describe("runAwaitReview", () => {
     expect(gitlab.notes.filter((note) => !note.includes("implement-summary"))).toEqual([]);
   });
 
+  it("counts a fix round only bots started toward the cap, and resets the count for a person's", async () => {
+    const id = knownMrLoop();
+    stores.loops.update(id, { botRounds: 2 });
+    gitlab.mr.description = summaryBody(3);
+    gitlab.addDiscussion(GREPTILE, "Null check missing");
+
+    await runAwaitReview(claim(id), makeDeps());
+    expect(loopOf(id)).toMatchObject({ state: "fixing", botRounds: 3 });
+
+    stores.db.prepare("DELETE FROM jobs WHERE kind = 'fix'").run();
+    stores.loops.update(id, { state: "awaiting_review", waitStartedAt: NOW.toISOString() });
+    gitlab.addDiscussion("ada", "Why does the buffer grow?", { resolvable: false });
+    await runAwaitReview(claim(id), makeDeps());
+    expect(loopOf(id)).toMatchObject({ state: "fixing", botRounds: 0 });
+  });
+
+  it("counts a round only a red pipeline started as a bot round", async () => {
+    const id = knownMrLoop();
+    gitlab.mr = fakeMergeRequest({ sha: SHA, description: summaryBody(5), headPipeline: { id: 9, sha: SHA, status: "failed" } });
+
+    expect(await runAwaitReview(claim(id), makeDeps())).toEqual({ status: "succeeded" });
+
+    expect(loopOf(id)).toMatchObject({ state: "fixing", botRounds: 1 });
+  });
+
+  it("hands back once, at the cap, when only bots keep starting rounds", async () => {
+    const id = knownMrLoop();
+    stores.loops.update(id, { botRounds: 5 });
+    gitlab.mr.description = summaryBody(3);
+    gitlab.addDiscussion(GREPTILE, "Null check missing");
+
+    const outcome = await runAwaitReview(claim(id), makeDeps());
+
+    const reason = "stopped after 5 rounds started by bots; a person's comment starts another";
+    expect(outcome).toEqual({ status: "succeeded", warning: `handed back: ${reason}` });
+    expect(gitlab.notes.filter((note) => note.includes(reason))).toHaveLength(1);
+    expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("passes without a review when Greptile is off, nothing is left to answer and the pipeline is green", async () => {
+    const id = knownMrLoop();
+    const greptileAnswered = gitlab.addDiscussion(GREPTILE, "Null check missing");
+    await gitlab.replyToDiscussion(42, 7, greptileAnswered, "Added it.");
+    const deps: PipelineDeps = { ...makeDeps(), settings: { get: () => ({ ...seedSettings(makeConfig()), "greptile.enabled": false }) } };
+
+    expect(await runAwaitReview(claim(id), deps)).toEqual({ status: "succeeded" });
+
+    const passed = gitlab.notes.filter((note) => note.includes(LOOP_MARKER(id, "passed")));
+    expect(passed[0]).toContain("Nothing left to answer and the pipeline is green after 0 fix rounds.");
+    expect(loopOf(id).history).toEqual([{ round: 0, headSha: SHA, score: null, pipeline: "success", fixed: 0, declined: 0, outcome: "passed" }]);
+  });
+
   it("hands back when a person pushed to the branch", async () => {
     const id = knownMrLoop();
     gitlab.mr = fakeMergeRequest({ sha: "d".repeat(40), description: summaryBody(5, "d".repeat(40)) });
@@ -359,23 +412,6 @@ describe("publishHandback", () => {
     expect(await publishHandback(makeDeps(), loopOf(id), "no merge request appeared")).toEqual({ status: "succeeded", warning: "handed back: no merge request appeared" });
 
     expect(gitlab.notes).toEqual([]);
-  });
-});
-
-describe("requestReview", () => {
-  it("asks once per round and head, and again in a restarted loop's life", async () => {
-    const id = knownMrLoop();
-    const deps = makeDeps();
-
-    await requestReview(deps, loopOf(id));
-    await requestReview(deps, loopOf(id));
-    expect(gitlab.notes).toHaveLength(1);
-
-    stores.loops.update(id, { handedBackAt: NOW.toISOString() });
-    await requestReview(deps, loopOf(id));
-
-    expect(gitlab.notes).toHaveLength(2);
-    expect(gitlab.notes.every((note) => note.startsWith("@greptileai review"))).toBe(true);
   });
 });
 

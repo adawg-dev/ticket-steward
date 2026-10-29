@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { MediaListSchema, MediaUploadsSchema } from "../codehost/media.js";
-import type { Finding } from "./summary.js";
+import type { WorkItem } from "./evaluate.js";
 
 export const FixResultSchema = z.object({
   outcome: z.enum(["changed", "no_changes", "failed"]),
-  /** One entry per Greptile finding: fixed it, or declined it with a reason. */
+  /** One entry per discussion on the work list: `fixed` (code changed for it) or `declined` (a reply alone), with the reply. */
   threads: z.array(z.object({ discussionId: z.string(), action: z.enum(["fixed", "declined"]), reply: z.string() })),
   summary: z.string(),
   checksRun: z.array(z.string()),
@@ -18,8 +18,8 @@ export const fixResultJsonSchema: Record<string, unknown> = z.toJSONSchema(FixRe
 
 const GREPTILE_MENTION = /@greptile(ai)?\b/i;
 
-/** Parse the brain's fix output and check it against the findings it was asked about. */
-export const validateFixResult = (output: unknown, findings: Finding[]): { ok: true; result: FixResult } | { ok: false; error: string } => {
+/** Parse the brain's fix output and check it against the discussions it was asked to answer. */
+export const validateFixResult = (output: unknown, findings: ReadonlyArray<Pick<WorkItem, "discussionId">>): { ok: true; result: FixResult } | { ok: false; error: string } => {
   const parsed = FixResultSchema.safeParse(output);
   if (!parsed.success) return { ok: false, error: z.prettifyError(parsed.error) };
   const result = parsed.data;
@@ -51,8 +51,8 @@ export const StoredFixSchema = z.object({
   /** null when the job handed back before a valid result (the brain failed, or its result was invalid). */
   result: FixResultSchema.nullable(),
   handback: z.object({ reason: z.string(), detail: z.string() }).nullable(),
-  /** The round the fix answered: Greptile's score and review counter, and the head pipeline's status. */
-  score: z.number().int(),
+  /** The round the fix answered: Greptile's score and review counter (null when it is off), and the head pipeline's status. */
+  score: z.number().int().nullable(),
   reviewCount: z.number().int().nullable(),
   pipeline: z.string().nullable(),
   /** The result's media as attached to the project, posted in the round's note; absent when the result listed none. */

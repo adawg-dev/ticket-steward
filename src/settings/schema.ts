@@ -64,5 +64,11 @@ export const SETTING_KEYS: readonly SettingKey[] = SettingsSchema.keyof().option
 export const isSettingKey = (key: string): key is SettingKey => SETTING_KEYS.some((known) => known === key);
 
 /** The defaults with what the config file says over them. */
-export const seedSettings = (config: Pick<StewardConfig, "greptile">): Settings =>
-  SettingsSchema.parse({ ...DEFAULT_SETTINGS, ...(config.greptile === undefined ? {} : { "greptile.maxRounds": config.greptile.maxRounds }) });
+export const seedSettings = (config: Pick<StewardConfig, "greptile">): Settings => {
+  const greptile = config.greptile;
+  return SettingsSchema.parse({
+    ...DEFAULT_SETTINGS,
+    ...(greptile === undefined ? {} : { "greptile.maxRounds": greptile.maxRounds }),
+    ...(greptile?.passScore === undefined ? {} : { "greptile.passScore": greptile.passScore }),
+  });
+};

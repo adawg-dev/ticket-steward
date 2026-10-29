@@ -39,6 +39,11 @@ describe("seedSettings", () => {
     };
     expect(seedSettings(config)["greptile.maxRounds"]).toBe(3);
   });
+  it("takes the Greptile pass score from the config when it sets one", () => {
+    const greptile = { botUsername: "greptile-bot", maxRounds: 5, prompt: "fix.md", pollSeconds: 300, mrTimeoutMinutes: 30, reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 30, ciLogLines: 200 };
+    expect(seedSettings({ greptile })["greptile.passScore"]).toBe(5);
+    expect(seedSettings({ greptile: { ...greptile, passScore: 4 } })["greptile.passScore"]).toBe(4);
+  });
 });
 
 describe("SettingsStore", () => {

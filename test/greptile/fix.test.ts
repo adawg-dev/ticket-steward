@@ -13,6 +13,7 @@ import { runFix } from "../../src/greptile/fix.js";
 import { runRestart } from "../../src/greptile/start.js";
 import { LOOP_MARKER } from "../../src/greptile/publish.js";
 import type { FixResult } from "../../src/greptile/result.js";
+import { seedSettings } from "../../src/settings/schema.js";
 import { storeLedger } from "../../src/push/ledger.js";
 import { pushFromWorktree, type PushResult } from "../../src/push/service.js";
 import { PushTargetSchema, type PushTarget } from "../../src/push/target.js";
@@ -244,7 +245,7 @@ afterEach(async () => {
 });
 
 describe("runFix", () => {
-  it("resumes the session with the push tool; the agent's fast-forward push is replied to, resolved and the next await queued", async () => {
+  it("resumes the session with the push tool; the agent's fast-forward push is replied to, never resolved, and the next await queued", async () => {
     const id = createLoop();
     const brain = editing({ result: changed(finding) });
 
@@ -265,7 +266,7 @@ describe("runFix", () => {
     expect(gitlab.replies[0]?.discussionId).toBe(finding);
     expect(gitlab.replies[0]?.body).toContain(`Added the null check.\n\nFixed in ${pushed.slice(0, 7)}.`);
     expect(gitlab.replies[0]?.body).toContain(LOOP_MARKER(id, `reply ${finding} ${pushed}`));
-    expect(gitlab.resolved).toEqual([finding]);
+    expect(gitlab.resolved).toEqual([]);
     expect(gitlab.notes).toEqual([]);
     const loop = loopOf(id);
     expect(loop).toMatchObject({ round: 1, headSha: pushed, state: "awaiting_review", sessionId: "session-2", pendingPush: null, waitStartedAt: null, reviewCountAtTrigger: null });
@@ -296,7 +297,7 @@ describe("runFix", () => {
     expect(loopOf(id)).toMatchObject({ round: 1, state: "awaiting_review" });
   });
 
-  it("declines every finding: no push, replies and resolves, then asks Greptile for a review", async () => {
+  it("declines every finding: no push, replies only, and the next await judges the unchanged head at once", async () => {
     const id = createLoop();
 
     const outcome = await runFix(claim(id), makeDeps(new FakeBrain({ result: declined(finding) })));
@@ -306,54 +307,52 @@ describe("runFix", () => {
     expect(gitlab.replies.map((reply) => reply.discussionId)).toEqual([finding]);
     expect(gitlab.replies[0]?.body).not.toContain("Fixed in");
     expect(gitlab.replies[0]?.body).toContain(LOOP_MARKER(id, `reply ${finding} nopush`));
-    expect(gitlab.resolved).toEqual([finding]);
-    expect(gitlab.notes).toHaveLength(1);
-    expect(gitlab.notes[0]).toContain("@greptileai review");
+    expect(gitlab.resolved).toEqual([]);
+    expect(gitlab.notes).toEqual([]);
     const loop = loopOf(id);
-    expect(loop).toMatchObject({ round: 1, headSha, state: "awaiting_review", reviewCountAtTrigger: 3 });
+    expect(loop).toMatchObject({ round: 1, headSha, state: "awaiting_review", reviewCountAtTrigger: null });
     expect(loop.history).toEqual([{ round: 0, headSha, score: 3, pipeline: "success", fixed: 0, declined: 1, outcome: "no_changes" }]);
     expect(queuedAwaits()).toHaveLength(1);
   });
 
-  it("hands back a round with no push when Greptile's summary has no review counter to wait past", async () => {
-    gitlab.mr.description = `<h3>Greptile Summary</h3>\n\n### Confidence Score: 3/5\n\n<sub>Last reviewed commit: [fix](https://gitlab.example/acme/repo/-/commit/${headSha})</sub>`;
-    const id = createLoop();
-
-    const outcome = await runFix(claim(id), makeDeps(new FakeBrain({ result: declined(finding) })));
-
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: Greptile's summary has no review counter, so its next review cannot be told apart" });
-    expect(loopOf(id)).toMatchObject({ state: "handed_back", round: 0, reviewCountAtTrigger: null });
-    expect(gitlab.replies).toEqual([]);
-    expect(gitlab.resolved).toEqual([]);
-    expect(gitlab.notes.some((note) => note.includes("@greptileai"))).toBe(false);
-    expect(queuedAwaits()).toEqual([]);
-  });
-
-  it("hands back when the agent changes nothing two rounds running", async () => {
+  it("answers a person's question every round: replies alone two rounds running are not a hand-back", async () => {
+    gitlab.discussions = [];
+    const question = gitlab.addDiscussion("ada", "Why not flush on close?", { resolvable: false });
     const id = createLoop();
     stores.loops.appendRound(id, { round: 0, headSha, score: 3, pipeline: "success", fixed: 0, declined: 1, outcome: "no_changes" });
     stores.loops.update(id, { round: 1 });
 
-    const outcome = await runFix(claim(id), makeDeps(new FakeBrain({ result: declined(finding) })));
+    const outcome = await runFix(claim(id), makeDeps(new FakeBrain({ result: declined(question) })));
 
-    expect(outcome.status).toBe("succeeded");
-    expect(loopOf(id).state).toBe("handed_back");
-    expect(gitlab.notes.some((note) => note.includes("disagree"))).toBe(true);
-    expect(gitlab.notes.some((note) => note.includes("@greptileai"))).toBe(false);
-    expect(queuedAwaits()).toEqual([]);
+    expect(outcome).toEqual({ status: "succeeded" });
+    expect(loopOf(id)).toMatchObject({ state: "awaiting_review", round: 2 });
+    expect(gitlab.replies.map((reply) => reply.discussionId)).toEqual([question]);
   });
 
-  it("hands back without a review request when nothing is open, the pipeline is green and nothing changed", async () => {
+  it("hands back when nothing is left to answer, the pipeline is green and nothing changed", async () => {
     gitlab.discussions = [];
     const id = createLoop();
     const result: FixResult = { ...declined(finding), threads: [] };
 
     const outcome = await runFix(claim(id), makeDeps(new FakeBrain({ result })));
 
-    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: Greptile scored 3/5 with nothing open and the agent changed nothing" });
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: nothing was left to answer and the agent changed nothing" });
     expect(loopOf(id).state).toBe("handed_back");
     expect(gitlab.notes.some((note) => note.includes("@greptileai"))).toBe(false);
     expect(queuedAwaits()).toEqual([]);
+  });
+
+  it("runs a round without Greptile when it is off: no summary in the prompt, no score on the round", async () => {
+    gitlab.mr.description = "";
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) });
+    const deps: PipelineDeps = { ...makeDeps(brain), settings: { get: () => ({ ...seedSettings(makeConfig()), "greptile.enabled": false }) } };
+
+    expect(await runFix(claim(id), deps)).toEqual({ status: "succeeded" });
+
+    expect(brain.lastInput().prompt).not.toContain("## Review summary");
+    expect(brain.lastInput().prompt).toContain(`### Thread \`${finding}\`: ${GREPTILE} (bot)`);
+    expect(loopOf(id).history[0]).toMatchObject({ score: null, outcome: "changed" });
   });
 
   it("gives the agent the failed CI jobs and their log tails", async () => {
@@ -370,28 +369,38 @@ describe("runFix", () => {
     expect(loopOf(id).history[0]?.pipeline).toBe("failed");
   });
 
-  it("gives the agent the MR notes people posted since the last hand-back, not bots', Greptile's or the steward's", async () => {
-    gitlab.addDiscussion("ada", "Before the hand-back", { createdAt: "2026-10-27T08:00:00.000Z" });
-    gitlab.addDiscussion("ada", "Please keep the old buffer size", { createdAt: "2026-10-27T10:00:00.000Z" });
-    gitlab.addDiscussion("sam", "And log the dropped chunk", { createdAt: "2026-10-27T09:30:00.000Z" });
-    gitlab.addDiscussion("ada", "changed the description", { createdAt: "2026-10-27T10:05:00.000Z", system: true });
-    gitlab.addDiscussion(GREPTILE, "Greptile says hello after the hand-back", { createdAt: "2026-10-27T10:10:00.000Z", resolved: true });
-    gitlab.addDiscussion("project_42_bot_0123abcd", "Bot note after the hand-back", { createdAt: "2026-10-27T10:15:00.000Z" });
-    gitlab.addDiscussion("steward-bot", "The steward's own note", { createdAt: "2026-10-27T10:20:00.000Z" });
-    gitlab.addDiscussion("ada", "Handed back\n\n<!-- ticket-steward:loop id=1 handback -->", { createdAt: "2026-10-27T10:30:00.000Z" });
+  it("gives the agent every unanswered comment, people's and bots', and none resolved, answered, system or the steward's", async () => {
+    const ada = gitlab.addDiscussion("ada", "Please keep the old buffer size", { resolvable: false });
+    const bot = gitlab.addDiscussion("project_42_bot_0123abcd", "Coverage dropped on adapter.ts");
+    gitlab.addDiscussion("ada", "changed the description", { system: true });
+    gitlab.addDiscussion(GREPTILE, "An old finding, resolved", { resolved: true });
+    gitlab.addDiscussion("steward-bot", "The steward's own note", { resolvable: false });
+    gitlab.addDiscussion("ada", "Handed back\n\n<!-- ticket-steward:loop id=1 handback -->", { resolvable: false });
+    const answered = gitlab.addDiscussion("sam", "Is the reader shared?");
+    await gitlab.replyToDiscussion(42, 7, answered, "No, one per stream.");
     const id = createLoop();
-    stores.loops.update(id, { handedBackAt: "2026-10-27T09:00:00.000Z" });
-    const brain = editing({ result: changed(finding) });
+    const result: FixResult = {
+      ...changed(finding),
+      threads: [
+        ...changed(finding).threads,
+        { discussionId: ada, action: "declined", reply: "Kept: the buffer size is unchanged." },
+        { discussionId: bot, action: "fixed", reply: "Added a test for the last chunk." },
+      ],
+    };
+    const brain = editing({ result });
 
-    await runFix(claim(id), makeDeps(brain));
+    expect(await runFix(claim(id), makeDeps(brain))).toEqual({ status: "succeeded" });
 
     const prompt = brain.lastInput().prompt;
-    expect(prompt).toContain("## New comments on the merge request");
-    expect(prompt.indexOf("**sam:** And log the dropped chunk")).toBeGreaterThan(-1);
-    expect(prompt.indexOf("**ada:** Please keep the old buffer size")).toBeGreaterThan(prompt.indexOf("**sam:** And log the dropped chunk"));
-    for (const skipped of ["Before the hand-back", "changed the description", "Greptile says hello", "Bot note", "The steward's own note", "ticket-steward:loop"]) {
+    expect(prompt).toContain("## Comments to answer");
+    expect(prompt).toContain(`### Thread \`${finding}\`: ${GREPTILE} (bot) at a general comment`);
+    expect(prompt).toContain(`### Thread \`${ada}\`: ada (person) at a general comment\n\nPlease keep the old buffer size`);
+    expect(prompt).toContain(`### Thread \`${bot}\`: project_42_bot_0123abcd (bot)`);
+    for (const skipped of ["changed the description", "An old finding", "The steward's own note", "ticket-steward:loop", "Is the reader shared?"]) {
       expect(prompt).not.toContain(skipped);
     }
+    expect(gitlab.replies.map((reply) => reply.discussionId)).toEqual([answered, finding, ada, bot]);
+    expect(gitlab.resolved).toEqual([]);
   });
 
   it("gives the agent the decisions people made on the merge request, never to undo", async () => {
@@ -403,16 +412,6 @@ describe("runFix", () => {
 
     const prompt = brain.lastInput().prompt;
     expect(prompt).toContain("## Decisions a person made on this merge request: never undo these\n\n- Keep the v1 endpoint\n- Don't rename the queue\n");
-  });
-
-  it("gives the agent no MR notes when the loop was never handed back", async () => {
-    gitlab.addDiscussion("ada", "Please keep the old buffer size", { createdAt: "2026-10-27T10:00:00.000Z" });
-    const id = createLoop();
-    const brain = editing({ result: changed(finding) });
-
-    await runFix(claim(id), makeDeps(brain));
-
-    expect(brain.lastInput().prompt).not.toContain("Please keep the old buffer size");
   });
 
   it("lists a person's commits since the adopted head", async () => {
@@ -443,7 +442,8 @@ describe("runFix", () => {
     gitlab.openMr = gitlab.mr;
     gitlab.discussions = [];
     finding = gitlab.addDiscussion(GREPTILE, "Null check missing on the last chunk.");
-    gitlab.addDiscussion("ada", "Keep the old buffer size when you fix it", { createdAt: "2026-10-27T10:00:00.000Z" });
+    const ada = gitlab.addDiscussion("ada", "Keep the old buffer size when you fix it", { createdAt: "2026-10-27T10:00:00.000Z" });
+    const answered: FixResult = { ...changed(finding), threads: [...changed(finding).threads, { discussionId: ada, action: "fixed", reply: "Kept it." }] };
     const id = createLoop();
     stores.loops.update(id, { state: "handed_back", round: 3, handedBackAt: "2026-10-27T09:00:00.000Z" });
     const restart: TriggerEvent = { kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "restart" };
@@ -454,7 +454,7 @@ describe("runFix", () => {
       .toEqual({ status: "succeeded" });
     // The await job finds Greptile's 3/5 on the person's head and queues the fix.
     stores.loops.update(id, { state: "fixing" });
-    const brain = editing({ result: changed(finding) });
+    const brain = editing({ result: answered });
     const fixDeps: PipelineDeps = { ...deps, brain, runBrain: (_config, input) => brain.run(input, () => undefined) };
     brain.deps = fixDeps;
 
@@ -493,7 +493,7 @@ describe("runFix", () => {
     expect(second_).toEqual({ status: "succeeded" });
     expect(brain.runs).toBe(1);
     expect(gitlab.replies.map((reply) => reply.discussionId)).toEqual([finding, second]);
-    expect(gitlab.resolved).toEqual([finding, second]);
+    expect(gitlab.resolved).toEqual([]);
     expect(await git(repo.repo, ["rev-parse", BRANCH])).toBe(pushed);
     expect(loopOf(id)).toMatchObject({ round: 1, headSha: pushed, state: "awaiting_review", pendingPush: null });
     expect(loopOf(id).history).toEqual([expect.objectContaining({ round: 0, headSha, outcome: "changed" })]);

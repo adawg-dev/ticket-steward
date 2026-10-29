@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { FixResultSchema, validateFixResult, type FixResult } from "../../src/greptile/result.js";
-import type { Finding } from "../../src/greptile/summary.js";
+import type { WorkItem } from "../../src/greptile/evaluate.js";
 
-const finding = (discussionId: string): Finding => ({ discussionId, body: "b", filePath: "a.ts", lineStart: 1, lineEnd: 1, suggestedCode: null });
+const finding = (discussionId: string): WorkItem => ({ discussionId, author: "ada", isBot: false, body: "b", position: null });
 const base = (over: Partial<FixResult>): FixResult => ({
   outcome: "changed",
   threads: [{ discussionId: "d1", action: "fixed", reply: "Fixed it." }],

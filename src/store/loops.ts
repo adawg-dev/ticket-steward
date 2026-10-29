@@ -50,6 +50,8 @@ export interface Loop {
   handedBackAt: string | null;
   /** The first MR note of the batch the queued await is waiting out; the batch's round starts no later than twice the quiet window after it. */
   pendingNotesSince: string | null;
+  /** Rounds in a row that only bot notes or a red pipeline started; capped by `greptile.maxRounds`, reset by a person's round. */
+  botRounds: number;
   endedAt: string | null;
   createdAt: string;
 }
@@ -108,6 +110,7 @@ interface LoopRow {
   pending_push: string | null;
   handed_back_at: string | null;
   pending_notes_since: string | null;
+  bot_rounds: number;
   ended_at: string | null;
   created_at: string;
 }
@@ -144,6 +147,7 @@ const toLoop = (row: LoopRow): { loop: Loop; unreadable: LoopJsonColumn[] } => {
     pendingPush: readStored(row.pending_push, "pending_push", PendingPushSchema, unreadable),
     handedBackAt: row.handed_back_at,
     pendingNotesSince: row.pending_notes_since,
+    botRounds: row.bot_rounds,
     endedAt: row.ended_at,
     createdAt: row.created_at,
   };
@@ -173,6 +177,7 @@ const PATCH_COLUMNS: { [K in keyof Required<LoopPatch>]: { column: string; store
   pendingPush: { column: "pending_push", store: (value) => (value === null ? null : JSON.stringify(value)) },
   handedBackAt: { column: "handed_back_at", store: (value) => value },
   pendingNotesSince: { column: "pending_notes_since", store: (value) => value },
+  botRounds: { column: "bot_rounds", store: (value) => value },
   endedAt: { column: "ended_at", store: (value) => value },
 };
 

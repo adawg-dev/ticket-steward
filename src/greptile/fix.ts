@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
-import { BOT_USER, type GitLabMrApi, type MergeRequestInfo, type MrDiscussion } from "../codehost/gitlabMr.js";
+import type { GitLabMrApi, MergeRequestInfo, MrDiscussion } from "../codehost/gitlabMr.js";
 import { attachedMedia, type MediaUploads } from "../codehost/media.js";
 import type { GreptileConfig } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
@@ -14,16 +14,17 @@ import type { PushTarget } from "../push/target.js";
 import { PERSON_COMMITS_MARKER, setupTailOf, STOPPED_JOB_ERROR } from "../run/execute.js";
 import { linearSessionFor, NO_SESSION, stoppedResponse, type LinearSession } from "../linear/session.js";
 import { localExecutor } from "../run/local.js";
+import { seedSettings } from "../settings/schema.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { collectCiFailures, type CiFailure } from "./ci.js";
+import { workList, type WorkItem } from "./evaluate.js";
 import { renderFixPrompt } from "./prompt.js";
-import { publishHandback, publishRoundMedia, publishStop, publishThreads, requestReview } from "./publish.js";
+import { publishHandback, publishRoundMedia, publishStop, publishThreads } from "./publish.js";
 import { validateFixResult, type FixResult, type StoredFix } from "./result.js";
-import { findSummary, openFindings, type Finding } from "./summary.js";
+import { findSummary } from "./summary.js";
 
-const LOOP_MARKER_TEXT = "ticket-steward:loop";
 const SESSION_LOST = "the agent's session could not be resumed";
 /** The SDK's errors for a session it cannot load or resume. */
 const SESSION_ERROR = /no conversation found|resume/i;
@@ -73,22 +74,6 @@ const gate = (fix: Fix, observed: Observed): Promise<JobOutcome> | null => {
   const heads = [loop.headSha, ...(loop.pendingPush === null ? [] : [loop.pendingPush.sha])].map((sha) => sha.toLowerCase());
   if (!heads.includes(observed.mr.sha.toLowerCase())) return publishHandback(deps, loop, "a person pushed to the branch; the loop stopped");
   return null;
-};
-
-/**
- * MR notes people posted since the loop was last handed back, oldest first: no system notes, nothing from Greptile, a
- * bot user or the steward's own account, and nothing carrying the steward's marker.
- */
-const newNotes = (loop: Loop, discussions: MrDiscussion[], skipAuthors: string[]): Array<{ author: string; body: string }> => {
-  const since = loop.handedBackAt;
-  if (since === null) return [];
-  const skipped = new Set(skipAuthors.map((author) => author.toLowerCase()));
-  return discussions
-    .flatMap((discussion) => discussion.notes)
-    .filter((note) => Date.parse(note.createdAt) > Date.parse(since) && !note.system && !note.body.includes(LOOP_MARKER_TEXT))
-    .filter((note) => !skipped.has(note.author.toLowerCase()) && !BOT_USER.test(note.author))
-    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
-    .map(({ author, body }) => ({ author, body }));
 };
 
 /** A person's commits between the adopted head and the loop's head, listed by the executor from the worktree's history. */
@@ -151,20 +136,15 @@ const publishChanged = async (fix: Fix, stored: StoredFix, result: FixResult, mr
 };
 
 /**
- * A `no_changes` fix: reply and resolve, then ask Greptile to review the unchanged head again. The next review is told
- * apart from this one by its `Reviews (N)` counter, so a summary without one hands back before anything is posted.
+ * A `no_changes` fix: replies only. The head is unchanged and already reviewed, so the next await judges it again at once:
+ * with the replies as the threads' latest notes, nothing is left on the work list unless someone answers back.
  */
 const publishNoChanges = async (fix: Fix, stored: StoredFix, result: FixResult): Promise<JobOutcome> => {
-  if (stored.reviewCount === null) {
-    return publishHandback(fix.deps, fix.loop, "Greptile's summary has no review counter, so its next review cannot be told apart", result.summary);
-  }
   const replied = await publishThreads(fix.deps, fix.loop, result, null);
   if (replied.status !== "succeeded") return replied;
   const noted = await publishRoundMedia(fix.deps, fix.loop, result.summary, stored.media);
   if (noted.status !== "succeeded") return noted;
-  const requested = await requestReview(fix.deps, fix.loop);
-  if (requested.status !== "succeeded") return requested;
-  return nextRound(fix, { reviewCountAtTrigger: stored.reviewCount }, round(fix, stored, result, "no_changes"));
+  return nextRound(fix, {}, round(fix, stored, result, "no_changes"));
 };
 
 /** Publishes what the fix decided; a retry of the job comes straight here, so the brain never runs twice. */
@@ -218,10 +198,7 @@ const handleResult = async (
   if (work.pushedSha !== null) return decide(fix, handingBack(facts, result, "the agent pushed a change but reported no changes", work.pushedSha), mr);
   if (leftover !== "") return decide(fix, handingBack(facts, result, "the agent left unpushed work", leftover), mr);
   if (open === 0 && facts.pipeline !== "failed") {
-    return decide(fix, handingBack(facts, result, `Greptile scored ${facts.score}/5 with nothing open and the agent changed nothing`), mr);
-  }
-  if (fix.loop.history.at(-1)?.outcome === "no_changes") {
-    return decide(fix, handingBack(facts, result, "the agent and Greptile disagree two rounds running", result.summary), mr);
+    return decide(fix, handingBack(facts, result, "nothing was left to answer and the agent changed nothing"), mr);
   }
   return decide(fix, await published(), mr);
 };
@@ -230,29 +207,29 @@ const handleResult = async (
 interface PreparedRound {
   spec: RunSpec;
   facts: RoundFacts;
-  findings: Finding[];
+  work: WorkItem[];
 }
 
 /**
- * The prepare half of a fresh round: the review's findings, CI failures and people's notes, the prompt, and a spec that
- * resumes the loop's session on its head with the push tool. Either a spec to execute, or the job's outcome.
+ * The prepare half of a fresh round: the work list (every discussion waiting for an answer), Greptile's summary when it
+ * is on, CI failures, the prompt, and a spec that resumes the loop's session on its head with the push tool. Either a
+ * spec to execute, or the job's outcome.
  */
 const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound | { outcome: JobOutcome }> => {
   const { ctx, deps, gitlab, greptile, settings, loop, paths } = fix;
   const { mr, discussions } = observed;
-  const summary = findSummary(mr, discussions, greptile.botUsername);
-  if (summary === null) return { outcome: await publishHandback(deps, loop, `Greptile has no summary for ${mr.sha.slice(0, 7)}`) };
-  const findings = openFindings(discussions, greptile.botUsername);
+  const greptileOn = (deps.settings?.get() ?? seedSettings(deps.config))["greptile.enabled"];
+  const summary = greptileOn ? findSummary(mr, discussions, greptile.botUsername) : null;
+  if (greptileOn && summary === null) return { outcome: await publishHandback(deps, loop, `Greptile has no summary for ${mr.sha.slice(0, 7)}`) };
   const pipeline = mr.headPipeline !== null && mr.headPipeline.sha === mr.sha ? mr.headPipeline : null;
-  const facts: RoundFacts = { score: summary.score, reviewCount: summary.reviewCount, pipeline: pipeline?.status ?? null };
+  const facts: RoundFacts = { score: summary?.score ?? null, reviewCount: summary?.reviewCount ?? null, pipeline: pipeline?.status ?? null };
   if (loop.sessionId === null) return { outcome: await decide(fix, handingBack(facts, null, SESSION_LOST, "the loop has no stored session"), mr) };
 
   let ciFailures: CiFailure[] = [];
-  // Only a restarted loop reads people's notes, so only it needs to know which account is the steward's.
-  let stewardUser: string[] = [];
+  let work: WorkItem[];
   try {
     if (pipeline?.status === "failed") ciFailures = await collectCiFailures(gitlab, mr.projectId, pipeline.id, greptile.ciLogLines, deps.redactor);
-    if (loop.handedBackAt !== null) stewardUser = [(await gitlab.currentUser()).username];
+    work = workList(discussions, (await gitlab.currentUser()).username, [greptile.botUsername]);
     await deps.mirror.fetch();
   } catch (err) {
     return { outcome: { status: "failed", error: errorMessage(err), retryable: true } };
@@ -265,14 +242,12 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
     prompt = renderFixPrompt(await readFile(greptile.prompt, "utf8"), {
       identifier: loop.identifier,
       round: loop.round + 1,
-      maxRounds: greptile.maxRounds,
-      score: summary.score,
-      summary: summary.body,
-      findings,
+      score: summary?.score ?? null,
+      summary: summary?.body ?? null,
+      comments: work,
       ciFailures,
       // The executor lists the commits in place of the marker, from the worktree it builds.
       personCommits: commits === null ? [] : [PERSON_COMMITS_MARKER],
-      newComments: newNotes(loop, discussions, [greptile.botUsername, ...stewardUser]),
       decisions: loop.decisions,
       workspacePath: worktreePath,
       headSha: loop.headSha,
@@ -313,13 +288,13 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
     interactive: false,
   };
   // A reattached run pod already runs this round: what it was started with is what it finishes with.
-  return { spec: ctx.resume ?? spec, facts, findings };
+  return { spec: ctx.resume ?? spec, facts, work };
 };
 
 /** The finish half, from the executor's report and the work it found: retry, hand back, or judge the agent's result. */
 const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: RunReport; work: WorkReport }, mr: MergeRequestInfo): Promise<JobOutcome> => {
   const { ctx, deps, loop } = fix;
-  const { spec, facts, findings } = prepared;
+  const { spec, facts, work: items } = prepared;
   const { report, work } = executed;
   if (report.setupFailed) {
     patchAttempt(ctx, deps, { setupTail: setupTailOf(report) });
@@ -343,11 +318,11 @@ const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: 
     return decide(fix, SESSION_ERROR.test(error) ? handingBack(facts, null, SESSION_LOST, error) : handingBack(facts, null, `the agent's run failed: ${error}`), mr);
   }
 
-  const validated = validateFixResult(report.output, findings);
+  const validated = validateFixResult(report.output, items);
   if (!validated.ok) return decide(fix, handingBack(facts, null, "the agent's result was invalid", validated.error), mr);
   const attach = (): Promise<MediaUploads | undefined> =>
     attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab: fix.gitlab, project: mr.projectId });
-  return handleResult(fix, work, facts, validated.result, findings.length, mr, attach);
+  return handleResult(fix, work, facts, validated.result, items.length, mr, attach);
 };
 
 /** A fresh round: prepare, execute (in-process or in a run pod) with its lines in the agent panel, finish. */
@@ -416,7 +391,7 @@ const answerInPanel = async (ctx: RunContext, deps: PipelineDeps, session: Linea
   if (stored.handback === null && stored.result !== null) await panel.finish({ type: "response", body: `This review round: ${stored.result.summary.trim()}` });
 };
 
-/** The fix job: resumes the loop's brain session on the review's findings with the push tool, then replies and resolves, or hands back. */
+/** The fix job: resumes the loop's brain session on the MR's unanswered comments with the push tool, then replies (never resolving), or hands back. */
 export const runFix = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutcome> => {
   const panel = { session: NO_SESSION };
   const outcome = redactOutcome(await executeFix(ctx, deps, panel).catch(crashed), deps.redactor);

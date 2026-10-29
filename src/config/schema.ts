@@ -67,6 +67,8 @@ const GreptileSchema = z.object({
   botUsername: z.string().min(1),
   /** Fix rounds after the implement push (round 0). */
   maxRounds: z.number().int().positive().default(5),
+  /** Seeds the `greptile.passScore` setting: at this confidence on the head, bot-started rounds end. Unset is 5. */
+  passScore: z.number().int().min(1).max(5).optional(),
   /** The fix prompt, resolved against the config directory. */
   prompt: z.string(),
   /** The fallback poll between GitLab webhooks, which wake a waiting loop at once. */

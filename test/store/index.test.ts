@@ -96,6 +96,19 @@ describe("openStores", () => {
     stores.db.close();
   });
 
+  it("adds the bot_rounds column to an existing loops table, 0 for its loops", () => {
+    const dir = freshDataDir();
+    const first = openStores(dir);
+    const jobId = first.jobs.enqueue(createdEvent);
+    first.db.exec("ALTER TABLE loops DROP COLUMN bot_rounds");
+    first.db.prepare(`INSERT INTO loops (issue_id, identifier, team_key, implement_job_id, branch, base_sha, head_sha, worktree_name, label_driven, state, created_at)
+      VALUES ('issue-1', 'API-1', 'API', ?, 'fix/API-1', 'b', 'h', 'API-1-1', 1, 'awaiting_mr', '2026-10-01')`).run(jobId);
+    first.db.close();
+    const stores = openStores(dir);
+    expect(stores.loops.latestForIssue("issue-1")?.botRounds).toBe(0);
+    stores.db.close();
+  });
+
   it("backfills an older implement job's worktree from where its session transcript is, and its base from the stored result", () => {
     const dir = freshDataDir();
     const first = openStores(dir);

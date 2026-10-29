@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MergeRequestInfo, MrDiscussion, MrNote } from "../../src/codehost/gitlabMr.js";
-import { findSummary, openFindings, parseSummary, shaMatches } from "../../src/greptile/summary.js";
+import { findSummary, parseSummary, shaMatches } from "../../src/greptile/summary.js";
 
 const SHA = "abc1234ef567890abc1234ef567890abc1234ef";
 const fixture = (n: number, sha = SHA): string => `<h3>Greptile Summary</h3>
@@ -58,25 +58,5 @@ describe("shaMatches", () => {
     expect(shaMatches("abc123", SHA)).toBe(false);
     expect(shaMatches("def1234", SHA)).toBe(false);
     expect(shaMatches(null, SHA)).toBe(false);
-  });
-});
-
-describe("openFindings", () => {
-  const pos = { newPath: "src/a.ts", oldPath: "src/a.ts", newLine: 12, oldLine: null };
-  it("keeps unresolved resolvable bot threads and drops the rest", () => {
-    const body = "Bug here\n```suggestion\nconst x = 1;\n```\n";
-    const d: MrDiscussion[] = [
-      { id: "open", notes: [note({ body, resolvable: true, type: "DiffNote", position: pos })] },
-      { id: "resolved", notes: [note({ resolvable: true, resolved: true })] },
-      { id: "human", notes: [note({ author: "human", resolvable: true })] },
-      { id: "plain", notes: [note({ resolvable: false })] },
-    ];
-    expect(openFindings(d, "greptile-bot")).toEqual([
-      { discussionId: "open", body, filePath: "src/a.ts", lineStart: 12, lineEnd: 12, suggestedCode: "const x = 1;\n" },
-    ]);
-  });
-  it("has null suggestion and position when absent", () => {
-    const d: MrDiscussion[] = [{ id: "x", notes: [note({ resolvable: true, body: "hi" })] }];
-    expect(openFindings(d, "greptile-bot")[0]).toMatchObject({ filePath: null, lineStart: null, lineEnd: null, suggestedCode: null });
   });
 });

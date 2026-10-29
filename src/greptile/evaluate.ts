@@ -1,29 +1,92 @@
-import type { MergeRequestInfo } from "../codehost/gitlabMr.js";
+import { BOT_USER, type MergeRequestInfo, type MrDiscussion, type NotePosition } from "../codehost/gitlabMr.js";
 import type { GreptileConfig } from "../config/schema.js";
+import type { Settings } from "../settings/schema.js";
 import type { Loop } from "../store/loops.js";
-import { shaMatches, type Finding, type GreptileSummary } from "./summary.js";
+import { parseSummary, shaMatches, type GreptileSummary } from "./summary.js";
+
+/** One discussion the next round answers: by a change and a reply, or a reply alone. */
+export interface WorkItem {
+  discussionId: string;
+  /** Who wrote the discussion's latest note: the one the round answers. */
+  author: string;
+  isBot: boolean;
+  /** The note, or for a thread with replies the whole conversation, each note under its author. */
+  body: string;
+  /** Where the discussion's first note sits in the diff; null for a general comment. */
+  position: NotePosition | null;
+}
+export type StartedBy = "person" | "bot";
 
 export type GreptileStatus = "pending" | "completed" | "failed" | "skipped";
 export type RoundDecision =
   /** `deadline`: when the wait's timeout runs out (null before its clock starts), so the next poll need not overrun it. */
   | { kind: "wait"; waitingFor: "mr" | "review" | "pipeline"; deadline: Date | null }
-  | { kind: "passed"; summary: GreptileSummary }
-  | { kind: "fix"; summary: GreptileSummary; findings: Finding[]; pipelineFailed: boolean }
+  /** `summary`: Greptile's review of the head; null when Greptile is off. */
+  | { kind: "passed"; summary: GreptileSummary | null }
+  | { kind: "fix"; workList: WorkItem[]; startedBy: StartedBy; pipelineFailed: boolean }
   | { kind: "handback"; reason: string }
   | { kind: "stop"; reason: string; note: boolean };
 export interface RoundInput {
-  loop: Loop; settings: GreptileConfig; now: Date; ticketClosed: boolean;
-  mr: MergeRequestInfo | null; summary: GreptileSummary | null; findings: Finding[];
+  loop: Loop;
+  /** The loop's timeouts. */
+  config: GreptileConfig;
+  settings: Settings;
+  now: Date;
+  ticketClosed: boolean;
+  mr: MergeRequestInfo | null;
+  /** Greptile's newest summary; null when it has posted none. Ignored while the `greptile.enabled` setting is off. */
+  greptile: GreptileSummary | null;
+  workList: WorkItem[];
+  startedBy: StartedBy;
   /** Only known with the Greptile MCP. */
   greptileStatus: GreptileStatus | null;
 }
 
+/** Every steward note carries a hidden `ticket-steward:` marker (loop notes, chat replies). */
+const STEWARD_MARKER = "<!-- ticket-steward:";
+
+/**
+ * The round's work list: every unresolved discussion whose latest note is not the steward's (by its account or its
+ * marker), from people and bots alike. System notes are skipped, and so is a Greptile summary, which the prompt shows
+ * whole and which nobody answers in its thread.
+ */
+export const workList = (discussions: MrDiscussion[], stewardUsername: string, botUsernames: readonly string[] = []): WorkItem[] => {
+  const steward = stewardUsername.toLowerCase();
+  const bots = new Set(botUsernames.map((name) => name.toLowerCase()));
+  const out: WorkItem[] = [];
+  for (const discussion of discussions) {
+    const notes = discussion.notes.filter((note) => !note.system);
+    const first = notes[0];
+    const latest = notes.at(-1);
+    if (first === undefined || latest === undefined) continue;
+    if (notes.some((note) => note.resolvable && note.resolved)) continue;
+    if (latest.author.toLowerCase() === steward || latest.body.includes(STEWARD_MARKER)) continue;
+    if (parseSummary(latest.body, latest.updatedAt, "note") !== null) continue;
+    out.push({
+      discussionId: discussion.id,
+      author: latest.author,
+      isBot: BOT_USER.test(latest.author) || bots.has(latest.author.toLowerCase()),
+      body: notes.length === 1 ? latest.body : notes.map((note) => `**${note.author}:** ${note.body}`).join("\n\n"),
+      position: first.position,
+    });
+  }
+  return out;
+};
+
+/** A round is a person's when anything on its list is a person's; otherwise bots or a red pipeline started it. */
+export const startedBy = (items: readonly WorkItem[]): StartedBy => (items.some((item) => !item.isBot) ? "person" : "bot");
+
 const UNFINISHED_PIPELINE = new Set(["created", "pending", "running", "waiting_for_resource", "preparing"]);
 const DEAD_PIPELINE = new Set(["canceled", "skipped", "manual"]);
 
-/** Decide what the fix loop does next; every timeout counts from `loop.waitStartedAt`. */
+/**
+ * Decide what the review loop does next; every timeout counts from `loop.waitStartedAt`. With Greptile on, the head's
+ * review is waited for first. Then: Greptile at the pass score on a green head ends a round only bots started; an
+ * empty work list on a green head passes; a bot-started round past the bot-round cap hands back; anything else is a fix.
+ */
 export const evaluateRound = (input: RoundInput): RoundDecision => {
-  const { loop, settings, now, mr, summary } = input;
+  const { loop, config, settings, now, mr } = input;
+  const greptileOn = settings["greptile.enabled"];
   const timedOut = (minutes: number): boolean =>
     loop.waitStartedAt !== null && now.getTime() - Date.parse(loop.waitStartedAt) > minutes * 60_000;
   const deadline = (minutes: number): Date | null =>
@@ -31,9 +94,9 @@ export const evaluateRound = (input: RoundInput): RoundDecision => {
 
   if (input.ticketClosed) return { kind: "stop", reason: "the ticket was closed", note: false };
   if (mr === null) {
-    return timedOut(settings.mrTimeoutMinutes)
+    return timedOut(config.mrTimeoutMinutes)
       ? { kind: "handback", reason: `no merge request was opened for ${loop.branch}` }
-      : { kind: "wait", waitingFor: "mr", deadline: deadline(settings.mrTimeoutMinutes) };
+      : { kind: "wait", waitingFor: "mr", deadline: deadline(config.mrTimeoutMinutes) };
   }
   if (mr.state === "merged" || mr.state === "closed") {
     return { kind: "stop", reason: `the merge request was ${mr.state}`, note: true };
@@ -42,34 +105,39 @@ export const evaluateRound = (input: RoundInput): RoundDecision => {
   if (mr.sha.toLowerCase() !== loop.headSha.toLowerCase()) {
     return { kind: "handback", reason: "a person pushed to the branch; the loop stopped" };
   }
-  if (input.greptileStatus === "failed" || input.greptileStatus === "skipped") {
-    return { kind: "handback", reason: `Greptile review ${input.greptileStatus} for ${short}` };
-  }
-  const reviewed = summary !== null
-    && shaMatches(summary.lastReviewedSha, mr.sha)
-    && (loop.reviewCountAtTrigger === null || (summary.reviewCount ?? -1) > loop.reviewCountAtTrigger);
-  if (!reviewed || summary === null) {
-    return timedOut(settings.reviewTimeoutMinutes)
-      ? { kind: "handback", reason: `Greptile did not review ${short}` }
-      : { kind: "wait", waitingFor: "review", deadline: deadline(settings.reviewTimeoutMinutes) };
+  let summary: GreptileSummary | null = null;
+  if (greptileOn) {
+    if (input.greptileStatus === "failed" || input.greptileStatus === "skipped") {
+      return { kind: "handback", reason: `Greptile review ${input.greptileStatus} for ${short}` };
+    }
+    summary = input.greptile;
+    const reviewed = summary !== null
+      && shaMatches(summary.lastReviewedSha, mr.sha)
+      && (loop.reviewCountAtTrigger === null || (summary.reviewCount ?? -1) > loop.reviewCountAtTrigger);
+    if (!reviewed) {
+      return timedOut(config.reviewTimeoutMinutes)
+        ? { kind: "handback", reason: `Greptile did not review ${short}` }
+        : { kind: "wait", waitingFor: "review", deadline: deadline(config.reviewTimeoutMinutes) };
+    }
   }
   const pipeline = mr.headPipeline !== null && mr.headPipeline.sha === mr.sha ? mr.headPipeline : null;
   if (pipeline === null || UNFINISHED_PIPELINE.has(pipeline.status)) {
-    return timedOut(settings.pipelineTimeoutMinutes)
+    return timedOut(config.pipelineTimeoutMinutes)
       ? { kind: "handback", reason: `no finished pipeline for ${short}` }
-      : { kind: "wait", waitingFor: "pipeline", deadline: deadline(settings.pipelineTimeoutMinutes) };
+      : { kind: "wait", waitingFor: "pipeline", deadline: deadline(config.pipelineTimeoutMinutes) };
   }
   if (DEAD_PIPELINE.has(pipeline.status)) {
     return { kind: "handback", reason: `the pipeline for ${short} is ${pipeline.status}` };
   }
-  if (summary.score === 5 && input.findings.length === 0 && pipeline.status === "success") {
+  const green = pipeline.status === "success";
+  // Greptile edits one summary instead of posting at its pass score, so its score, not silence, ends bots' rounds.
+  if (green && summary !== null && summary.score >= settings["greptile.passScore"] && input.startedBy === "bot") {
     return { kind: "passed", summary };
   }
-  if (loop.round >= settings.maxRounds) {
-    return {
-      kind: "handback",
-      reason: `Greptile scored ${summary.score}/5 after ${loop.round} fix rounds (pipeline ${pipeline.status})`,
-    };
+  if (green && input.workList.length === 0) return { kind: "passed", summary };
+  const cap = settings["greptile.maxRounds"];
+  if (input.startedBy === "bot" && loop.botRounds >= cap) {
+    return { kind: "handback", reason: `stopped after ${loop.botRounds} rounds started by bots; a person's comment starts another` };
   }
-  return { kind: "fix", summary, findings: input.findings, pipelineFailed: pipeline.status === "failed" };
+  return { kind: "fix", workList: input.workList, startedBy: input.startedBy, pipelineFailed: pipeline.status === "failed" };
 };

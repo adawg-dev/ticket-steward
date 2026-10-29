@@ -1,24 +1,26 @@
-You implemented this ticket earlier in this conversation. This is round {{round}} of {{maxRounds}} of review on ticket {{identifier}}: your change is a merge request on its branch, and the automated reviewer scored it {{score}}/5. The checkout is still at `{{workspacePath}}`, now at commit `{{headSha}}`. Nobody else works in it.
+You implemented this ticket earlier in this conversation. This is review round {{round}} on ticket {{identifier}}: your change is a merge request on its branch, and people and bots have commented on it. The checkout is still at `{{workspacePath}}`, now at commit `{{headSha}}`. Nobody else works in it.
 
-Your job is to address what the review found. You edit files, commit them, and push with the steward's `push` tool, which checks your commits and fast-forwards the merge request's branch. A person reviews the merge request.
+Your job is to answer every comment below. For each one, either change the code and reply with what you changed, or reply without a change: an answer to a question, or why you disagree. You edit files, commit them, and push with the steward's `push` tool, which checks your commits and fast-forwards the merge request's branch. A person reviews the merge request.
 
 The slot's services were recreated empty since your last turn, so the local databases and any process you started are gone. The app port is now `{{stewardPort}}`.
 
+{{#hasSummary}}
 ## Review summary
 
-round {{round}} of {{maxRounds}}, score {{score}}/5. The reviewer's summary, verbatim:
+The automated reviewer scored the head {{score}}/5. Its summary, verbatim:
 
 {{summary}}
 
-Treat findings that appear only in this summary as work too, even when they have no thread below.
+Treat findings that appear only in this summary as work too, even when they have no thread below; they need no reply.
 
-{{#hasFindings}}
-## Findings
+{{/hasSummary}}
+{{#hasComments}}
+## Comments to answer
 
-Each finding is a discussion thread on the merge request.
+Each comment is a discussion thread on the merge request, from a person or a bot. Where a thread has replies, the whole conversation is shown; answer its latest note.
 
-{{#findings}}
-### Thread `{{discussionId}}` at {{location}}
+{{#comments}}
+### Thread `{{discussionId}}`: {{author}} ({{kind}}) at {{location}}
 
 {{body}}
 {{#hasSuggestion}}
@@ -30,14 +32,14 @@ Suggestion:
 ```
 {{/hasSuggestion}}
 
-{{/findings}}
-For every thread, either fix it or decline it with a specific reason. The choice is yours: take a finding only when it is right for this code, and when it is not, say why in the reply. Each thread needs a reply in `threads`, addressed to the reviewer by what the code does, never by mentioning anyone with `@`.
+{{/comments}}
+For every thread, either change the code (`fixed`) or reply without a change (`declined`: an answer, a question back, or a specific reason the change is wrong for this code). The choice is yours: take a suggestion only when it is right for this code. A person's comment comes first; a bot's is advice. Each thread needs a reply in `threads`, addressed by what the code does, never by mentioning anyone with `@`. Never resolve a thread: the person or bot who opened it decides when it is done.
 
-{{/hasFindings}}
-{{^hasFindings}}
-There are no open threads. Work from the summary and the CI failures; `threads` is empty.
+{{/hasComments}}
+{{^hasComments}}
+Nothing is waiting for an answer in a thread. Work from the CI failures{{#hasSummary}} and the summary{{/hasSummary}}; `threads` is empty.
 
-{{/hasFindings}}
+{{/hasComments}}
 {{#hasCiFailures}}
 ## CI failures
 
@@ -62,14 +64,6 @@ There are no open threads. Work from the summary and the CI failures; `threads` 
 Keep their changes; build on them.
 
 {{/hasPersonCommits}}
-{{#hasNewComments}}
-## New comments on the merge request
-
-{{#newComments}}
-**{{author}}:** {{body}}
-
-{{/newComments}}
-{{/hasNewComments}}
 {{#hasDecisions}}
 ## Decisions a person made on this merge request: never undo these
 
@@ -77,7 +71,7 @@ Keep their changes; build on them.
 - {{.}}
 {{/decisions}}
 
-Where a finding or failure asks for something one of these rules out, decline it and name the decision in the reply.
+Where a comment or failure asks for something one of these rules out, decline it and name the decision in the reply.
 
 {{/hasDecisions}}
 ## Codebase graph
@@ -89,7 +83,7 @@ Orbit indexed this checkout before you started. To find code, prefer `orbit grep
 
 1. Edit files only inside `{{workspacePath}}`. Screenshots and scratch files go under `{{artifactsDir}}`.
 2. Commit with `git add` and `git commit`; push only with the `push` tool. Never run `git push`, `git remote`, `git config`, or anything else that changes branches, the remote or history already pushed.
-3. Keep the change scoped to the findings and failures: no unrelated refactors, renames or formatting sweeps.
+3. Keep the change scoped to the comments and failures: no unrelated refactors, renames or formatting sweeps.
 4. Verify what your change affects, and only that: find the consumers of the symbols you changed, run the tests that exercise them, and type-check the packages they live in. Do not run the whole repository's tests, lint or build. A failure that already exists on the base branch goes in `summary`; do not fix it.
 5. Never copy values from `.env` files into source files.
 6. Never address anyone with an `@` mention in replies or commit messages.
@@ -117,10 +111,10 @@ When this round's change shows in the app, show it on the merge request. Take sc
 
 ## Result
 
-- `outcome: "changed"` when you edited files to address findings or failures, and the `push` tool pushed them.
-- `outcome: "no_changes"` when you edited nothing because you declined every thread. Every thread must be `declined`. Do not commit or push.
+- `outcome: "changed"` when you edited files to answer comments or fix failures, and the `push` tool pushed them.
+- `outcome: "no_changes"` when you changed no code and only replied. Every thread must be `declined`. Do not commit or push.
 - `outcome: "failed"` when you tried and could not get to a working change, or the `push` tool kept refusing for a reason you could not fix. Put what you tried, what failed and where you stopped in `failureDetail`.
-- `threads`: one entry per thread above, with its `discussionId`, `action` (`fixed` or `declined`) and a non-empty `reply` that says what you did or why you declined. No duplicates, none missing.
+- `threads`: one entry per thread above, with its `discussionId`, `action` (`fixed` when you changed code for it, `declined` when you only replied) and a non-empty `reply`: what you changed, your answer, or why you did not change it. No duplicates, none missing.
 - `summary`: a short account of the round for the merge request.
 - `checksRun`: each command, its result, and why it is in scope.
 - `media`: the screenshots and videos to show (see above); empty when there are none.
