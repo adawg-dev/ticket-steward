@@ -22,6 +22,7 @@ export default defineConfig({
   server: { port: 3020, publicUrl: "https://steward.example.com" },
   // Required: label-driven implementation (ready-for-agent). Requires GITLAB_PUSH_TOKEN in .env: a project access token, Developer role, write_repository only.
   // steward init writes prompts/implement.md; otherwise copy <ticket-steward>/prompts/implement.md to /etc/ticket-steward/prompts/implement.md.
+  // prompts/repo.md beside this file (examples/kickoff/prompts/repo.md) is kickoff's own section of the implement, fix and chat prompts.
   implement: {
     prompt: "./prompts/implement.md",
     checks: ["pnpm turbo check-types lint --filter='...[{{baseSha}}]'"],

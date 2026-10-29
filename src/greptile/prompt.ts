@@ -1,8 +1,6 @@
-import Mustache from "mustache";
+import { renderPrompt } from "../core/prompt.js";
 import type { CiFailure } from "./ci.js";
 import type { Finding } from "./summary.js";
-
-const { render } = Mustache;
 
 export interface FixPromptInput {
   identifier: string;
@@ -25,16 +23,14 @@ export interface FixPromptInput {
   hasChecks: boolean;
 }
 
-const verbatim = (value: string): string => value;
-
 const location = (f: Finding): string => {
   if (f.filePath === null) return "no file";
   return f.lineStart === null ? f.filePath : `${f.filePath}:${f.lineStart}`;
 };
 
-/** Fill the fix prompt template (mustache, unescaped, like the implement prompt). */
-export const renderFixPrompt = (template: string, input: FixPromptInput): string =>
-  render(
+/** Fill the fix prompt template (mustache, unescaped, like the implement prompt), with the repo's own section as `{{> repo}}`. */
+export const renderFixPrompt = (template: string, input: FixPromptInput, repo = ""): string =>
+  renderPrompt(
     template,
     {
       ...input,
@@ -44,6 +40,5 @@ export const renderFixPrompt = (template: string, input: FixPromptInput): string
       hasPersonCommits: input.personCommits.length > 0,
       hasNewComments: input.newComments.length > 0,
     },
-    undefined,
-    { escape: verbatim },
+    repo,
   );

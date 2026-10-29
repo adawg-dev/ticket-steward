@@ -216,6 +216,15 @@ describe("runChat", () => {
     expect(stores.jobs.get(ctx.jobId)?.chatResult).toEqual({ reply: "The retry hid the error; I removed it on purpose.", warning: null });
   });
 
+  it("renders the config's prompts/repo.md into the chat prompt", async () => {
+    await mkdir(join(repo.root, "prompts"), { recursive: true });
+    await writeFile(join(repo.root, "prompts", "repo.md"), "## Working in kickoff\n\n- Never hand-edit `pnpm-lock.yaml`.\n");
+    const brain = new FakeBrain({ result: { reply: "Done." }, sessionId: "session-2" });
+
+    expect(await runChat(claim(createLoop()), makeDeps(brain))).toEqual({ status: "succeeded" });
+    expect(brain.lastInput().prompt).toContain("## Working in kickoff\n\n- Never hand-edit `pnpm-lock.yaml`.\n\n## Rules");
+  });
+
   it("keeps the worktree after the run: it is the session's", async () => {
     const loopId = createLoop();
     const brain = new FakeBrain({ result: { reply: "ok" } });

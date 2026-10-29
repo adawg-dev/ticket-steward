@@ -5,6 +5,7 @@ import { BOT_USER, type GitLabMrApi, type MergeRequestInfo, type MrDiscussion } 
 import type { GreptileConfig } from "../config/schema.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
+import { readRepoPartial } from "../core/prompt.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, type JobPaths } from "../core/workspace.js";
 import { runIdOf, settingsOf, stewardChecks } from "../implement/pipeline.js";
@@ -258,7 +259,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
       artifactsDir: paths.artifactsDir,
       checks: stewardChecks(settings.checks, loop.baseSha).map((command) => `- \`${command}\``).join("\n"),
       hasChecks: settings.checks.length > 0,
-    });
+    }, await readRepoPartial(deps.configPath));
   } catch (err) {
     return { outcome: prepareFailed(deps, err) };
   }

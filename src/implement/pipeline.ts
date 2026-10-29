@@ -6,6 +6,7 @@ import type { ImplementConfig } from "../config/schema.js";
 import { renderTicketMarkdown } from "../core/context.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
+import { readRepoPartial } from "../core/prompt.js";
 import { collectSecretValues } from "../core/redact.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError, stableWorktreeName, type JobPaths } from "../core/workspace.js";
@@ -176,7 +177,7 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
       branchTypes: settings.branchTypes.join(", "),
       hasChecks: settings.checks.length > 0,
       checks: stewardChecks(settings.checks, baseSha).map((command) => `- \`${command}\``).join("\n"),
-    });
+    }, await readRepoPartial(deps.configPath));
   } catch (err) {
     return { outcome: prepareFailed(deps, err) };
   }

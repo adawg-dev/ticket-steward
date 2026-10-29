@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import Mustache from "mustache";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { chatPromptPath } from "../cli/paths.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { PipelineDeps } from "../core/deps.js";
+import { readRepoPartial, renderPrompt } from "../core/prompt.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { crashed, errorMessage, jobPaths, jobPort, patchAttempt, prepareFailed, redactOutcome, SetupError } from "../core/workspace.js";
 import { unpushedWork } from "../implement/git.js";
@@ -18,8 +18,6 @@ import { logger } from "../log.js";
 import type { Worktree } from "../workspace/worktree.js";
 import { CHAT_MARKER, NO_SESSION_REPLY, validateChatResult, type StoredChat } from "./result.js";
 import { latestSession, type AgentSession } from "./session.js";
-
-const { render } = Mustache;
 
 /** The SDK's errors for a session it cannot load or resume. */
 const SESSION_ERROR = /no conversation found|resume/i;
@@ -45,10 +43,8 @@ export interface ChatPromptInput {
   hasChecks: boolean;
 }
 
-const verbatim = (value: string): string => value;
-
-/** Fill the chat prompt template (mustache, unescaped, like the other prompts). */
-export const renderChatPrompt = (template: string, input: ChatPromptInput): string => render(template, input, undefined, { escape: verbatim });
+/** Fill the chat prompt template (mustache, unescaped, like the other prompts), with the repo's own section as `{{> repo}}`. */
+export const renderChatPrompt = (template: string, input: ChatPromptInput, repo = ""): string => renderPrompt(template, input, repo);
 
 /** Posts the stored reply with the marker, in the note's discussion (or on the MR when GitLab gave no discussion). */
 const postReply = async (deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, stored: StoredChat): Promise<JobOutcome> => {
@@ -146,7 +142,7 @@ const prepareChat = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMr
       branch: session.branch ?? "",
       checks: checks.map((command) => `- \`${command}\``).join("\n"),
       hasChecks: checks.length > 0,
-    });
+    }, await readRepoPartial(deps.configPath));
   } catch (err) {
     return { outcome: prepareFailed(deps, err) };
   }

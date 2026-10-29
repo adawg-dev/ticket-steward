@@ -1,6 +1,4 @@
-import Mustache from "mustache";
-
-const { render } = Mustache;
+import { renderPrompt } from "../core/prompt.js";
 
 export interface ImplementPromptVars {
   identifier: string;
@@ -22,6 +20,5 @@ export interface ImplementPromptVars {
   checks: string;
 }
 
-const verbatim = (value: string): string => value;
-
-export const renderImplementPrompt = (template: string, vars: ImplementPromptVars): string => render(template, vars, undefined, { escape: verbatim });
+/** Fill the implement prompt template, with the repo's own section (`readRepoPartial`) as `{{> repo}}`. */
+export const renderImplementPrompt = (template: string, vars: ImplementPromptVars, repo = ""): string => renderPrompt(template, vars, repo);

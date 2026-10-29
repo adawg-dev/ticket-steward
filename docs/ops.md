@@ -301,6 +301,11 @@ implement: {
 }
 ```
 
+**The repo's own prompt section.** `prompts/repo.md` in the config directory, when present, is
+rendered into the implement, fix and chat prompts (as the Mustache partial `{{> repo}}`, after
+the "Codebase graph" section): the target repo's conventions the agent needs on every run.
+Without the file the section is left out. Kickoff's is `examples/kickoff/prompts/repo.md`.
+
 **What an implement job does.** Fresh worktree at the latest `dev`, as for every job. The
 agent edits, commits (as `commitAuthor`, with subjects prefixed `<IDENTIFIER>: `) and pushes
 through the steward's `push` tool; it never runs `git push` and never sees the token. The tool
