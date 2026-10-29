@@ -5,6 +5,7 @@ import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
 import { buildImplementSummary } from "../implement/publish.js";
 import { ACTIVE_LOOP_STATES, transaction, type Loop } from "../store/index.js";
+import { mergeRequestOpened } from "../linear/session.js";
 import { evaluateRound } from "./evaluate.js";
 import { LOOP_MARKER, noteOnce, publishHandback, publishPassed, publishStop } from "./publish.js";
 import { findSummary, openFindings } from "./summary.js";
@@ -37,6 +38,8 @@ const observe = async (deps: PipelineDeps, loop: Loop, project: string, now: Dat
     mr = await gitlab.findOpenMergeRequest(project, loop.branch);
     if (mr !== null) {
       deps.stores.loops.update(loop.id, { projectId: mr.projectId, mrIid: mr.iid, mrUrl: mr.webUrl, state: "awaiting_review", waitStartedAt: now.toISOString() });
+      // Once, as the loop first finds it: the agent session links the MR and the ticket moves to review.
+      await mergeRequestOpened(deps, loop.issueId, mr.webUrl);
     }
   } else {
     mr = await gitlab.getMergeRequest(loop.projectId, loop.mrIid);

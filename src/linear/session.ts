@@ -46,6 +46,7 @@ export const PANEL_TEXT = {
 } as const;
 
 const DEFAULT_INTERVAL_MS = 2_000;
+const DEFAULT_REVIEW_STATE = "In Review";
 /** An error activity shows this much of the job's error: its first line, never output tails. */
 const MAX_ERROR_CHARS = 300;
 
@@ -169,6 +170,55 @@ export const failureContent = (error: string): ActivityContent => {
   return { type: "error", body: `The run failed: ${first.length > MAX_ERROR_CHARS ? `${first.slice(0, MAX_ERROR_CHARS)}…` : first}` };
 };
 
+/** The state names already logged missing, per agent API (one per process): a missing state is logged once, not per ticket. */
+const loggedMissing = new WeakMap<LinearAgentApi, Set<string>>();
+
+const logMissingOnce = (api: LinearAgentApi, state: string, issueId: string): void => {
+  const logged = loggedMissing.get(api) ?? new Set<string>();
+  loggedMissing.set(api, logged);
+  if (logged.has(state)) return;
+  logged.add(state);
+  logger.warn({ state, issueId }, "linear: the team has no such workflow state; tickets stay where they are");
+};
+
+/**
+ * Moves the ticket to `which`. A missing state is logged (once per state) and the session's panel says so; a failed
+ * move is logged. Never throws: the work goes on wherever the ticket is.
+ */
+const moveTicket = async (deps: LinearPanelDeps, api: LinearAgentApi, issueId: string, which: { type: "started" } | { name: string }, sessionId: string | null): Promise<void> => {
+  const state = "name" in which ? which.name : "started";
+  try {
+    if ((await api.moveToState(issueId, which)) !== "missing") return;
+    logMissingOnce(api, state, issueId);
+    if (sessionId !== null) {
+      const body = `I could not move the ticket to "${state}": its team has no workflow state by that name.`;
+      await api.createActivity(sessionId, { type: "thought", body: panelScrubOf(deps)(body) });
+    }
+  } catch (err) {
+    logger.warn({ issueId, state, err: errorMessage(err) }, "linear: the ticket's workflow state could not be moved");
+  }
+};
+
+/** On delegation, the ticket moves to its team's first started state unless it is there or later (`linear.moveToStarted`). */
+export const moveToStarted = async (deps: LinearPanelDeps, issueId: string, sessionId: string | null): Promise<void> => {
+  const api = deps.linear;
+  if (api === undefined || deps.settings?.get()["linear.moveToStarted"] === false) return;
+  await moveTicket(deps, api, issueId, { type: "started" }, sessionId);
+};
+
+/**
+ * The ticket's MR is open: the session links it, and the ticket moves to the review state (`linear.reviewStateName`).
+ * A ticket Linear never opened a session for is left alone.
+ */
+export const mergeRequestOpened = async (deps: LinearPanelDeps, issueId: string, url: string): Promise<void> => {
+  const api = deps.linear;
+  const sessionId = deps.stores.agentSessions.current(issueId);
+  if (api === undefined || sessionId === null) return;
+  await linearSessionFor(deps, issueId).setMrUrl(url);
+  const name = deps.settings?.get()["linear.reviewStateName"] ?? DEFAULT_REVIEW_STATE;
+  await moveTicket(deps, api, issueId, { name }, sessionId);
+};
+
 /** What answering intake needs besides the panel: the jobs (a steer that finds no run becomes a chat) and the run channels. */
 export interface IntakeAnswerDeps extends LinearPanelDeps {
   stores: Pick<Stores, "agentSessions" | "jobs">;
@@ -201,7 +251,8 @@ const answerSession = async (deps: IntakeAnswerDeps, api: LinearAgentApi, event:
     case "assign_me":
       return post({ type: "response", body: ASSIGN_ME_REPLY });
     case "implement":
-      return post({ type: "thought", body: PANEL_TEXT.pickedUp });
+      await post({ type: "thought", body: PANEL_TEXT.pickedUp });
+      return moveToStarted(deps, event.issueId, event.sessionId);
     case "resume_implement":
       return post({ type: "thought", body: PANEL_TEXT.answerTaken });
     case "chat":
@@ -228,6 +279,8 @@ const answerSession = async (deps: IntakeAnswerDeps, api: LinearAgentApi, event:
  */
 export const answerLinearIntake = async (deps: IntakeAnswerDeps, event: LinearEvent, result: LinearIntakeResult): Promise<void> => {
   if (event.kind === "issue.undelegated") return;
+  // Delegated again to a ticket it has a branch for (Task 11 resumes it): only the state moves here.
+  if (result.action === "revive" && event.kind === "session.created" && event.delegated) return moveToStarted(deps, event.issueId, event.sessionId);
   const quiet: readonly string[] = ["ignored", "duplicate", "unassign", "revive"];
   if (quiet.includes(result.action)) return;
   const api = deps.linear;

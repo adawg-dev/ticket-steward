@@ -13,6 +13,7 @@ import { Mirror } from "../../src/workspace/mirror.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr, fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
+import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freshDataDir } from "../store/helpers.js";
 import type { MediaUploads } from "../../src/codehost/media.js";
@@ -375,5 +376,33 @@ describe("requestReview", () => {
 
     expect(gitlab.notes).toHaveLength(2);
     expect(gitlab.notes.every((note) => note.startsWith("@greptileai review"))).toBe(true);
+  });
+});
+
+describe("the ticket's workflow state", () => {
+  it("moves to the review state when the first poll finds the MR, and links it from the agent session", async () => {
+    const linear = new RecordingLinear();
+    stores.agentSessions.record("lin-1", "issue-1", "API-1");
+    gitlab.openMr = fakeMergeRequest({ sha: SHA });
+    const id = createLoop();
+
+    await runAwaitReview(claim(id), { ...makeDeps(), linear });
+    await runAwaitReview(claim(id), { ...makeDeps(), linear });
+
+    expect(linear.calls.filter((call) => call.kind !== "activity")).toEqual([
+      { kind: "urls", sessionId: "lin-1", urls: [{ label: "Merge request", url: gitlab.openMr?.webUrl }] },
+      { kind: "state", issueId: "issue-1", which: { name: "In Review" } },
+    ]);
+  });
+
+  it("stays where it is on a hand-back, which the panel explains", async () => {
+    const linear = new RecordingLinear();
+    stores.agentSessions.record("lin-1", "issue-1", "API-1");
+    const id = knownMrLoop();
+
+    await publishHandback({ ...makeDeps(), linear }, loopOf(id), "the agent could not finish");
+
+    expect(linear.calls.filter((call) => call.kind === "state")).toEqual([]);
+    expect(linear.activities().map((call) => call.content)).toEqual([{ type: "response", body: "I handed the merge request back to a person: the agent could not finish." }]);
   });
 });

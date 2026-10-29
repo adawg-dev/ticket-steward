@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { Redactor } from "../../src/core/redact.js";
 import type { ImplementResult } from "../../src/implement/result.js";
 import { linearIntake } from "../../src/linear/intake.js";
-import { answerLinearIntake, failureContent, implementFinish, linearSessionFor, PANEL_TEXT, steerText, stoppedResponse } from "../../src/linear/session.js";
+import { logger } from "../../src/log.js";
+import { answerLinearIntake, failureContent, implementFinish, linearSessionFor, mergeRequestOpened, PANEL_TEXT, steerText, stoppedResponse } from "../../src/linear/session.js";
 import { RunChannels } from "../../src/run/channel.js";
-import { seedSettings } from "../../src/settings/schema.js";
+import { seedSettings, type Settings } from "../../src/settings/schema.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { LinearEvent } from "../../src/tracker/linear/webhook.js";
@@ -195,5 +196,58 @@ describe("answerLinearIntake", () => {
   it("says the message waits while a person holds the ticket in a terminal session", async () => {
     await answerLinearIntake(panelDeps(), prompted("hi"), { action: "wait_for_lease", jobId: 1 });
     expect(linear.activities().map((call) => call.content)).toEqual([{ type: "thought", body: PANEL_TEXT.waitForLease }]);
+  });
+});
+
+describe("workflow-state moves", () => {
+  const withSettings = (patch: Partial<Settings>) => ({ ...panelDeps(), settings: { get: () => ({ ...seedSettings(makeConfig()), ...patch }) } });
+  const intakeDeps = () => ({ config: makeConfig(), stores, settings: { get: () => seedSettings(makeConfig()) } });
+  const states = () => linear.calls.filter((call) => call.kind === "state");
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("moves a delegated ticket to its team's started state", async () => {
+    const event = created();
+    await answerLinearIntake(panelDeps(), event, await linearIntake(intakeDeps(), event));
+    expect(states()).toEqual([{ kind: "state", issueId: "issue-1", which: { type: "started" } }]);
+  });
+
+  it("leaves the state alone with linear.moveToStarted off", async () => {
+    const event = created();
+    await answerLinearIntake(withSettings({ "linear.moveToStarted": false }), event, await linearIntake(intakeDeps(), event));
+    expect(states()).toEqual([]);
+    expect(linear.activities()).toHaveLength(1);
+  });
+
+  it("moves a ticket to the review state once its MR is open, and links the MR", async () => {
+    stores.agentSessions.record("session-1", "issue-1", "API-1");
+    await mergeRequestOpened(withSettings({ "linear.reviewStateName": "Code Review" }), "issue-1", "https://gitlab.example/mr/7");
+    expect(linear.calls).toEqual([
+      { kind: "urls", sessionId: "session-1", urls: [{ label: "Merge request", url: "https://gitlab.example/mr/7" }] },
+      { kind: "state", issueId: "issue-1", which: { name: "Code Review" } },
+    ]);
+  });
+
+  it("logs a missing review state once and says in the panel that it was not found", async () => {
+    const warn = vi.spyOn(logger, "warn");
+    stores.agentSessions.record("session-1", "issue-1", "API-1");
+    stores.agentSessions.record("session-2", "issue-2", "API-2");
+    linear.stateAnswer = "missing";
+
+    await mergeRequestOpened(panelDeps(), "issue-1", "https://gitlab.example/mr/7");
+    await mergeRequestOpened(panelDeps(), "issue-2", "https://gitlab.example/mr/8");
+
+    expect(warn.mock.calls.filter(([, message]) => typeof message === "string" && message.includes("no such workflow state"))).toHaveLength(1);
+    expect(linear.activities().map((call) => [call.sessionId, call.content])).toEqual([
+      ["session-1", { type: "thought", body: 'I could not move the ticket to "In Review": its team has no workflow state by that name.' }],
+      ["session-2", { type: "thought", body: 'I could not move the ticket to "In Review": its team has no workflow state by that name.' }],
+    ]);
+  });
+
+  it("leaves a ticket with no agent session where it is", async () => {
+    await mergeRequestOpened(panelDeps(), "issue-1", "https://gitlab.example/mr/7");
+    expect(linear.calls).toEqual([]);
   });
 });
