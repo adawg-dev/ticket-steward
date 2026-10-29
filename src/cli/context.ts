@@ -13,7 +13,7 @@ import type { OrbitExec } from "../orbit/run.js";
 import type { ObjectStore } from "../sessions/store.js";
 import type { TemplateListing, Tracker } from "../tracker/types.js";
 import type { SlotRunner } from "../workspace/slots.js";
-import type { AssumeWebIdentity, DoctorCluster, MinioSignIn } from "./doctorKubernetes.js";
+import type { AssumeWebIdentity, DoctorCluster, MinioSignIn, SimulateSecretRead } from "./doctorKubernetes.js";
 
 export type { TemplateListing } from "../tracker/types.js";
 
@@ -52,6 +52,8 @@ export interface CliFactories {
   doctorCluster?: DoctorCluster;
   assumeWebIdentity?: AssumeWebIdentity;
   minioSignIn?: MinioSignIn;
+  /** Stands in for IAM's policy simulator in doctor's `run role` check. */
+  simulateSecretRead?: SimulateSecretRead;
 }
 
 export type SpawnInteractive = (command: string, args: string[], options: { cwd: string; env: Record<string, string> }) => Promise<number>;

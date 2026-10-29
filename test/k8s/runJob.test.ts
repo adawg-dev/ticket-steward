@@ -78,6 +78,13 @@ describe("buildRunJob", () => {
     expect(named(job, "tools").env?.find((variable) => variable.name === "STEWARD_TOOLS_TOKEN")?.value).toBe(TOKENS.tools);
   });
 
+  it("has the sidecars assume the run pods' role, never the dispatcher's, which reads the Linear secrets", () => {
+    const job = build();
+    for (const name of ["git-init", "render-overlay", "keyproxy", "tools"]) {
+      expect(named(job, name).env?.find((variable) => variable.name === "AWS_ROLE_ARN")?.value).toBe(RUNTIME.aws.runRoleArn);
+    }
+  });
+
   it("runs egress as render-overlay's user, so it can read the 0600 rules file render-overlay writes", () => {
     const job = build();
     const renderOverlay = named(job, "render-overlay").securityContext;
@@ -147,6 +154,13 @@ describe("the runtime config", () => {
     expect(StewardConfigSchema.safeParse({ ...base, workspace: { ...base.workspace, port: 3000 } }).success).toBe(true);
     const parsed = StewardConfigSchema.parse({ ...base, secrets, runtime: { kind: "kubernetes", ...kubernetes } });
     expect(parsed.runtime).toMatchObject({ kind: "kubernetes", serviceAccount: "steward-run", config: { configMap: "steward-config" } });
+  });
+
+  it("refuses a run pods' role equal to the dispatcher's", () => {
+    const aws = { ...RUNTIME.aws, runRoleArn: RUNTIME.aws.roleArn };
+    const result = StewardConfigSchema.safeParse({ ...base, secrets, runtime: { kind: "kubernetes", ...kubernetes, aws } });
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.error?.issues)).toContain("the run pods' role must not be the dispatcher's");
   });
 
   it("refuses the openai-agents brain on kubernetes", () => {

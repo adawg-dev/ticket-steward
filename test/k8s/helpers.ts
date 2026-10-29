@@ -11,7 +11,7 @@ export const RUNTIME: KubernetesRuntime = {
   maxConcurrent: 2,
   callbackUrl: "http://steward-internal.ticket-steward.svc:3021",
   minio: { endpoint: "http://minio.ticket-steward.svc:9000", bucket: "steward-sessions" },
-  aws: { roleArn: "arn:aws:iam::123456789012:role/steward", region: "us-east-1" },
+  aws: { roleArn: "arn:aws:iam::123456789012:role/steward", runRoleArn: "arn:aws:iam::123456789012:role/steward-run", region: "us-east-1" },
   resources: { agent: { cpu: "4", memory: "8Gi" } },
   egressAllowCidrs: [],
   serviceAccount: "steward-run",

@@ -8,6 +8,7 @@ import {
   NETWORK_POLICIES,
   type DoctorCluster,
   type KubernetesDoctorDeps,
+  type SimulateSecretRead,
 } from "../../src/cli/doctorKubernetes.js";
 import type { LoadedConfig } from "../../src/config/load.js";
 import { StewardConfigSchema } from "../../src/config/schema.js";
@@ -89,6 +90,7 @@ const deps = (patch: Partial<KubernetesDoctorDeps> = {}): KubernetesDoctorDeps =
   fetchImpl: issuerFetch(),
   cluster: fakeCluster(),
   assumeWebIdentity: async () => "arn:aws:sts::123456789012:assumed-role/steward/steward-doctor",
+  simulateSecretRead: async ({ secretArns }) => secretArns.map((secretArn) => ({ secretArn, decision: "explicitDeny" })),
   secretFetcher: fetcherOf({ DEV_STEWARD_GITLAB_TOKEN: SECRET_VALUE, DEV_STEWARD_LINEAR_CLIENT_SECRET: SECRET_VALUE, DEV_STRIPE_KEY: '{"STRIPE_KEY":"sk_test_x"}' }),
   minioSignIn: async () => ({ accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" }),
   objectStore: () => new MemoryObjectStore(),
@@ -120,7 +122,7 @@ afterEach(async () => {
 describe("kubernetesChecks", () => {
   it("runs the cluster checks in order, the probe pod last", () => {
     const names = kubernetesChecks(loaded(), RUNTIME, deps(), { probePod: false }).map((check) => check.name);
-    expect(names).toEqual(["k3s issuer", "aws role", "dev secrets", "overlay template", "minio sts", "network policies", "probe pod"]);
+    expect(names).toEqual(["k3s issuer", "aws role", "run role", "dev secrets", "overlay template", "minio sts", "network policies", "probe pod"]);
   });
 
   describe("k3s issuer", () => {
@@ -190,6 +192,33 @@ describe("kubernetesChecks", () => {
         level: "fail",
         message: `${RUNTIME.aws.roleArn}: Not authorized to perform sts:AssumeRoleWithWebIdentity; check the role's trust policy (deploy/aws/steward-role.tf.example)`,
       });
+    });
+  });
+
+  describe("run role", () => {
+    it("passes when IAM denies the run pods' role every Linear secret the map names", async () => {
+      const asked: Array<{ roleArn: string; secretArns: string[] }> = [];
+      const simulateSecretRead: SimulateSecretRead = async (p) => (asked.push(p), p.secretArns.map((secretArn) => ({ secretArn, decision: "explicitDeny" })));
+      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps({ simulateSecretRead }), { probePod: false }), "run role");
+      expect(result).toEqual({ level: "ok", message: `${RUNTIME.aws.runRoleArn} cannot read DEV_STEWARD_LINEAR_CLIENT_SECRET` });
+      expect(asked).toEqual([{ roleArn: RUNTIME.aws.runRoleArn, secretArns: ["arn:aws:secretsmanager:us-east-1:123456789012:secret:DEV_STEWARD_LINEAR_CLIENT_SECRET-AbCdEf"] }]);
+    });
+
+    it("fails when the run pods' role can read a Linear secret", async () => {
+      const simulateSecretRead: SimulateSecretRead = async (p) => p.secretArns.map((secretArn) => ({ secretArn, decision: "allowed" }));
+      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps({ simulateSecretRead }), { probePod: false }), "run role");
+      expect(result).toEqual({
+        level: "fail",
+        message: `${RUNTIME.aws.runRoleArn} can read DEV_STEWARD_LINEAR_CLIENT_SECRET; deny the run role DEV_STEWARD_LINEAR_* (deploy/aws/steward-role.tf.example)`,
+      });
+    });
+
+    it("warns when the simulator cannot answer", async () => {
+      const simulateSecretRead: SimulateSecretRead = async () => {
+        throw new Error("AccessDenied");
+      };
+      const result = await run(kubernetesChecks(loaded(), RUNTIME, deps({ simulateSecretRead }), { probePod: false }), "run role");
+      expect(result?.level).toBe("warn");
     });
   });
 

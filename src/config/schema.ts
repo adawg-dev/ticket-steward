@@ -140,7 +140,16 @@ const RuntimeSchema = z.discriminatedUnion("kind", [
     /** The dispatcher's internal run API as run pods reach it, e.g. `http://steward-internal.ticket-steward.svc:3021`. */
     callbackUrl: z.url(),
     minio: z.object({ endpoint: z.url(), bucket: z.string().min(1).default("steward-sessions") }),
-    aws: z.object({ roleArn: z.string().min(1), region: z.string().min(1) }),
+    /**
+     * `roleArn` is the dispatcher's role, which reads every steward secret (the Linear app's among them); `runRoleArn` the
+     * run pods' sidecars', which must be another role that cannot read the Linear secrets (deploy/aws/steward-role.tf.example).
+     */
+    aws: z
+      .object({ roleArn: z.string().min(1), runRoleArn: z.string().min(1), region: z.string().min(1) })
+      .refine((aws) => aws.runRoleArn !== aws.roleArn, {
+        path: ["runRoleArn"],
+        message: "the run pods' role must not be the dispatcher's: it would let a run pod read the Linear app's secret",
+      }),
     resources: z.object({ agent: z.object({ cpu: Quantity, memory: Quantity }) }),
     /** Private ranges run pods may still reach (the NetworkPolicy's exceptions). */
     egressAllowCidrs: z.array(z.string().min(1)).default([]),

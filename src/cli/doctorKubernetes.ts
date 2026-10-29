@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { IAMClient, SimulatePrincipalPolicyCommand } from "@aws-sdk/client-iam";
 import { AssumeRoleWithWebIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import type { AwsCredentialIdentity } from "@aws-sdk/types";
 import type { CoreV1Api, NetworkingV1Api, V1Pod } from "@kubernetes/client-node";
@@ -27,6 +28,11 @@ export interface DoctorCluster {
 
 /** AWS STS `AssumeRoleWithWebIdentity` with a service-account token; resolves to the assumed role's ARN. */
 export type AssumeWebIdentity = (p: { roleArn: string; region: string; token: string }) => Promise<string>;
+/**
+ * IAM's policy simulator: whether `roleArn` may `secretsmanager:GetSecretValue` each of `secretArns`, as IAM decides
+ * (`allowed`, `explicitDeny`, `implicitDeny`). Run as the dispatcher, which needs `iam:SimulatePrincipalPolicy` on the role.
+ */
+export type SimulateSecretRead = (p: { roleArn: string; secretArns: string[] }) => Promise<Array<{ secretArn: string; decision: string }>>;
 /** MinIO STS sign-in with the token in `tokenFile` (audience `minio`). */
 export type MinioSignIn = (p: { endpoint: string; tokenFile: string }) => Promise<AwsCredentialIdentity>;
 
@@ -34,6 +40,7 @@ export interface KubernetesDoctorDeps {
   fetchImpl: typeof fetch;
   cluster: DoctorCluster;
   assumeWebIdentity: AssumeWebIdentity;
+  simulateSecretRead: SimulateSecretRead;
   secretFetcher: SecretFetcher;
   minioSignIn: MinioSignIn;
   objectStore: (credentials: AwsCredentialIdentity) => Pick<ObjectStore, "list">;
@@ -67,6 +74,19 @@ const stsAssumeWebIdentity: AssumeWebIdentity = async ({ roleArn, region, token 
   }
 };
 
+/** IAM through the AWS SDK's default credential chain: in the dispatcher pod, the dispatcher's role. */
+const iamSimulateSecretRead: SimulateSecretRead = async ({ roleArn, secretArns }) => {
+  const iam = new IAMClient({});
+  try {
+    const { EvaluationResults: results } = await iam.send(
+      new SimulatePrincipalPolicyCommand({ PolicySourceArn: roleArn, ActionNames: ["secretsmanager:GetSecretValue"], ResourceArns: secretArns }),
+    );
+    return (results ?? []).map((result) => ({ secretArn: result.EvalResourceName ?? "", decision: result.EvalDecision ?? "unknown" }));
+  } finally {
+    iam.destroy();
+  }
+};
+
 /** Doctor's cluster checks with the real AWS, MinIO and cluster, or the fakes in `ctx.factories`. */
 export const kubernetesDoctorDeps = (ctx: CliContext, loaded: LoadedConfig, runtime: KubernetesRuntime): KubernetesDoctorDeps => {
   const factories = ctx.factories;
@@ -76,6 +96,7 @@ export const kubernetesDoctorDeps = (ctx: CliContext, loaded: LoadedConfig, runt
     fetchImpl: ctx.fetchImpl,
     cluster: factories?.doctorCluster ?? doctorApis(),
     assumeWebIdentity: factories?.assumeWebIdentity ?? stsAssumeWebIdentity,
+    simulateSecretRead: factories?.simulateSecretRead ?? iamSimulateSecretRead,
     secretFetcher: factories?.secretFetcher ?? awsSecretFetcher(secrets?.source === "aws" ? secrets.region : runtime.aws.region),
     minioSignIn: factories?.minioSignIn ?? ((p) => minioCredentials({ ...p, durationSeconds: 3600 })),
     objectStore: (credentials) =>
@@ -150,6 +171,36 @@ const roleCheck = (runtime: KubernetesRuntime, deps: KubernetesDoctorDeps): Chec
     } catch (err) {
       return flunk(`${roleArn}: ${errorMessage(err)}; check the role's trust policy (deploy/aws/steward-role.tf.example)`);
     }
+  },
+});
+
+/** The account of an IAM role ARN (`arn:aws:iam::<account>:role/<name>`); null when it is not one. */
+const accountOf = (roleArn: string): string | null => /^arn:aws[a-z-]*:iam::(\d{12}):role\//.exec(roleArn)?.[1] ?? null;
+
+/**
+ * The run pods' role must not read the Linear app's secrets: their sidecars hold its token and handle what the agent
+ * wrote. Asks IAM's policy simulator about each `LINEAR_*` id the secrets map names (any version suffix).
+ */
+const runRoleCheck = ({ config }: LoadedConfig, runtime: KubernetesRuntime, deps: KubernetesDoctorDeps): Check => ({
+  name: "run role",
+  run: async () => {
+    const { runRoleArn, region } = runtime.aws;
+    const map = config.secrets?.source === "aws" ? config.secrets.map : {};
+    const ids = Object.entries(map).filter(([name]) => name.startsWith("LINEAR_")).map(([, id]) => id).sort();
+    if (ids.length === 0) return ok("the secrets map names no Linear secret");
+    const account = accountOf(runRoleArn);
+    if (account === null) return flunk(`runtime.aws.runRoleArn ${runRoleArn} is not an IAM role ARN`);
+    const secretArns = ids.map((id) => `arn:aws:secretsmanager:${region}:${account}:secret:${id}-AbCdEf`);
+    let results: Array<{ secretArn: string; decision: string }>;
+    try {
+      results = await deps.simulateSecretRead({ roleArn: runRoleArn, secretArns });
+    } catch (err) {
+      return warn(`${runRoleArn}: the policy simulator could not answer (${errorMessage(err)}); grant the dispatcher's role iam:SimulatePrincipalPolicy on it (deploy/aws/steward-role.tf.example)`);
+    }
+    const readable = ids.filter((id) => results.some((result) => result.secretArn.includes(`:secret:${id}-`) && result.decision === "allowed"));
+    if (readable.length > 0) return flunk(`${runRoleArn} can read ${readable.join(", ")}; deny the run role DEV_STEWARD_LINEAR_* (deploy/aws/steward-role.tf.example)`);
+    if (results.length < ids.length) return warn(`${runRoleArn}: the policy simulator answered for ${results.length} of ${ids.length} Linear secret(s)`);
+    return ok(`${runRoleArn} cannot read ${ids.join(", ")}`);
   },
 });
 
@@ -283,13 +334,15 @@ const probeCheck = (runtime: KubernetesRuntime, deps: KubernetesDoctorDeps, prob
 });
 
 /**
- * The Kubernetes runtime's checks, run in the dispatcher pod: the issuer AWS and MinIO trust, the IAM role, every
+ * The Kubernetes runtime's checks, run in the dispatcher pod: the issuer AWS and MinIO trust, the IAM role, the run
+ * pods' role kept from the Linear secrets, every
  * `DEV_` id the steward and the overlay read, the overlay template, MinIO's STS sign-in, the NetworkPolicies, and with
  * `probePod` a throwaway pod that shows a run's agent container has no token and no way to the API server.
  */
 export const kubernetesChecks = (loaded: LoadedConfig, runtime: KubernetesRuntime, deps: KubernetesDoctorDeps, opts: { probePod: boolean }): Check[] => [
   issuerCheck(deps),
   roleCheck(runtime, deps),
+  runRoleCheck(loaded, runtime, deps),
   secretsCheck(loaded, deps),
   templateCheck(loaded),
   minioCheck(runtime, deps),

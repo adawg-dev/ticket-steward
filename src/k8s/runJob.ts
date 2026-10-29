@@ -91,7 +91,7 @@ export const buildRunJob = (spec: RunSpec, p: {
   const workRoot = dirname(spec.worktreePath);
   const jobDir = dirname(spec.artifactsDir);
 
-  const awsEnv = env({ AWS_ROLE_ARN: runtime.aws.roleArn, AWS_WEB_IDENTITY_TOKEN_FILE: `${AWS_TOKEN_DIR}/token`, AWS_REGION: runtime.aws.region });
+  const awsEnv = env({ AWS_ROLE_ARN: runtime.aws.runRoleArn, AWS_WEB_IDENTITY_TOKEN_FILE: `${AWS_TOKEN_DIR}/token`, AWS_REGION: runtime.aws.region });
   const awsToken = mount("aws-token", AWS_TOKEN_DIR, true);
   const minioToken = mount("minio-token", dirname(MINIO_TOKEN_FILE), true);
   const config = mount("config", dirname(configPath), true);

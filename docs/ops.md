@@ -834,10 +834,13 @@ Republish the JWKS whenever the service-account signing key changes (a k3s key r
 sign-in fails with an invalid token.
 
 **IAM.** `deploy/aws/steward-role.tf.example` registers the issuer as an OIDC provider (client id
-`sts.amazonaws.com`) and creates the role `ticket-steward`, trusted by `system:serviceaccount:ticket-steward:steward-dispatcher`
-and `…:steward-run` and allowed `secretsmanager:GetSecretValue` on `DEV_*` in the region. Copy it into your
-Terraform, set `k3s_issuer_url` and `region`, and `terraform apply`; its output `steward_role_arn` is
-`runtime.aws.roleArn` and `awsRoleArn` below. The steward's own tokens are `DEV_` entries like any other (e.g.
+`sts.amazonaws.com`) and creates two roles. `ticket-steward`, trusted by `system:serviceaccount:ticket-steward:steward-dispatcher`
+only, may `secretsmanager:GetSecretValue` on `DEV_*` in the region (and simulate the run role's policy, for doctor).
+`ticket-steward-run`, trusted by `…:steward-run` only, is the run pods' sidecars' role: the same `DEV_*` read with an
+explicit deny on `DEV_STEWARD_LINEAR_*`, since a sidecar handles what the agent wrote and no Linear credential may be
+within its reach. Copy it into your Terraform, set `k3s_issuer_url` and `region`, and `terraform apply`; its output
+`steward_role_arn` is `runtime.aws.roleArn` and `awsRoleArn` below, and `steward_run_role_arn` is
+`runtime.aws.runRoleArn` (config load refuses the two being equal). The steward's own tokens are `DEV_` entries like any other (e.g.
 `DEV_STEWARD_LINEAR_CLIENT_ID`, `DEV_STEWARD_LINEAR_CLIENT_SECRET`, `DEV_STEWARD_GITLAB_TOKEN`), each a string or a one-key JSON object, as kickoff's
 `preview.py` reads them. No access key is created anywhere.
 
@@ -882,7 +885,7 @@ runtime: {
   maxConcurrent: 2,
   callbackUrl: "http://steward-internal.ticket-steward.svc:3021",
   minio: { endpoint: "http://minio.ticket-steward.svc:9000" },
-  aws: { roleArn: "arn:aws:iam::<account>:role/ticket-steward", region: "eu-west-2" },
+  aws: { roleArn: "arn:aws:iam::<account>:role/ticket-steward", runRoleArn: "arn:aws:iam::<account>:role/ticket-steward-run", region: "eu-west-2" },
   resources: { agent: { cpu: "4", memory: "8Gi" } },
   egressAllowCidrs: [],
 },
@@ -941,6 +944,8 @@ Route the public webhook URL to the Service `steward` port 3020 with your ingres
 - `k3s issuer`: the issuer claim of the dispatcher's AWS token is a public HTTPS URL whose discovery document names
   it and whose JWKS has keys;
 - `aws role`: `runtime.aws.roleArn` can be assumed with that token;
+- `run role`: IAM's policy simulator says `runtime.aws.runRoleArn` cannot read any `LINEAR_*` id of `secrets.map`
+  (a warning when the simulator cannot answer);
 - `dev secrets`: every id in `secrets.map` and the overlay template is present and not empty (ids only are printed);
 - `overlay template`: no `{{signed:…}}` entry or other issue; warns about a wildcard host on a multi-tenant domain;
 - `minio sts`: the dispatcher signs in to MinIO with its `minio`-audience token and lists `sessions/`;
