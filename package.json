@@ -24,6 +24,7 @@
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run --passWithNoTests",
+    "test:egress": "python3 -I -m unittest discover -s ops/egress",
     "dev": "tsx src/cli/main.ts"
   },
   "dependencies": {
