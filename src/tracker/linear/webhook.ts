@@ -96,16 +96,19 @@ const parseSession = (deliveryId: string, body: unknown, appUserId: string): Lin
   if (issue === undefined || issue === null) return null;
   const base = { sessionId: agentSession.id, issueId: issue.id, identifier: issue.identifier, teamKey: issue.team.key };
   if (action === "created") {
+    // A mention's session carries the person's comment. A delegation's carries none, or the thread comment Linear writes
+    // itself ("This thread is for an agent session with …"), which has no author.
     const comment = agentSession.comment ?? null;
+    const author = comment?.userId ?? null;
     return {
       kind: "session.created",
       // Linear creates a session once.
       deliveryId: `linear-session-created:${agentSession.id}`,
       ...base,
-      delegated: comment === null,
-      commentBody: comment?.body ?? null,
+      delegated: author === null,
+      commentBody: author === null ? null : (comment?.body ?? null),
       promptContext: promptContext ?? "",
-      byApp: comment !== null && comment.userId === appUserId,
+      byApp: author === appUserId,
     };
   }
   if (agentActivity === undefined || agentActivity === null) return null;

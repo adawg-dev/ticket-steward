@@ -9,7 +9,7 @@ const APP = "app-user-1";
 
 const issue = { id: "issue-uuid-1", identifier: "API-42", title: "Adapter drops the last chunk", url: "https://linear.app/x/API-42", teamId: "team-1", team: { id: "team-1", key: "API", name: "API" } };
 
-const sessionCreated = (over: { comment?: { id: string; body: string; userId?: string } } = {}) => ({
+const sessionCreated = (over: { comment?: { id: string; body: string; userId?: string | null } } = {}) => ({
   action: "created",
   type: "AgentSessionEvent",
   appUserId: APP,
@@ -96,6 +96,14 @@ describe("parseLinearEvent", () => {
       promptContext: "<issue identifier=\"API-42\">...</issue>",
       byApp: false,
     });
+  });
+
+  it("maps a delegation whose session opens with Linear's own thread comment (no author) to session.created, delegated", () => {
+    // Linear opens a delegated session's thread with a system comment that no user wrote.
+    for (const userId of [null, undefined]) {
+      const comment = { id: "c-0", body: "This thread is for an agent session with ticketsteward.", ...(userId === undefined ? {} : { userId }) };
+      expect(parse("AgentSessionEvent", sessionCreated({ comment }))).toMatchObject({ kind: "session.created", delegated: true, commentBody: null, byApp: false });
+    }
   });
 
   it("maps a mention's created session to session.created with the comment, not delegated", () => {

@@ -148,7 +148,8 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
     if (event === null) return { ok: true, action: "ignored" };
 
     const result = await linearIntake(deps, event);
-    logger.info({ delivery, kind: event.kind, identifier: event.identifier, action: result.action, jobId: result.jobId }, "webhook received");
+    const trigger = event.kind === "session.created" ? { delegated: event.delegated } : {};
+    logger.info({ delivery, kind: event.kind, identifier: event.identifier, ...trigger, action: result.action, jobId: result.jobId }, "webhook received");
     answerLinearIntake(panelDeps(deps), event, result).catch((err: unknown) =>
       logger.warn({ delivery, identifier: event.identifier, err: errorMessage(err) }, "linear: the panel answer failed"),
     );
