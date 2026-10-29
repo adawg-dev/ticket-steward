@@ -8,6 +8,8 @@ import { logger } from "../log.js";
 import { storeLedger } from "../push/ledger.js";
 import { remoteHeadOf } from "../push/service.js";
 import { ADMIN_HOST, ADMIN_PORT, buildAdminServer, heldChatRuns, writeAdminToken } from "../server/admin.js";
+import { seedSettings } from "../settings/schema.js";
+import { SettingsStore } from "../settings/store.js";
 import { buildServer } from "../server/app.js";
 import { buildInternalServer, INTERNAL_PORT } from "../server/internal.js";
 import type { Stores } from "../store/index.js";
@@ -92,7 +94,8 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
           // The CLI in this pod is the admin API's client; a new token each start, in memory only.
           const token = await writeAdminToken(k8s.runtimeDir);
           const { stores, tracker, chat } = runtime;
-          admin = buildAdminServer({ token, stores, resolveTicket: (key) => tracker.resolveIssueId(key), ...(chat === undefined ? {} : { chat }) });
+          const settings = new SettingsStore(stores.db, seedSettings(config));
+          admin = buildAdminServer({ token, stores, settings, resolveTicket: (key) => tracker.resolveIssueId(key), ...(chat === undefined ? {} : { chat }) });
           await admin.listen({ port: ADMIN_PORT, host: ADMIN_HOST });
         } catch (err) {
           stopReaping();

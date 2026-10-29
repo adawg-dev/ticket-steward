@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { kubernetesRuntime, type StewardConfig } from "../config/schema.js";
 import { ADMIN_HOST, ADMIN_PORT, ADMIN_TOKEN_FILE } from "../server/admin.js";
+import { SettingsSchema, type Settings, type SettingsPatch } from "../settings/schema.js";
 import type { CliContext } from "./context.js";
 
 const PROBE_TIMEOUT_MS = 2_000;
@@ -88,6 +89,10 @@ export interface AdminClient {
   /** False when no chat holds the ticket any more. */
   heartbeat(key: string): Promise<boolean>;
   closeChat(key: string): Promise<ChatClosed>;
+  /** The runtime settings in effect. */
+  settings(): Promise<Settings>;
+  /** Applies the patch (audited as `admin-cli`); resolves to the settings now in effect. */
+  setSettings(patch: SettingsPatch): Promise<Settings>;
 }
 
 export const adminClient = (fetchImpl: typeof fetch, p: { token: string; port?: number }): AdminClient => {
@@ -132,6 +137,8 @@ export const adminClient = (fetchImpl: typeof fetch, p: { token: string; port?: 
       }
     },
     closeChat: (key) => request(ChatClosedSchema, "DELETE", ticketPath(key)),
+    settings: () => request(SettingsSchema, "GET", "/api/settings"),
+    setSettings: (patch) => request(SettingsSchema, "PATCH", "/api/settings", patch),
   };
 };
 

@@ -121,6 +121,22 @@ CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
   seen_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL,
+  old_value TEXT,
+  new_value TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 /** Columns added after the first release; applied to databases created before them. */

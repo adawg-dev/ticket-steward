@@ -9,6 +9,8 @@ import type { LoadedConfig } from "../../src/config/load.js";
 import { loadConfig } from "../../src/config/load.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import { buildAdminServer, type ChatLauncher } from "../../src/server/admin.js";
+import { DEFAULT_SETTINGS } from "../../src/settings/schema.js";
+import { SettingsStore } from "../../src/settings/store.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
@@ -41,7 +43,7 @@ const kubernetesConfig = (config: StewardConfig): StewardConfig => ({ ...config,
 
 const serveAdmin = async (chat?: ChatLauncher): Promise<number> => {
   const resolveTicket = (key: string) => Promise.resolve({ id: `issue-${key}`, identifier: key });
-  const app = buildAdminServer({ token: TOKEN, stores, resolveTicket, ...(chat === undefined ? {} : { chat }) });
+  const app = buildAdminServer({ token: TOKEN, stores, settings: new SettingsStore(stores.db, DEFAULT_SETTINGS), resolveTicket, ...(chat === undefined ? {} : { chat }) });
   servers.push(app);
   await app.listen({ port: 0, host: "127.0.0.1" });
   const address = app.server.address();

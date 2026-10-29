@@ -5,6 +5,8 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../src/chat/session.js";
 import { buildAdminServer, chatRunIdOf, writeAdminToken, type ChatLauncher } from "../../src/server/admin.js";
+import { DEFAULT_SETTINGS } from "../../src/settings/schema.js";
+import { SettingsStore } from "../../src/settings/store.js";
 import { openStores, type Stores } from "../../src/store/index.js";
 
 const SHA = "c".repeat(40);
@@ -12,6 +14,7 @@ const TOKEN = "admin-token-value";
 
 let dir: string;
 let stores: Stores;
+let settings: SettingsStore;
 let app: FastifyInstance;
 let started: Array<{ runId: string; identifier: string; sessionId: string }>;
 let ended: string[];
@@ -40,7 +43,7 @@ const withSession = (identifier: string): number => {
   return id;
 };
 
-const call = (method: "GET" | "POST" | "DELETE", url: string, token: string | null = TOKEN, payload?: object) =>
+const call = (method: "GET" | "POST" | "PATCH" | "DELETE", url: string, token: string | null = TOKEN, payload?: object) =>
   app.inject({ method, url, ...(token === null ? {} : { headers: { authorization: `Bearer ${token}` } }), ...(payload === undefined ? {} : { payload }) });
 
 beforeEach(async () => {
@@ -48,7 +51,8 @@ beforeEach(async () => {
   stores = openStores(dir);
   started = [];
   ended = [];
-  app = buildAdminServer({ token: TOKEN, stores, resolveTicket, chat: launcher });
+  settings = new SettingsStore(stores.db, DEFAULT_SETTINGS);
+  app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, chat: launcher });
 });
 
 afterEach(async () => {
@@ -174,7 +178,7 @@ describe("admin API chat", () => {
 
   it("gives the lease back when the run pod cannot be started", async () => {
     withSession("API-1");
-    app = buildAdminServer({ token: TOKEN, stores, resolveTicket, chat: { ...launcher, start: () => Promise.reject(new Error("quota exceeded")) } });
+    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, chat: { ...launcher, start: () => Promise.reject(new Error("quota exceeded")) } });
     const response = await call("POST", "/api/chat/API-1");
     expect(response.statusCode).toBe(502);
     expect(response.json()).toEqual({ error: "the chat's run pod could not be started: quota exceeded" });
@@ -201,7 +205,7 @@ describe("admin API chat", () => {
     const [lease] = stores.leases.active();
     if (lease === undefined) throw new Error("no lease taken");
     // A fresh server over the same database: the steward restarted while the chat was open.
-    app = buildAdminServer({ token: TOKEN, stores, resolveTicket, chat: launcher });
+    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket, chat: launcher });
     expect((await call("POST", "/api/chat/API-1/heartbeat")).statusCode).toBe(200);
     expect((await call("DELETE", "/api/chat/API-1")).json()).toMatchObject({ released: true });
     expect(ended).toEqual([chatRunIdOf(lease.id)]);
@@ -210,9 +214,37 @@ describe("admin API chat", () => {
 
   it("answers 501 when the runtime cannot launch chats", async () => {
     withSession("API-1");
-    app = buildAdminServer({ token: TOKEN, stores, resolveTicket });
+    app = buildAdminServer({ token: TOKEN, stores, settings, resolveTicket });
     const response = await call("POST", "/api/chat/API-1");
     expect(response.statusCode).toBe(501);
     expect(stores.leases.active()).toEqual([]);
+  });
+});
+
+describe("admin API settings", () => {
+  it("reads the settings in effect", async () => {
+    const response = await call("GET", "/api/settings");
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(DEFAULT_SETTINGS);
+    expect((await call("GET", "/api/settings", null)).statusCode).toBe(401);
+  });
+
+  it("changes settings as admin-cli, or as the body's by, and returns them", async () => {
+    const response = await call("PATCH", "/api/settings", TOKEN, { "review.quietMinutes": 5 });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ "review.quietMinutes": 5 });
+    await call("PATCH", "/api/settings", TOKEN, { "ci.triage": false, by: "mcp" });
+    expect(settings.get()).toMatchObject({ "review.quietMinutes": 5, "ci.triage": false });
+    expect(settings.audit(10).map(({ key, updatedBy }) => `${key} ${updatedBy}`)).toEqual(["ci.triage mcp", "review.quietMinutes admin-cli"]);
+  });
+
+  it("answers 400 to an invalid value or an unknown key and changes nothing", async () => {
+    for (const payload of [{ "review.quietMinutes": -1 }, { "review.quietMinutes": "5" }, { "worker.allowlist": ["*"] }, { by: "" }]) {
+      const response = await call("PATCH", "/api/settings", TOKEN, payload);
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toHaveProperty("error");
+    }
+    expect(settings.get()).toEqual(DEFAULT_SETTINGS);
+    expect(settings.audit(10)).toEqual([]);
   });
 });

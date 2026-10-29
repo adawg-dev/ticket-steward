@@ -7,6 +7,8 @@ import { acquireLease } from "../chat/lease.js";
 import { latestSession, type AgentSession } from "../chat/session.js";
 import { errorMessage } from "../core/workspace.js";
 import { logger } from "../log.js";
+import { SettingsSchema } from "../settings/schema.js";
+import { SettingsError, type SettingsStore } from "../settings/store.js";
 import type { Job, JobStatus, Loop, Stores } from "../store/index.js";
 
 /** The admin API's port, bound to 127.0.0.1 only: the CLI in the dispatcher pod (`kubectl exec … steward …`) is its client. */
@@ -44,6 +46,7 @@ export interface ChatLauncher {
 export interface AdminDeps {
   token: string;
   stores: Pick<Stores, "db" | "jobs" | "attempts" | "loops" | "leases">;
+  settings: SettingsStore;
   /** Issue key or UUID → the issue; rejects when there is none. */
   resolveTicket: (key: string) => Promise<{ id: string; identifier: string }>;
   chat?: ChatLauncher;
@@ -98,6 +101,10 @@ const ListQuery = z.object({
   status: z.enum(JOB_STATUSES).optional(),
 });
 const ChatBody = z.object({ pid: z.number().int().positive().optional() }).default({});
+/** A settings patch, and optionally who makes it (the MCP server or UI names itself; the CLI does not). */
+const SettingsBody = SettingsSchema.partial().extend({ by: z.string().min(1).optional() }).strict();
+/** Who a settings change is audited as when the request does not say. */
+export const SETTINGS_DEFAULT_BY = "admin-cli";
 
 type IdParams = { id: string };
 type KeyParams = { key: string };
@@ -106,7 +113,7 @@ const digest = (value: string): Buffer => createHash("sha256").update(value).dig
 
 /**
  * The dispatcher's admin API on `ADMIN_HOST:ADMIN_PORT`: job and ticket state, retries, and `steward chat`'s leases and
- * interactive run pods. Every request carries `Authorization: Bearer <token>`, the token `serve` wrote to the runtime dir;
+ * interactive run pods, and the runtime settings. Every request carries `Authorization: Bearer <token>`, the token `serve` wrote to the runtime dir;
  * anything else gets 401. A later CLI, MCP server or web UI builds on these routes.
  */
 export const buildAdminServer = (deps: AdminDeps): FastifyInstance => {
@@ -176,6 +183,20 @@ export const buildAdminServer = (deps: AdminDeps): FastifyInstance => {
       leases: stores.leases.active().filter((lease) => lease.issueId === ticket.id),
       running: stores.jobs.runningForIssue(ticket.id),
     };
+  });
+
+  app.get("/api/settings", () => deps.settings.get());
+
+  app.patch("/api/settings", async (request, reply) => {
+    const body = SettingsBody.safeParse(request.body ?? undefined);
+    if (!body.success) return badRequest(reply, body.error);
+    const { by, ...patch } = body.data;
+    try {
+      return deps.settings.set(patch, by ?? SETTINGS_DEFAULT_BY);
+    } catch (err) {
+      if (err instanceof SettingsError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
   });
 
   app.post<{ Params: KeyParams }>("/api/chat/:key", async (request, reply) => {

@@ -15,6 +15,7 @@ import { registerRenderOverlay } from "./renderOverlay.js";
 import { registerRunPod } from "./runPod.js";
 import { registerServe } from "./serve.js";
 import { registerSessions } from "./sessions.js";
+import { registerSettings } from "./settings.js";
 import { registerTemplates } from "./templates.js";
 import { registerTools } from "./tools.js";
 
@@ -36,6 +37,7 @@ export const buildProgram = (ctx: CliContext = defaultContext()): Command => {
   registerFix(program, ctx);
   registerChat(program, ctx);
   registerJobs(program, ctx);
+  registerSettings(program, ctx);
   registerTemplates(program, ctx);
   registerMcp(program, ctx);
   registerTools(program, ctx);
