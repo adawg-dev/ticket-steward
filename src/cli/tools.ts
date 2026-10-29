@@ -73,7 +73,7 @@ export const registerTools = (program: Command, ctx: CliContext): void => {
         finish: async () => {
           const read = await toolsWork({ spec, pushedSha: lastPushed(), guard });
           const work = { ...read, unpushed: redactor.redact(read.unpushed) };
-          await postWork({ baseUrl: callbackUrl, token, work });
+          await postWork({ baseUrl: callbackUrl, token, work, warn: (message) => void ctx.stderr.write(`tools: ${message}\n`) });
           return work;
         },
       });

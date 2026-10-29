@@ -19,6 +19,7 @@ import { copyOverlay } from "../workspace/overlay.js";
 import { Mutex } from "../workspace/mutex.js";
 import { runSetup } from "../workspace/setup.js";
 import { copySkills } from "../workspace/skills.js";
+import { CALLBACK_REQUEST_TIMEOUT_MS, postCallback, REPORT_RETRY_MS } from "./callback.js";
 import { executeRun } from "./execute.js";
 import { RunReportSchema, type RunReport, type RunSpec } from "./protocol.js";
 
@@ -193,11 +194,10 @@ export const startChecksServer = async (p: { listen: { host: string; port: numbe
   };
 };
 
-const REQUEST_TIMEOUT_MS = 60_000;
-
 /**
  * Asks the tools sidecar to compute the run's work report from git and deliver it to the dispatcher (`POST /finish`).
- * Its push tool may still be running a push for the agent, so this waits as long as that may take.
+ * Its push tool may still be running a push for the agent, and it retries the delivery while the dispatcher is away,
+ * so this waits as long as both may take.
  */
 export const finishTools = async (p: { toolsUrl: string; fetchImpl: typeof fetch; timeoutMs: number }): Promise<void> => {
   const response = await p.fetchImpl(`${p.toolsUrl.replace(/\/+$/, "")}/finish`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(p.timeoutMs) });
@@ -205,22 +205,9 @@ export const finishTools = async (p: { toolsUrl: string; fetchImpl: typeof fetch
 };
 
 /**
- * How long the run report is retried: longer than a dispatcher restart (one replica, Recreate), and well inside the
- * margin the Job's deadline leaves after the run. A report lost here fails the Job, and the dispatcher requeues the run.
- */
-export const REPORT_RETRY_MS = 5 * 60_000;
-export const REPORT_BACKOFF_MS = { first: 1_000, max: 15_000 };
-
-/** The dispatcher refused the report itself (a bad token or body): another attempt would be refused as well. */
-class ReportRefusedError extends Error {}
-
-/** Answers worth another attempt: the dispatcher restarting, overloaded or behind a proxy that has no upstream yet. */
-const retryableStatus = (status: number): boolean => status >= 500 || status === 408 || status === 429;
-
-/**
- * Delivers the run's report to the dispatcher (`POST …/internal/runs/<runId>/report`) with the run's runner token.
- * Connection errors, timeouts and 5xx are retried with backoff for `retryForMs` (the dispatcher may be restarting); a
- * 401 or another 4xx fails at once.
+ * Delivers the run's report to the dispatcher (`POST …/internal/runs/<runId>/report`) with the run's runner token,
+ * retrying while the dispatcher is away (`postCallback`). A report lost here fails the Job, and the dispatcher requeues
+ * the run.
  */
 export const postReport = async (p: {
   callbackUrl: string;
@@ -231,36 +218,14 @@ export const postReport = async (p: {
   backoffMs?: { first: number; max: number };
   warn?: (message: string) => void;
 }): Promise<void> => {
-  const url = `${p.callbackUrl.replace(/\/+$/, "")}/internal/runs/${encodeURIComponent(p.report.runId)}/report`;
-  const body = JSON.stringify(RunReportSchema.parse(p.report));
-  const retryForMs = p.retryForMs ?? REPORT_RETRY_MS;
-  const backoff = p.backoffMs ?? REPORT_BACKOFF_MS;
-  const deadline = Date.now() + retryForMs;
-  let delay = backoff.first;
-  for (let attempt = 1; ; attempt += 1) {
-    let failure: string;
-    try {
-      const response = await p.fetchImpl(url, {
-        method: "POST",
-        headers: { authorization: `Bearer ${p.token}`, "content-type": "application/json" },
-        body,
-        redirect: "error",
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      if (response.ok) return;
-      await response.body?.cancel();
-      if (response.status === 401) throw new ReportRefusedError("the run's runner token was rejected");
-      if (!retryableStatus(response.status)) throw new ReportRefusedError(`the steward answered ${response.status} to the run report`);
-      failure = `the steward answered ${response.status}`;
-    } catch (err) {
-      if (err instanceof ReportRefusedError) throw err;
-      failure = errorMessage(err);
-    }
-    if (Date.now() + delay > deadline) throw new Error(`the run report was not delivered in ${retryForMs / 1000} s (${attempt} attempts): ${failure}`);
-    p.warn?.(`the run report was not delivered (${failure}); retrying in ${delay / 1000} s`);
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    delay = Math.min(delay * 2, backoff.max);
-  }
+  const { callbackUrl, report, ...rest } = p;
+  await postCallback({
+    ...rest,
+    url: `${callbackUrl.replace(/\/+$/, "")}/internal/runs/${encodeURIComponent(report.runId)}/report`,
+    body: JSON.stringify(RunReportSchema.parse(report)),
+    what: "run report",
+    tokenName: "runner",
+  });
 };
 
 /**
@@ -356,7 +321,7 @@ export const runPod = async (p: PodRun): Promise<RunReport> => {
     report = p.signal?.aborted === true ? { ...failedReport(spec, INTERRUPTED_ERROR), interrupted: true } : failedReport(spec, errorMessage(err));
   }
   try {
-    await finishTools({ toolsUrl: p.toolsUrl, fetchImpl: p.fetchImpl, timeoutMs: p.checksTimeoutMs + REQUEST_TIMEOUT_MS });
+    await finishTools({ toolsUrl: p.toolsUrl, fetchImpl: p.fetchImpl, timeoutMs: p.checksTimeoutMs + REPORT_RETRY_MS + 2 * CALLBACK_REQUEST_TIMEOUT_MS });
   } catch (err) {
     p.warn(`the tools sidecar did not finish the run: ${errorMessage(err)}`);
   } finally {

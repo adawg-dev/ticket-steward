@@ -2,9 +2,8 @@ import { errorMessage } from "../core/workspace.js";
 import { unpushedWork } from "../implement/git.js";
 import type { PushLedger } from "../push/ledger.js";
 import type { PushGuard } from "../push/service.js";
+import { postCallback } from "../run/callback.js";
 import { WorkReportSchema, type RunSpec, type WorkReport } from "../run/protocol.js";
-
-const REQUEST_TIMEOUT_MS = 60_000;
 
 /** The ledger, remembering the last push that landed in this run: the sidecar's pushes are the run's only ones. */
 export const recordingLedger = (ledger: PushLedger): { ledger: PushLedger; lastPushed: () => string | null } => {
@@ -36,16 +35,26 @@ export const toolsWork = async (p: { spec: RunSpec; pushedSha: string | null; gu
   }
 };
 
-/** Delivers the work report to the dispatcher (`POST …/internal/runs/<runId>/work`) with the run's tools token. */
-export const postWork = async (p: { baseUrl: string; token: string; work: WorkReport }): Promise<void> => {
-  const url = `${p.baseUrl.replace(/\/+$/, "")}/internal/runs/${encodeURIComponent(p.work.runId)}/work`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { authorization: `Bearer ${p.token}`, "content-type": "application/json" },
-    body: JSON.stringify(WorkReportSchema.parse(p.work)),
-    redirect: "error",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+/**
+ * Delivers the work report to the dispatcher (`POST …/internal/runs/<runId>/work`) with the run's tools token, retrying
+ * while the dispatcher is away (`postCallback`): a report lost to a restart would read as unpushed work.
+ */
+export const postWork = async (p: {
+  baseUrl: string;
+  token: string;
+  work: WorkReport;
+  fetchImpl?: typeof fetch;
+  retryForMs?: number;
+  backoffMs?: { first: number; max: number };
+  warn?: (message: string) => void;
+}): Promise<void> => {
+  const { baseUrl, work, fetchImpl, ...rest } = p;
+  await postCallback({
+    ...rest,
+    url: `${baseUrl.replace(/\/+$/, "")}/internal/runs/${encodeURIComponent(work.runId)}/work`,
+    body: JSON.stringify(WorkReportSchema.parse(work)),
+    what: "work report",
+    tokenName: "tools",
+    fetchImpl: fetchImpl ?? fetch,
   });
-  if (response.status === 401) throw new Error("the run's tools token was rejected");
-  if (!response.ok) throw new Error(`the steward answered ${response.status} to the work report`);
 };
