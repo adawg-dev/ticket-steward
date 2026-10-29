@@ -1,3 +1,4 @@
+import { randomUUID, type UUID } from "node:crypto";
 import { query, type HookCallback, type McpServerConfig, type Options, type SDKMessage, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { chatResultJsonSchema } from "../chat/result.js";
 import { fixResultJsonSchema } from "../greptile/result.js";
@@ -18,14 +19,21 @@ const FOLLOW_UP_PROMPT = "Stop investigating and emit the final structured resul
 /** The SDK's `query`, narrowed to what the brain consumes so tests can substitute an async generator. */
 export type QueryImpl = (p: { prompt: string | AsyncIterable<SDKUserMessage>; options: Options }) => AsyncIterable<SDKMessage> & { interrupt?: () => Promise<unknown> };
 
-const userMessage = (text: string): SDKUserMessage => ({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null });
+const userMessage = (text: string, uuid: UUID): SDKUserMessage => ({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, uuid });
 
 /**
- * The prompt as a stream: the first message, then each steered one, which the SDK delivers between turns. It ends when
- * the result arrives (messages queued by then are still delivered) or on stop; a message pushed after that is dropped.
+ * The prompt as a stream: the first message, then each steered one, which the SDK delivers between turns. Every message
+ * carries a uuid, and the CLI echoes on each result the uuids that turn consumed (a message that arrives mid-turn can be
+ * folded into it). The input ends once every message handed over has been answered, so a steered message the CLI has
+ * already received still runs its turn with stdin open, which the PreToolUse policy hook needs; or it ends on stop. A
+ * message pushed after the end is refused.
  */
 class PromptStream implements AsyncIterable<SDKUserMessage> {
-  private readonly queued: SDKUserMessage[] = [];
+  private readonly queued: Array<{ uuid: UUID; text: string }> = [];
+  /** Pushed and not yet answered by a result. */
+  private readonly unanswered = new Set<string>();
+  /** Yielded to the SDK, for results from CLIs that echo no uuids. */
+  private readonly handedOver = new Set<string>();
   private wake: (() => void) | null = null;
   private ended = false;
 
@@ -33,22 +41,38 @@ class PromptStream implements AsyncIterable<SDKUserMessage> {
     this.push(first);
   }
 
-  push(text: string): void {
-    if (this.ended) return;
-    this.queued.push(userMessage(text));
+  push(text: string): boolean {
+    if (this.ended) return false;
+    const uuid = randomUUID();
+    this.queued.push({ uuid, text });
+    this.unanswered.add(uuid);
     this.wake?.();
+    return true;
   }
 
-  end(): void {
+  /** Marks what the result answered and ends the input when nothing is left unanswered. */
+  settle(result: SDKResultMessage): void {
+    const consumed = result.user_message_uuids ?? (result.user_message_uuid === undefined ? undefined : [result.user_message_uuid]);
+    // An older CLI echoes no uuids: everything handed over counts as answered unless it says sends are still queued.
+    const answered = consumed ?? ((result.queued_turn_count ?? 0) === 0 ? [...this.handedOver] : []);
+    for (const uuid of answered) this.unanswered.delete(uuid);
+    if (this.unanswered.size === 0) this.end();
+  }
+
+  /** Ends the input and returns the steered messages the SDK never pulled. */
+  end(): string[] {
     this.ended = true;
+    const unsent = this.queued.splice(0).map(({ text }) => text);
     this.wake?.();
+    return unsent;
   }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
     for (;;) {
       const next = this.queued.shift();
       if (next !== undefined) {
-        yield next;
+        this.handedOver.add(next.uuid);
+        yield userMessage(next.text, next.uuid);
         continue;
       }
       if (this.ended) return;
@@ -107,24 +131,28 @@ const consume = async (
   text: string,
   options: Options,
   onMessage: OnMessage,
+  early: string[],
   setActive: (active: ActiveQuery | null) => void,
 ): Promise<SDKResultMessage | null> => {
   let result: SDKResultMessage | null = null;
   const prompt = new PromptStream(text);
+  for (const message of early.splice(0)) prompt.push(message);
   const running = queryImpl({ prompt, options });
   setActive({ prompt, interrupt: () => void running.interrupt?.().catch(() => undefined) });
   try {
     for await (const message of running) {
-      onMessage(JSON.stringify(message));
+      // Settle before reporting, so a steer sent in reaction to the result waits for the next query.
       if (message.type === "result") {
         result = message;
-        prompt.end();
+        prompt.settle(message);
       }
+      onMessage(JSON.stringify(message));
     }
   } catch (err) {
     if (result === null) throw err;
   } finally {
-    prompt.end();
+    // A query that finished without pulling a steer hands it on to the follow-up, if there is one.
+    early.push(...prompt.end());
     setActive(null);
   }
   return result;
@@ -136,13 +164,17 @@ export const createClaudeCodeBrain = (deps: { queryImpl?: QueryImpl } = {}): Bra
     kind: "claude-code",
     run: async (input, onMessage, controlSink) => {
       let active: ActiveQuery | null = null;
+      /** Steers that arrive while no query takes input (before the first, between it and the follow-up) wait here. */
+      const early: string[] = [];
       // A holder, not a `let`: the control handlers change it while the run awaits.
       const status: { state: "running" | "stopped" | "done" } = { state: "running" };
       const setActive = (next: ActiveQuery | null): void => {
         active = next;
       };
       const control: BrainControl = {
-        steer: (message) => active?.prompt.push(message),
+        steer: (message) => {
+          if (active?.prompt.push(message) !== true && status.state === "running") early.push(message);
+        },
         stop: () => {
           if (status.state !== "running") return;
           status.state = "stopped";
@@ -168,10 +200,11 @@ export const createClaudeCodeBrain = (deps: { queryImpl?: QueryImpl } = {}): Bra
         ...(input.resumeSessionId === undefined ? {} : { resume: input.resumeSessionId }),
       };
       try {
-        let result = await consume(queryImpl, input.prompt, options, onMessage, setActive);
+        // A stop that arrives through the control sink, before any query exists, skips the run altogether.
+        let result = status.state === "running" ? await consume(queryImpl, input.prompt, options, onMessage, early, setActive) : null;
         let usage = result === null ? undefined : usageOf(result);
         if (result?.subtype === "error_max_turns" && status.state === "running") {
-          result = await consume(queryImpl, FOLLOW_UP_PROMPT, { ...options, resume: result.session_id, maxTurns: 2 }, onMessage, setActive);
+          result = await consume(queryImpl, FOLLOW_UP_PROMPT, { ...options, resume: result.session_id, maxTurns: 2 }, onMessage, early, setActive);
           if (result !== null && usage !== undefined) usage = addUsage(usage, usageOf(result));
         }
         const reported = usage === undefined ? {} : { usage };

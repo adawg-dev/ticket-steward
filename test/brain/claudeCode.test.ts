@@ -27,6 +27,7 @@ const resultMessage = (fields: {
   session_id?: string;
   total_cost_usd?: number;
   usage?: { input_tokens: number; output_tokens: number };
+  user_message_uuids?: string[];
 }): SDKResultMessage =>
   ({ type: "result", session_id: "sess-1", total_cost_usd: 0.5, usage: { input_tokens: 10, output_tokens: 20 }, ...fields }) as unknown as SDKResultMessage;
 
@@ -41,17 +42,57 @@ const assistantText = (text: string): SDKMessage =>
 
 const textOf = (message: SDKUserMessage): unknown => message.message.content;
 
-/** Like the SDK in streaming-input mode: one turn per user message it pulls, until the input ends. */
+/**
+ * Like the SDK in streaming-input mode: one turn per user message it pulls, until the input ends. A result echoes the
+ * uuid it answered, as current CLIs do, unless `echo` is false, as older ones do.
+ */
 const streaming =
-  (received: SDKUserMessage[]): QueryImpl =>
+  (received: SDKUserMessage[], echo = true): QueryImpl =>
   ({ prompt }) =>
     (async function* () {
       if (typeof prompt === "string") throw new Error("expected a streamed prompt");
       for await (const message of prompt) {
         received.push(message);
         yield assistantText(`working on turn ${received.length}`);
-        yield resultMessage({ subtype: "success", structured_output: { summary: `turn ${received.length}` } });
+        const uuids = echo && message.uuid !== undefined ? { user_message_uuids: [message.uuid] } : {};
+        yield resultMessage({ subtype: "success", structured_output: { summary: `turn ${received.length}` }, ...uuids });
       }
+    })();
+
+const uuidsOf = (messages: SDKUserMessage[]): string[] => messages.flatMap((message) => (message.uuid === undefined ? [] : [message.uuid]));
+
+/**
+ * Like the CLI when a steered message reaches it mid-turn: it takes the message off stdin before turn 1's result and runs
+ * it as turn 2, or with `fold` folds it into turn 1. Records how many results it had produced when the input ended.
+ */
+const steeredMidTurn =
+  (received: SDKUserMessage[], ended: { afterResults: number | null }, fold: boolean): QueryImpl =>
+  ({ prompt }) =>
+    (async function* () {
+      if (typeof prompt === "string") throw new Error("expected a streamed prompt");
+      const input = prompt[Symbol.asyncIterator]();
+      let results = 0;
+      const pull = async (): Promise<SDKUserMessage | null> => {
+        const next = await input.next();
+        if (next.done === true) {
+          ended.afterResults ??= results;
+          return null;
+        }
+        received.push(next.value);
+        return next.value;
+      };
+      await pull();
+      yield assistantText("working on turn 1");
+      await pull();
+      results += 1;
+      yield resultMessage({ subtype: "success", structured_output: { summary: "turn 1" }, user_message_uuids: uuidsOf(fold ? received : received.slice(0, 1)) });
+      if (!fold) {
+        yield assistantText("working on turn 2");
+        results += 1;
+        yield resultMessage({ subtype: "success", structured_output: { summary: "turn 2" }, user_message_uuids: uuidsOf(received.slice(1)) });
+      }
+      // The SDK keeps reading input until it ends; a turn is still running while it is open.
+      await pull();
     })();
 
 const lines: string[] = [];
@@ -256,5 +297,96 @@ describe("claude-code brain", () => {
     expect(interrupt).toHaveBeenCalledTimes(1);
     expect(queryMock).toHaveBeenCalledTimes(1);
     expect(run).toEqual({ ok: false, output: undefined, usage, sessionId: "s-stopped", error: STOPPED_ERROR });
+  });
+
+  it("ends the input after an older CLI's result that echoes no uuids", async () => {
+    const received: SDKUserMessage[] = [];
+
+    const run = await createClaudeCodeBrain({ queryImpl: streaming(received, false) }).run(input, onMessage);
+
+    expect(received.map(textOf)).toEqual(["investigate"]);
+    expect(run).toMatchObject({ ok: true, output: { summary: "turn 1" } });
+  });
+
+  it("keeps the input open while a steered message the CLI already took has not been answered", async () => {
+    const received: SDKUserMessage[] = [];
+    const ended: { afterResults: number | null } = { afterResults: null };
+    let control: BrainControl | undefined;
+    const steerOnFirstTurn = (line: string): void => {
+      if (line.includes("working on turn 1")) control?.steer("use v2");
+    };
+
+    const run = await createClaudeCodeBrain({ queryImpl: steeredMidTurn(received, ended, false) }).run(input, steerOnFirstTurn, (handlers) => {
+      control = handlers;
+    });
+
+    expect(received.map(textOf)).toEqual(["investigate", "use v2"]);
+    expect(ended.afterResults).toBe(2);
+    expect(run).toMatchObject({ ok: true, output: { summary: "turn 2" } });
+  });
+
+  it("ends the input on the result of a turn the steered message was folded into", async () => {
+    const received: SDKUserMessage[] = [];
+    const ended: { afterResults: number | null } = { afterResults: null };
+    let control: BrainControl | undefined;
+    const steerOnFirstTurn = (line: string): void => {
+      if (line.includes("working on turn 1")) control?.steer("use v2");
+    };
+
+    const run = await createClaudeCodeBrain({ queryImpl: steeredMidTurn(received, ended, true) }).run(input, steerOnFirstTurn, (handlers) => {
+      control = handlers;
+    });
+
+    expect(ended.afterResults).toBe(1);
+    expect(run).toMatchObject({ ok: true, output: { summary: "turn 1" } });
+  });
+
+  it("delivers a steer sent through the control sink before the query exists after the first prompt", async () => {
+    const received: SDKUserMessage[] = [];
+
+    const run = await createClaudeCodeBrain({ queryImpl: streaming(received) }).run(input, onMessage, (handlers) => {
+      handlers.steer("use v2");
+    });
+
+    expect(received.map(textOf)).toEqual(["investigate", "use v2"]);
+    expect(run).toMatchObject({ ok: true, output: { summary: "turn 2" } });
+  });
+
+  it("delivers a steer sent between the max-turns result and the follow-up to the follow-up", async () => {
+    const received: SDKUserMessage[] = [];
+    let control: BrainControl | undefined;
+    const queryMock = vi
+      .fn<QueryImpl>()
+      .mockImplementationOnce(({ prompt }) =>
+        (async function* () {
+          if (typeof prompt === "string") throw new Error("expected a streamed prompt");
+          const first = await prompt[Symbol.asyncIterator]().next();
+          const uuid = first.done === true ? undefined : first.value.uuid;
+          yield resultMessage({ subtype: "error_max_turns", ...(uuid === undefined ? {} : { user_message_uuids: [uuid] }) });
+        })(),
+      )
+      .mockImplementationOnce(streaming(received));
+    const steerOnMaxTurns = (line: string): void => {
+      if (line.includes("error_max_turns")) control?.steer("use v2");
+    };
+
+    const run = await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, steerOnMaxTurns, (handlers) => {
+      control = handlers;
+    });
+
+    expect(received.map(textOf)).toEqual(["Stop investigating and emit the final structured result now.", "use v2"]);
+    expect(run).toMatchObject({ ok: true, output: { summary: "turn 2" } });
+  });
+
+  it("skips the query when a stop arrives through the control sink before it exists", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: {} })));
+
+    const run = await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, onMessage, (handlers) => {
+      handlers.steer("use v2");
+      handlers.stop();
+    });
+
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(run).toEqual({ ok: false, output: undefined, error: STOPPED_ERROR });
   });
 });
