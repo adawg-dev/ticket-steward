@@ -8,7 +8,23 @@ export const verifySignature = (rawBody: string | Buffer, signatureHex: string |
   return given.length === expected.length && timingSafeEqual(given, expected);
 };
 
-/** A Linear webhook the steward acts on: its agent sessions (delegation, mention, prompt) and losing a delegation. */
+/** How far a payload's signed `webhookTimestamp` may be from now: Linear's guidance against replayed deliveries. */
+export const WEBHOOK_TOLERANCE_MS = 60_000;
+
+const TimestampSchema = z.object({ webhookTimestamp: z.number() });
+
+/** Whether the signed body was sent within the tolerance of `nowMs`; a body without a timestamp is never fresh. */
+export const freshWebhook = (body: unknown, nowMs: number): boolean => {
+  const parsed = TimestampSchema.safeParse(body);
+  return parsed.success && Math.abs(nowMs - parsed.data.webhookTimestamp) <= WEBHOOK_TOLERANCE_MS;
+};
+
+/**
+ * A Linear webhook the steward acts on: its agent sessions (delegation, mention, prompt) and losing a delegation.
+ * `deliveryId` is what it is acted on once by: taken from the signed body (the prompt's activity id, the session id of a
+ * created session, the issue id and update time of an Issue update), so a replayed body is a duplicate whatever
+ * `Linear-Delivery` header it comes with. The header is the key only when the body lacks those fields.
+ */
 export type LinearEvent =
   | {
       kind: "session.created";
@@ -53,6 +69,7 @@ const AgentSessionEventSchema = z.object({
   }),
   agentActivity: z
     .object({
+      id: z.string().nullish(),
       content: z.object({ body: z.string().nullish() }),
       signal: z.string().nullish(),
       userId: z.string().nullish(),
@@ -64,7 +81,9 @@ const AgentSessionEventSchema = z.object({
 
 const IssueUpdateSchema = z.object({
   action: z.literal("update"),
-  data: z.object({ id: z.string(), identifier: z.string(), team: z.object({ key: z.string() }), delegateId: z.string().nullish() }),
+  data: z.object({
+    id: z.string(), identifier: z.string(), team: z.object({ key: z.string() }), delegateId: z.string().nullish(), updatedAt: z.string().nullish(),
+  }),
   updatedFrom: z.object({ delegateId: z.string().nullish() }).nullish(),
 });
 
@@ -75,11 +94,13 @@ const parseSession = (deliveryId: string, body: unknown, appUserId: string): Lin
   const { action, agentSession, agentActivity, promptContext } = parsed.data;
   const issue = agentSession.issue;
   if (issue === undefined || issue === null) return null;
-  const base = { deliveryId, sessionId: agentSession.id, issueId: issue.id, identifier: issue.identifier, teamKey: issue.team.key };
+  const base = { sessionId: agentSession.id, issueId: issue.id, identifier: issue.identifier, teamKey: issue.team.key };
   if (action === "created") {
     const comment = agentSession.comment ?? null;
     return {
       kind: "session.created",
+      // Linear creates a session once.
+      deliveryId: `linear-session-created:${agentSession.id}`,
       ...base,
       delegated: comment === null,
       commentBody: comment?.body ?? null,
@@ -88,8 +109,10 @@ const parseSession = (deliveryId: string, body: unknown, appUserId: string): Lin
     };
   }
   if (agentActivity === undefined || agentActivity === null) return null;
+  const activityId = agentActivity.id ?? null;
   return {
     kind: "session.prompted",
+    deliveryId: activityId === null ? deliveryId : `linear-activity:${activityId}`,
     ...base,
     body: agentActivity.content.body ?? "",
     stop: agentActivity.signal === "stop",
@@ -104,7 +127,11 @@ const parseIssue = (deliveryId: string, body: unknown, appUserId: string): Linea
   if (!parsed.success) return null;
   const { data, updatedFrom } = parsed.data;
   if (updatedFrom?.delegateId !== appUserId || data.delegateId === appUserId) return null;
-  return { kind: "issue.undelegated", deliveryId, issueId: data.id, identifier: data.identifier, teamKey: data.team.key };
+  const updatedAt = data.updatedAt ?? null;
+  return {
+    kind: "issue.undelegated", deliveryId: updatedAt === null ? deliveryId : `linear-issue:${data.id}:${updatedAt}`,
+    issueId: data.id, identifier: data.identifier, teamKey: data.team.key,
+  };
 };
 
 /** The event the steward acts on, or null for anything else (other types, other apps' sessions, malformed bodies). */

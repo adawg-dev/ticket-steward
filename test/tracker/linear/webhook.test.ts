@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { parseLinearEvent, verifySignature } from "../../../src/tracker/linear/webhook.js";
+import { freshWebhook, parseLinearEvent, verifySignature } from "../../../src/tracker/linear/webhook.js";
 
 const secret = "whsec_test_secret";
 const body = JSON.stringify({ hello: "world" });
@@ -69,13 +69,24 @@ describe("verifySignature", () => {
   });
 });
 
+describe("freshWebhook", () => {
+  const now = Date.parse("2026-10-29T10:00:00Z");
+  it("accepts a signed timestamp within a minute either way, and nothing else", () => {
+    expect(freshWebhook({ webhookTimestamp: now - 60_000 }, now)).toBe(true);
+    expect(freshWebhook({ webhookTimestamp: now + 30_000 }, now)).toBe(true);
+    expect(freshWebhook({ webhookTimestamp: now - 60_001 }, now)).toBe(false);
+    expect(freshWebhook({ webhookTimestamp: String(now) }, now)).toBe(false);
+    expect(freshWebhook({}, now)).toBe(false);
+  });
+});
+
 describe("parseLinearEvent", () => {
   const parse = (event: string | undefined, body: unknown) => parseLinearEvent({ event, delivery: "d-1" }, body, APP);
 
   it("maps a delegation's created session (no comment) to session.created, delegated", () => {
     expect(parse("AgentSessionEvent", sessionCreated())).toEqual({
       kind: "session.created",
-      deliveryId: "d-1",
+      deliveryId: "linear-session-created:session-1",
       sessionId: "session-1",
       issueId: "issue-uuid-1",
       identifier: "API-42",
@@ -100,7 +111,7 @@ describe("parseLinearEvent", () => {
   it("maps a prompt to session.prompted with its body and author", () => {
     expect(parse("AgentSessionEvent", sessionPrompted({ body: "use v2 instead" }))).toEqual({
       kind: "session.prompted",
-      deliveryId: "d-1",
+      deliveryId: "linear-activity:activity-1",
       sessionId: "session-1",
       issueId: "issue-uuid-1",
       identifier: "API-42",
@@ -129,6 +140,11 @@ describe("parseLinearEvent", () => {
       teamKey: "API",
     });
     expect(parse("Issue", issueUpdate("someone-else", { delegateId: APP }))?.kind).toBe("issue.undelegated");
+  });
+
+  it("keys an Issue update by its issue and signed update time when the body has one", () => {
+    const update = { ...issueUpdate(null, { delegateId: APP }), data: { ...issueUpdate(null, {}).data, updatedAt: "2026-10-29T10:00:00.000Z" } };
+    expect(parse("Issue", update)).toMatchObject({ deliveryId: "linear-issue:issue-uuid-1:2026-10-29T10:00:00.000Z" });
   });
 
   it("ignores a delegate change that does not involve the steward", () => {

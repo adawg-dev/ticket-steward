@@ -184,7 +184,9 @@ sudo cloudflared service install
 
 Either way, `server.publicUrl` in the config is `https://steward.example.com` and the
 steward itself listens on plain HTTP on `127.0.0.1:3020`. Only `/health` and
-`/webhooks/linear` exist, and the webhook is verified, so exposing the port is acceptable.
+`/webhooks/linear` exist, and the webhook is verified, so exposing the port is acceptable. A Linear
+delivery whose signed `webhookTimestamp` is more than a minute off is rejected (keep the host's clock
+synced), and each one is acted on once by ids in its signed body, so a replayed body does nothing.
 
 ### 1.7 Linear app and webhooks
 

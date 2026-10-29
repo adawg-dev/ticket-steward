@@ -108,7 +108,18 @@ const serverDeps = (config: StewardConfig = makeConfig()) => ({
 
 const sign = (body: string): string => createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
 
-const post = (event: string, delivery: string, body: string, signature = sign(body)) =>
+/** Stamps a JSON body as Linear does (`webhookTimestamp`, ms), unless it carries one. */
+const stamped = (raw: string, at = Date.now()): string => {
+  const value: unknown = JSON.parse(raw);
+  return typeof value === "object" && value !== null && !("webhookTimestamp" in value) ? JSON.stringify({ ...value, webhookTimestamp: at }) : raw;
+};
+
+const post = (event: string, delivery: string, raw: string, signature?: string) => {
+  const body = stamped(raw);
+  return postRaw(event, delivery, body, signature ?? sign(body));
+};
+
+const postRaw = (event: string, delivery: string, body: string, signature = sign(body)) =>
   app.inject({
     method: "POST",
     url: "/webhooks/linear",
@@ -169,6 +180,24 @@ describe("buildServer", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json()).toEqual({ ok: true, action: "duplicate" });
       expect(stores.jobs.list({ limit: 10 })).toHaveLength(1);
+    });
+
+    it("acts on a replayed body once, whatever delivery header it comes with", async () => {
+      const body = stamped(sessionCreated());
+      await postRaw("AgentSessionEvent", "delivery-1", body);
+      const replay = await postRaw("AgentSessionEvent", "delivery-forged", body);
+
+      expect(replay.json()).toEqual({ ok: true, action: "duplicate" });
+      expect(stores.jobs.list({ limit: 10 })).toHaveLength(1);
+    });
+
+    it("rejects a body signed more than a minute ago, or without a signed timestamp", async () => {
+      const stale = stamped(sessionCreated(), Date.now() - 61_000);
+      const bare = sessionCreated();
+
+      expect((await postRaw("AgentSessionEvent", "delivery-1", stale)).statusCode).toBe(401);
+      expect((await postRaw("AgentSessionEvent", "delivery-2", bare)).statusCode).toBe(401);
+      expect(stores.jobs.list({ limit: 10 })).toEqual([]);
     });
 
     it("answers 200 before Linear does: a mention on an unknown ticket gets its reply posted after the response", async () => {
@@ -262,7 +291,7 @@ describe("buildServer", () => {
       const response = await post("AgentSessionEvent", "delivery-1", sessionCreated());
 
       expect(response.statusCode).toBe(503);
-      expect(stores.deliveries.seen("delivery-1")).toBe(false);
+      expect(stores.deliveries.seen("linear-session-created:session-1")).toBe(false);
     });
   });
 

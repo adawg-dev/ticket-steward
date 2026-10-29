@@ -13,7 +13,7 @@ import type { Settings } from "../settings/schema.js";
 import type { RunChannels } from "../run/channel.js";
 import { loopSubject, type Job, type Loop, type Stores } from "../store/index.js";
 import type { LinearAgentApi } from "../tracker/linear/agent.js";
-import { parseLinearEvent, verifySignature } from "../tracker/linear/webhook.js";
+import { freshWebhook, parseLinearEvent, verifySignature } from "../tracker/linear/webhook.js";
 import type { Tracker } from "../tracker/types.js";
 import type { WorkerState } from "../worker/index.js";
 
@@ -125,6 +125,11 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
     }
     const body = parseJson(request.body);
     if (body === undefined) return reply.code(400).send({ ok: false });
+    // The signature covers the body only: a body signed more than a minute ago is a replay, whatever its headers say.
+    if (!freshWebhook(body, Date.now())) {
+      logger.warn({ delivery }, "webhook rejected: its signed timestamp is missing or stale");
+      return reply.code(401).send({ ok: false });
+    }
 
     // Read once and cached (serve reads it at start); until it can be read, nothing is recorded and Linear redelivers.
     let appUserId: string;
