@@ -14,11 +14,11 @@ const implementVars: ImplementPromptVars = {
 };
 const fixInput: FixPromptInput = {
   identifier: "ENG-1", round: 2, maxRounds: 5, score: 3, summary: "Confidence Score: 3/5", findings: [], ciFailures: [], personCommits: [],
-  newComments: [], workspacePath: "/ws", headSha: "deadbeef", stewardPort: 4321, artifactsDir: "/art", checks: "", hasChecks: false,
+  newComments: [], decisions: [], workspacePath: "/ws", headSha: "deadbeef", stewardPort: 4321, artifactsDir: "/art", checks: "", hasChecks: false,
 };
 const chatInput: ChatPromptInput = {
   identifier: "API-1", author: "ada", message: "why?", mrUrl: "https://gl/mr/1", workspacePath: "/ws", headSha: "deadbeef",
-  stewardPort: 4100, artifactsDir: "/art", canPush: true, branch: "fix/API-1-x", checks: "", hasChecks: false,
+  stewardPort: 4100, artifactsDir: "/art", canPush: true, branch: "fix/API-1-x", checks: "", hasChecks: false, decisions: [],
 };
 
 const REPO = "## Working in kickoff\n\n- Run `pnpm add <pkg>@<version> --filter <name>` & <b>raw</b>.\n";

@@ -6,6 +6,16 @@ Answer them. The checkout is still at `{{workspacePath}}`, now at commit `{{head
 
 The slot's services were recreated empty since your last turn, so the local databases and any process you started are gone. The app port is now `{{stewardPort}}`.
 
+{{#hasDecisions}}
+## Decisions a person made on this merge request
+
+{{#decisions}}
+- {{.}}
+{{/decisions}}
+
+These are recorded already and every later round is shown them. Do not add them again, and do not contradict one unless the message changes it.
+
+{{/hasDecisions}}
 ## Codebase graph
 
 Orbit indexed this checkout before you started. To find code, prefer `orbit grep '<words>'` (it ignores case, `_` and `-`; `a|b` matches either) and `orbit context <path:start-end or name>` in the shell over grep: they return definitions with their callers and the tests that cover them. For merge requests, issues, pipelines, job logs and questions across GitLab, use the `orbit_context`, `orbit_query` and `orbit_schema` tools. Either may be unavailable; when one fails, fall back to plain search and `recent_changes` and do not retry it.
@@ -47,4 +57,5 @@ This ticket has no pushed branch, so you cannot push changes from this conversat
 ## Result
 
 - `reply`: your answer to {{author}}, in Markdown, posted in the same discussion on the merge request. Say what you found or changed, and name the commit you pushed, if any.
+- `decisions`: lasting instructions {{author}} gave in this message about how the merge request must stay ("keep the v1 endpoint", "don't rename the queue"), one line each, restated from what they said. Only what they said, never what you infer, and not one-off requests you carried out. Leave out the ones already listed above. Empty when there are none.
 - Report what happened, not what you hoped: a check that failed, timed out or that you skipped goes in your reply with that result and why. Never describe a check you did not run as passing. When something is done and verified, say so plainly.

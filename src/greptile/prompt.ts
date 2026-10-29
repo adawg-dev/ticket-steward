@@ -14,6 +14,8 @@ export interface FixPromptInput {
   /** The person's commits on the branch since the last round, one line each. */
   personCommits: string[];
   newComments: Array<{ author: string; body: string }>;
+  /** The loop's decisions: lasting instructions people gave about the MR, never to be undone. */
+  decisions: string[];
   workspacePath: string;
   headSha: string;
   stewardPort: number;
@@ -39,6 +41,7 @@ export const renderFixPrompt = (template: string, input: FixPromptInput, repo = 
       hasCiFailures: input.ciFailures.length > 0,
       hasPersonCommits: input.personCommits.length > 0,
       hasNewComments: input.newComments.length > 0,
+      hasDecisions: input.decisions.length > 0,
     },
     repo,
   );

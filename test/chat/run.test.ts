@@ -225,6 +225,28 @@ describe("runChat", () => {
     expect(brain.lastInput().prompt).toContain("## Working in kickoff\n\n- Never hand-edit `pnpm-lock.yaml`.\n\n## Rules");
   });
 
+  it("stores the decisions the agent heard on the loop, skips ones already there, and shows the agent the current list", async () => {
+    const loopId = createLoop();
+    stores.loops.appendDecisions(loopId, ["Keep the v1 endpoint"]);
+    const brain = new FakeBrain({ result: { reply: "Noted.", decisions: ["keep the v1 endpoint", "Don't rename the queue"] }, sessionId: "session-2" });
+
+    expect(await runChat(claim(loopId, "keep the v1 endpoint, and don't rename the queue"), makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    expect(brain.lastInput().prompt).toContain("## Decisions a person made on this merge request\n\n- Keep the v1 endpoint\n");
+    expect(stores.loops.get(loopId)?.decisions).toEqual(["Keep the v1 endpoint", "Don't rename the queue"]);
+    expect(gitlab.replies.map((reply) => reply.body)).toEqual([`Noted.\n\n${CHAT_MARKER}`]);
+  });
+
+  it("shows no decisions section and stores nothing when the agent heard none", async () => {
+    const loopId = createLoop();
+    const brain = new FakeBrain({ result: { reply: "Done." }, sessionId: "session-2" });
+
+    expect(await runChat(claim(loopId), makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    expect(brain.lastInput().prompt).not.toContain("## Decisions a person made");
+    expect(stores.loops.get(loopId)?.decisions).toEqual([]);
+  });
+
   it("keeps the worktree after the run: it is the session's", async () => {
     const loopId = createLoop();
     const brain = new FakeBrain({ result: { reply: "ok" } });

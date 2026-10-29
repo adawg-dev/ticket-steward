@@ -16,7 +16,7 @@ const settings: GreptileConfig = {
 const loop = (over: Partial<Loop> = {}): Loop => ({
   id: 1, issueId: "i", identifier: "API-1", teamKey: "API", implementJobId: 1, branch: "api-1-fix", baseSha: "a".repeat(40),
   headSha: SHA, worktreeName: "w", labelDriven: false, projectId: 42, mrIid: 7, mrUrl: null, sessionId: null, round: 1,
-  state: "awaiting_review", history: [], waitStartedAt: minutesAgo(1), reviewCountAtTrigger: null, adoptedFrom: null,
+  state: "awaiting_review", history: [], decisions: [], waitStartedAt: minutesAgo(1), reviewCountAtTrigger: null, adoptedFrom: null,
   pendingPush: null, handedBackAt: null, endedAt: null, createdAt: minutesAgo(100), ...over,
 });
 const summary = (over: Partial<GreptileSummary> = {}): GreptileSummary => ({

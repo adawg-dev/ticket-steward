@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS loops (
   round INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL,
   history TEXT NOT NULL DEFAULT '[]',
+  decisions TEXT NOT NULL DEFAULT '[]',
   wait_started_at TEXT,
   review_count_at_trigger INTEGER,
   adopted_from TEXT,
@@ -139,6 +140,7 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }
   { table: "jobs", column: "chat_result", definition: "TEXT" },
   { table: "jobs", column: "slot", definition: "INTEGER" },
   { table: "jobs", column: "run_id", definition: "TEXT" },
+  { table: "loops", column: "decisions", definition: "TEXT NOT NULL DEFAULT '[]'" },
 ];
 
 /** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */

@@ -5,9 +5,13 @@ export const CHAT_MARKER = "<!-- ticket-steward:chat -->";
 
 export const NO_SESSION_REPLY = "No agent session is attached to this merge request.";
 
-/** What the resumed agent answers: the text the steward posts in the note's discussion. */
+/**
+ * What the resumed agent answers: the text the steward posts in the note's discussion, and the lasting instructions the
+ * person gave about the MR ("keep X", "don't Y"), one line each, restated from what they said (empty when none).
+ */
 export const ChatResultSchema = z.object({
   reply: z.string(),
+  decisions: z.array(z.string()).default([]),
 });
 export type ChatResult = z.infer<typeof ChatResultSchema>;
 

@@ -253,6 +253,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
       // The executor lists the commits in place of the marker, from the worktree it builds.
       personCommits: commits === null ? [] : [PERSON_COMMITS_MARKER],
       newComments: newNotes(loop, discussions, [greptile.botUsername, ...stewardUser]),
+      decisions: loop.decisions,
       workspacePath: worktreePath,
       headSha: loop.headSha,
       stewardPort: jobPort(deps),

@@ -58,6 +58,7 @@ describe("LoopStore", () => {
       round: 0,
       state: "awaiting_mr",
       history: [],
+      decisions: [],
       waitStartedAt: "2026-10-27T10:00:00.000Z",
       reviewCountAtTrigger: 3,
       adoptedFrom: "API-0",
@@ -115,6 +116,22 @@ describe("LoopStore", () => {
     expect(stores.loops.get(id)?.history).toEqual([]);
     expect(() => stores.loops.appendRound(id, round)).toThrow(/history/);
     expect(stores.db.prepare<[number], { history: string }>("SELECT history FROM loops WHERE id = ?").get(id)?.history).toBe("not json");
+  });
+
+  it("appendDecisions adds new decisions after the stored ones, skipping blanks and ones already there", () => {
+    const id = stores.loops.create(newLoop());
+    expect(stores.loops.get(id)?.decisions).toEqual([]);
+    stores.loops.appendDecisions(id, ["Keep the v1 endpoint", "  "]);
+    stores.loops.appendDecisions(id, ["keep the  v1 endpoint.", " Don't rename the queue ", "Don't rename the queue"]);
+    expect(stores.loops.get(id)?.decisions).toEqual(["Keep the v1 endpoint", "Don't rename the queue"]);
+  });
+
+  it("appendDecisions refuses to overwrite decisions it cannot read", () => {
+    const id = stores.loops.create(newLoop());
+    stores.db.prepare("UPDATE loops SET decisions = '{}' WHERE id = ?").run(id);
+    expect(stores.loops.get(id)?.decisions).toEqual([]);
+    expect(() => stores.loops.appendDecisions(id, ["Keep the v1 endpoint"])).toThrow(/decisions/);
+    expect(stores.db.prepare<[number], { decisions: string }>("SELECT decisions FROM loops WHERE id = ?").get(id)?.decisions).toBe("{}");
   });
 
   it("forImplementJob finds the loop its implement job started", () => {

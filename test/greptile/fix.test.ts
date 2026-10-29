@@ -369,6 +369,17 @@ describe("runFix", () => {
     }
   });
 
+  it("gives the agent the decisions people made on the merge request, never to undo", async () => {
+    const id = createLoop();
+    stores.loops.appendDecisions(id, ["Keep the v1 endpoint", "Don't rename the queue"]);
+    const brain = editing({ result: changed(finding) });
+
+    await runFix(claim(id), makeDeps(brain));
+
+    const prompt = brain.lastInput().prompt;
+    expect(prompt).toContain("## Decisions a person made on this merge request: never undo these\n\n- Keep the v1 endpoint\n- Don't rename the queue\n");
+  });
+
   it("gives the agent no MR notes when the loop was never handed back", async () => {
     gitlab.addDiscussion("ada", "Please keep the old buffer size", { createdAt: "2026-10-27T10:00:00.000Z" });
     const id = createLoop();

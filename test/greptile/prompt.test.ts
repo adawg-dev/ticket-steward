@@ -6,7 +6,7 @@ const input: FixPromptInput = {
   identifier: "ENG-1", round: 2, maxRounds: 5, score: 3, summary: "Confidence Score: 3/5 <b>raw</b>",
   findings: [{ discussionId: "disc-abc", body: "use a map", filePath: "src/foo.ts", lineStart: 4, lineEnd: 6, suggestedCode: "const m = new Map();" }],
   ciFailures: [{ name: "unit-tests", stage: "test", webUrl: "https://gl/1", logTail: "AssertionError: boom" }],
-  personCommits: ["abc123 tweak copy"], newComments: [{ author: "Sam", body: "also handle empty" }],
+  personCommits: ["abc123 tweak copy"], newComments: [{ author: "Sam", body: "also handle empty" }], decisions: ["Keep the v1 endpoint"],
   workspacePath: "/ws", headSha: "deadbeef", stewardPort: 4321, artifactsDir: "/art", checks: "- `pnpm lint`", hasChecks: true,
 };
 
@@ -24,6 +24,7 @@ describe("renderFixPrompt", () => {
     expect(out).toContain("also handle empty");
     expect(out).toContain("4321");
     expect(out).toContain("pnpm lint");
+    expect(out).toContain("## Decisions a person made on this merge request: never undo these\n\n- Keep the v1 endpoint\n");
     expect(out).not.toMatch(/@greptile/i);
   });
   it("has the agent commit with the identifier and push through the push tool", async () => {
@@ -35,8 +36,9 @@ describe("renderFixPrompt", () => {
     expect(out).not.toContain("Never run `git commit`");
   });
   it("omits optional sections when empty", async () => {
-    const out = renderFixPrompt(await readFile("prompts/fix.md", "utf8"), { ...input, findings: [], ciFailures: [], personCommits: [], newComments: [], hasChecks: false });
+    const out = renderFixPrompt(await readFile("prompts/fix.md", "utf8"), { ...input, findings: [], ciFailures: [], personCommits: [], newComments: [], decisions: [], hasChecks: false });
     expect(out).not.toContain("tweak copy");
+    expect(out).not.toContain("Decisions a person made");
     expect(out).not.toContain("also handle empty");
     expect(out).not.toContain("pnpm lint");
   });

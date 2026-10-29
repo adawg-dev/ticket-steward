@@ -41,10 +41,13 @@ export interface ChatPromptInput {
   /** implement.checks as a Markdown list. */
   checks: string;
   hasChecks: boolean;
+  /** The loop's decisions so far, so the agent neither records them again nor contradicts them. */
+  decisions: string[];
 }
 
 /** Fill the chat prompt template (mustache, unescaped, like the other prompts), with the repo's own section as `{{> repo}}`. */
-export const renderChatPrompt = (template: string, input: ChatPromptInput, repo = ""): string => renderPrompt(template, input, repo);
+export const renderChatPrompt = (template: string, input: ChatPromptInput, repo = ""): string =>
+  renderPrompt(template, { ...input, hasDecisions: input.decisions.length > 0 }, repo);
 
 /** Posts the stored reply with the marker, in the note's discussion (or on the MR when GitLab gave no discussion). */
 const postReply = async (deps: PipelineDeps, gitlab: GitLabMrApi, trigger: ChatTrigger, stored: StoredChat): Promise<JobOutcome> => {
@@ -142,6 +145,7 @@ const prepareChat = async (ctx: RunContext, deps: PipelineDeps, gitlab: GitLabMr
       branch: session.branch ?? "",
       checks: checks.map((command) => `- \`${command}\``).join("\n"),
       hasChecks: checks.length > 0,
+      decisions: session.loopId === null ? [] : (deps.stores.loops.get(session.loopId)?.decisions ?? []),
     }, await readRepoPartial(deps.configPath));
   } catch (err) {
     return { outcome: prepareFailed(deps, err) };
@@ -209,6 +213,24 @@ export const interactiveChatSpec = (
   };
 };
 
+/**
+ * Adds the decisions the person gave to the session's loop, which shows them to every later fix round and chat. A ticket
+ * with no loop has no round to show them to, so they are not kept. Recorded before the reply is stored: a retry that runs
+ * the brain again finds them already there.
+ */
+const recordDecisions = (deps: Pick<PipelineDeps, "stores" | "redactor">, session: AgentSession, decisions: string[]): void => {
+  if (decisions.length === 0) return;
+  if (session.loopId === null) {
+    logger.info({ count: decisions.length }, "chat: decisions not kept, the ticket has no loop");
+    return;
+  }
+  try {
+    deps.stores.loops.appendDecisions(session.loopId, decisions.map((decision) => deps.redactor.redact(decision)));
+  } catch (err) {
+    logger.warn({ loopId: session.loopId, err: errorMessage(err) }, "chat: decisions could not be recorded");
+  }
+};
+
 /** The finish half, from the executor's report and the work it found: retry, or store and post the reply with what was left unpushed. */
 const finishChat = (
   ctx: RunContext,
@@ -243,6 +265,7 @@ const finishChat = (
   if (!validated.ok) {
     return decide(ctx, deps, gitlab, trigger, { reply: withLeftover("The agent's answer could not be read.", leftover), warning: `the agent's result was invalid: ${validated.error}` });
   }
+  recordDecisions(deps, session, validated.result.decisions);
   return decide(ctx, deps, gitlab, trigger, { reply: withLeftover(validated.result.reply, leftover), warning: leftover === "" ? null : "the agent left unpushed work" });
 };
 

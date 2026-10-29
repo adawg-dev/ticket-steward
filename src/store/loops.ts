@@ -36,6 +36,8 @@ export interface Loop {
   round: number;
   state: LoopState;
   history: LoopRound[];
+  /** Lasting instructions people gave about the MR ("keep X", "don't Y"), one line each; every later run is shown them. */
+  decisions: string[];
   waitStartedAt: string | null;
   reviewCountAtTrigger: number | null;
   adoptedFrom: string | null;
@@ -70,9 +72,11 @@ const LoopRoundSchema = z.object({
 
 const HistorySchema = z.array(LoopRoundSchema);
 
+const DecisionsSchema = z.array(z.string());
+
 const PendingPushSchema = z.object({ sha: z.string(), pushed: z.boolean() });
 
-type LoopJsonColumn = "history" | "pending_push";
+type LoopJsonColumn = "history" | "decisions" | "pending_push";
 
 interface LoopRow {
   id: number;
@@ -92,6 +96,7 @@ interface LoopRow {
   round: number;
   state: string;
   history: string;
+  decisions: string;
   wait_started_at: string | null;
   review_count_at_trigger: number | null;
   adopted_from: string | null;
@@ -126,6 +131,7 @@ const toLoop = (row: LoopRow): { loop: Loop; unreadable: LoopJsonColumn[] } => {
     round: row.round,
     state: state.success ? state.data : "stopped",
     history: readStored(row.history, "history", HistorySchema, unreadable) ?? [],
+    decisions: readStored(row.decisions, "decisions", DecisionsSchema, unreadable) ?? [],
     waitStartedAt: row.wait_started_at,
     reviewCountAtTrigger: row.review_count_at_trigger,
     adoptedFrom: row.adopted_from,
@@ -153,6 +159,7 @@ const PATCH_COLUMNS: { [K in keyof Required<LoopPatch>]: { column: string; store
   round: { column: "round", store: (value) => value },
   state: { column: "state", store: (value) => value },
   history: { column: "history", store: (value) => JSON.stringify(value) },
+  decisions: { column: "decisions", store: (value) => JSON.stringify(value) },
   waitStartedAt: { column: "wait_started_at", store: (value) => value },
   reviewCountAtTrigger: { column: "review_count_at_trigger", store: (value) => value },
   adoptedFrom: { column: "adopted_from", store: (value) => value },
@@ -169,6 +176,22 @@ const assignment = <K extends keyof LoopPatch>(key: K, value: Required<LoopPatch
   value: PATCH_COLUMNS[key].store(value),
 });
 
+/** A decision's identity for deduplication: case, runs of whitespace and a trailing full stop do not make it new. */
+const decisionKey = (decision: string): string => decision.trim().replace(/\s+/g, " ").replace(/[.!]+$/, "").toLowerCase();
+
+/** `existing` followed by the decisions in `added` that are not blank and not already there, each trimmed. */
+export const mergeDecisions = (existing: readonly string[], added: readonly string[]): string[] => {
+  const seen = new Set(existing.map(decisionKey));
+  const merged = [...existing];
+  for (const decision of added) {
+    const key = decisionKey(decision);
+    if (key === "" || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(decision.trim().replace(/\s+/g, " "));
+  }
+  return merged;
+};
+
 /** The fix loop records, one per loop; a ticket may have several over time, the latest being its current one. */
 export class LoopStore {
   private readonly insert;
@@ -181,6 +204,7 @@ export class LoopStore {
   private readonly selectKept;
   private readonly selectSessionWorktrees;
   private readonly storeHistory;
+  private readonly storeDecisions;
 
   constructor(private readonly db: Database) {
     this.insert = db.prepare<[string, string, string, number, string, string, string, string, number, string | null, string, string]>(
@@ -212,6 +236,7 @@ export class LoopStore {
        ORDER BY l.worktree_name`,
     );
     this.storeHistory = db.prepare<[string, number]>("UPDATE loops SET history = ? WHERE id = ?");
+    this.storeDecisions = db.prepare<[string, number]>("UPDATE loops SET decisions = ? WHERE id = ?");
   }
 
   /** A new loop waiting for its MR, at round 0 with no history. */
@@ -306,6 +331,18 @@ export class LoopStore {
       const { loop, unreadable } = toLoop(row);
       if (unreadable.includes("history")) throw new Error(`loop ${id}: stored history is unreadable; fix the column before adding a round`);
       this.storeHistory.run(JSON.stringify([...loop.history, round]), id);
+    })();
+  }
+
+  /** Adds the decisions not already recorded (`mergeDecisions`); throws rather than overwrite stored decisions it cannot read. */
+  appendDecisions(id: number, decisions: readonly string[]): void {
+    this.db.transaction(() => {
+      const row = this.selectById.get(id);
+      if (row === undefined) throw new Error(`loop ${id} not found`);
+      const { loop, unreadable } = toLoop(row);
+      if (unreadable.includes("decisions")) throw new Error(`loop ${id}: stored decisions are unreadable; fix the column before adding one`);
+      const merged = mergeDecisions(loop.decisions, decisions);
+      if (merged.length !== loop.decisions.length) this.storeDecisions.run(JSON.stringify(merged), id);
     })();
   }
 }
