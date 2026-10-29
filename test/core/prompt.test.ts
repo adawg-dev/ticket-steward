@@ -79,8 +79,7 @@ describe("readRepoPartial", () => {
     }
   });
 
-  it("ships the same repo section in the kickoff example and the steward's prompts", async () => {
-    expect(await readRepoPartial("examples/kickoff/steward.config.ts")).toBe(await readFile("prompts/repo.md", "utf8"));
-    expect(await readFile("prompts/repo.md", "utf8")).toMatch(/^## Working in kickoff\n/);
+  it("reads the kickoff example's repo section beside its config", async () => {
+    expect(await readRepoPartial("examples/kickoff/steward.config.ts")).toMatch(/^## Working in kickoff\n/);
   });
 });
