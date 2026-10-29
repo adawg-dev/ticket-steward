@@ -218,6 +218,8 @@ export class JobStore {
   private readonly wakeSubject;
   private readonly selectById;
   private readonly selectLatestForSubject;
+  private readonly selectPendingStep;
+  private readonly postponeOne;
   private readonly selectByStatus;
   private readonly selectAll;
   private readonly requeueRunning;
@@ -325,6 +327,10 @@ export class JobStore {
     );
     this.selectById = db.prepare<[number], JobRow>("SELECT * FROM jobs WHERE id = ?");
     this.selectLatestForSubject = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE subject = ? ORDER BY id DESC LIMIT 1");
+    this.selectPendingStep = db.prepare<[string], JobRow>(
+      "SELECT * FROM jobs WHERE subject = ? AND status IN ('queued', 'running') AND kind <> 'chat' ORDER BY id DESC LIMIT 1",
+    );
+    this.postponeOne = db.prepare<[string, number]>("UPDATE jobs SET not_before = ? WHERE id = ? AND status = 'queued'");
     this.selectByStatus = db.prepare<[JobStatus, number], JobRow>(
       "SELECT * FROM jobs WHERE status = ? ORDER BY id DESC LIMIT ?",
     );
@@ -525,6 +531,17 @@ export class JobStore {
   get(id: number): Job | null {
     const row = this.selectById.get(id);
     return row === undefined ? null : toJob(row);
+  }
+
+  /** The loop step of this subject still to run or running (not a chat), or null when the loop has none. */
+  pendingStep(subject: string): Job | null {
+    const row = this.selectPendingStep.get(subject);
+    return row === undefined ? null : toJob(row);
+  }
+
+  /** Makes a queued job due at `notBefore`, earlier or later than it was; false when the job is not queued. */
+  postpone(id: number, notBefore: Date): boolean {
+    return this.postponeOne.run(notBefore.toISOString(), id).changes === 1;
   }
 
   /** The newest job with this subject (a loop's last step), whatever its status. */

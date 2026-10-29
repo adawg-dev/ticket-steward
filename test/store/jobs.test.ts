@@ -543,6 +543,37 @@ describe("loop jobs", () => {
     });
   });
 
+  describe("pendingStep and postpone", () => {
+    it("finds the loop's queued or running step, never a chat or a finished one", () => {
+      expect(stores.jobs.pendingStep("loop:3")).toBeNull();
+      const done = stores.jobs.enqueue(loopEvent("await"));
+      stores.jobs.claimById(done);
+      stores.jobs.finish(done, { status: "succeeded" });
+      const fix = stores.jobs.enqueue(loopEvent("fix"));
+      stores.jobs.enqueue({
+        kind: "chat", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 3, projectId: 42, mrIid: 7,
+        discussionId: null, noteId: 1, author: "ada", message: "hi",
+      });
+
+      expect(stores.jobs.pendingStep("loop:3")?.id).toBe(fix);
+      stores.jobs.claimById(fix);
+      expect(stores.jobs.pendingStep("loop:3")).toMatchObject({ id: fix, status: "running" });
+    });
+
+    it("moves a queued job's due time either way, and leaves a running one alone", () => {
+      const id = stores.jobs.enqueue(loopEvent("await"));
+      const later = new Date(Date.now() + 120_000);
+
+      expect(stores.jobs.postpone(id, later)).toBe(true);
+      expect(stores.jobs.get(id)?.notBefore).toBe(later.toISOString());
+      expect(stores.jobs.claimNext()).toBeNull();
+      const now = new Date();
+      expect(stores.jobs.postpone(id, now)).toBe(true);
+      expect(stores.jobs.claimNext()?.id).toBe(id);
+      expect(stores.jobs.postpone(id, later)).toBe(false);
+    });
+  });
+
   describe("wake", () => {
     const deferred = (): number => {
       const id = stores.jobs.enqueue(loopEvent("await"));

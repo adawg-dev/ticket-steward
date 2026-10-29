@@ -48,6 +48,8 @@ export interface Loop {
   pendingPush: { sha: string; pushed: boolean } | null;
   /** When the loop was last handed back; comments after it are new to a restarted loop. */
   handedBackAt: string | null;
+  /** The first MR note of the batch the queued await is waiting out; the batch's round starts no later than twice the quiet window after it. */
+  pendingNotesSince: string | null;
   endedAt: string | null;
   createdAt: string;
 }
@@ -105,6 +107,7 @@ interface LoopRow {
   adopted_from: string | null;
   pending_push: string | null;
   handed_back_at: string | null;
+  pending_notes_since: string | null;
   ended_at: string | null;
   created_at: string;
 }
@@ -140,6 +143,7 @@ const toLoop = (row: LoopRow): { loop: Loop; unreadable: LoopJsonColumn[] } => {
     adoptedFrom: row.adopted_from,
     pendingPush: readStored(row.pending_push, "pending_push", PendingPushSchema, unreadable),
     handedBackAt: row.handed_back_at,
+    pendingNotesSince: row.pending_notes_since,
     endedAt: row.ended_at,
     createdAt: row.created_at,
   };
@@ -168,6 +172,7 @@ const PATCH_COLUMNS: { [K in keyof Required<LoopPatch>]: { column: string; store
   adoptedFrom: { column: "adopted_from", store: (value) => value },
   pendingPush: { column: "pending_push", store: (value) => (value === null ? null : JSON.stringify(value)) },
   handedBackAt: { column: "handed_back_at", store: (value) => value },
+  pendingNotesSince: { column: "pending_notes_since", store: (value) => value },
   endedAt: { column: "ended_at", store: (value) => value },
 };
 

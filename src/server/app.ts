@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
-import { chatIntake, type ChatAction } from "../chat/intake.js";
+import { noteIntake, type NoteAction } from "../chat/intake.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import { parseGitlabEvent, verifyGitlabWebhook, type GitlabWakeEvent } from "../codehost/gitlabWebhook.js";
 import { errorMessage } from "../core/workspace.js";
@@ -154,7 +154,7 @@ const registerWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
 /** Pipeline and MR hooks can pass Fastify's 1 MiB default; a 413 would count as a failing delivery and GitLab disables those. */
 const GITLAB_BODY_LIMIT = 5 * 1024 * 1024;
 
-type GitlabAction = "ignored" | "woken" | "no_loop" | ChatAction;
+type GitlabAction = "woken" | "no_loop" | NoteAction;
 
 /** A loop waits on GitLab only for its MR or its review; a fixing loop has nothing to wake. */
 const WAITING_STATES: readonly Loop["state"][] = ["awaiting_mr", "awaiting_review"];
@@ -175,24 +175,29 @@ const wakeLoop = (deps: ServerDeps, event: GitlabWakeEvent, project: string): { 
   if (!isOurProject(event, project, waiting)) return { action: "ignored", loopId: null };
   const loop = waiting.find((candidate) => sameProject(candidate, event, project) && sameChange(candidate, event));
   if (loop === undefined) return { action: "no_loop", loopId: null };
+  // MR notes are being batched: their await is due once the quiet window ends, and the round reads the pipeline then.
+  if (loop.pendingNotesSince !== null && deps.stores.jobs.pendingStep(loopSubject(loop.id))?.status === "queued") {
+    return { action: "queued_round", loopId: loop.id };
+  }
   // A queued await comes due now; a running one comes due as soon as it defers, so a wake mid-poll is not lost.
   // A waiting loop with no queued or running await has nothing to wake.
   return { action: deps.stores.jobs.wake(loopSubject(loop.id), new Date()) ? "woken" : "no_loop", loopId: loop.id };
 };
 
-/** A chat request (a `chat.prefix` note) is chat's alone; any other event may wake a waiting loop. */
+/** A note is the note intake's (chat, or a round after the quiet window); an MR or pipeline event may wake a waiting loop. */
 const gitlabIntake = async (deps: ServerDeps, event: GitlabWakeEvent | null): Promise<{ action: GitlabAction; loopId: number | null }> => {
   const { codehost, greptile } = deps.config;
   if (event === null) return { action: "ignored", loopId: null };
-  const chat = await chatIntake(deps, event);
-  if (chat !== null) return chat;
+  // A note without its author and body could be the steward's own; it never wakes anything.
+  if (event.kind === "note") return event.note === undefined ? { action: "ignored", loopId: null } : noteIntake(deps, event, event.note);
   if (greptile === undefined || codehost.kind !== "gitlab") return { action: "ignored", loopId: null };
   return wakeLoop(deps, event, codehost.project);
 };
 
 /**
- * GitLab events wake a waiting fix loop's deferred await; polling is only the fallback. A `chat.prefix` note from a
- * Developer enqueues a chat (on an unassigned loop, after its revive); nothing else enqueues a job.
+ * GitLab MR and pipeline events wake a waiting fix loop's deferred await; polling is only the fallback. Any MR note that is
+ * not the steward's (from a Developer, or a bot) wakes the loop after a quiet window, or steers the ticket's open run; a
+ * `chat.prefix` note from a Developer enqueues a chat (on an unassigned loop, after its revive).
  */
 const registerGitlabWebhook = (app: FastifyInstance, deps: ServerDeps): void => {
   app.post<{ Body: string }>("/webhooks/gitlab", { bodyLimit: GITLAB_BODY_LIMIT }, async (request, reply) => {

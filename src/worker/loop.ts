@@ -339,6 +339,8 @@ class Worker {
         case "implement":
           return job.implementResult === null ? await this.implement(ctx, deps) : await this.republishImplement(ctx, deps);
         case "await_review":
+          // The batch of MR notes it waited out is the round's now: a note after this starts a new quiet window.
+          if (job.trigger.kind === "loop") this.deps.stores.loops.update(job.trigger.loopId, { pendingNotesSince: null });
           return await this.awaitReview(ctx, deps);
         case "fix":
           return await this.fix(ctx, deps);

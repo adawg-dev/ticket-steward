@@ -4,8 +4,9 @@ import type { StewardConfig } from "../config/schema.js";
 import { errorMessage } from "../core/workspace.js";
 import { restoreDelegate, reviveTicket, type DelegateDeps } from "../linear/assignment.js";
 import { logger } from "../log.js";
-import type { Settings } from "../settings/schema.js";
-import { transaction, type Loop, type Stores } from "../store/index.js";
+import type { RunChannels } from "../run/channel.js";
+import { DEFAULT_SETTINGS, type Settings } from "../settings/schema.js";
+import { ACTIVE_LOOP_STATES, loopSubject, transaction, type Loop, type LoopState, type Stores } from "../store/index.js";
 import type { TriggerEvent } from "../tracker/types.js";
 import { CHAT_MARKER, NO_SESSION_REPLY } from "./result.js";
 import { latestSession } from "./session.js";
@@ -42,18 +43,17 @@ export const addressedMessage = (body: string, prefix: string): string | null =>
 /** The delivery key of a note: a note id is seen once, whether GitLab sends it again or the note is edited. */
 export const noteDeliveryKey = (noteId: number): string => `gitlab-note:${noteId}`;
 
-/** System notes, bots (by flag or project/group bot name), Greptile and anything the steward posted never start a chat. */
-const fromMachine = (config: StewardConfig, note: GitlabNote): boolean => {
-  const author = note.authorUsername.toLowerCase();
-  return (
-    note.system ||
-    note.authorIsBot ||
-    BOT_USER.test(note.authorUsername) ||
-    (config.greptile !== undefined && author === config.greptile.botUsername.toLowerCase()) ||
-    note.body.includes(STEWARD_MARKER) ||
-    note.body.includes(CHAT_MARKER)
-  );
-};
+/** A bot wrote it: by GitLab's flag, a project/group bot name, or the configured Greptile user. */
+const fromBot = (config: StewardConfig, note: GitlabNote): boolean =>
+  note.authorIsBot ||
+  BOT_USER.test(note.authorUsername) ||
+  (config.greptile !== undefined && note.authorUsername.toLowerCase() === config.greptile.botUsername.toLowerCase());
+
+/** The steward posted it (every steward note carries a marker), or GitLab did (a system note). */
+const fromSteward = (note: GitlabNote): boolean => note.system || note.body.includes(STEWARD_MARKER) || note.body.includes(CHAT_MARKER);
+
+/** System notes, bots, Greptile and anything the steward posted never start a chat. */
+const fromMachine = (config: StewardConfig, note: GitlabNote): boolean => fromSteward(note) || fromBot(config, note);
 
 const isOurProject = (event: GitlabWakeEvent, project: string): boolean => event.projectPath === project || String(event.projectId) === project;
 
@@ -141,4 +141,95 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
   // Best effort, after the jobs are recorded: a delegate that could not be set is logged.
   if (result.action === "chat_revive") void restoreDelegate(deps, issueId);
   return result;
+};
+
+export type NoteAction = ChatAction | "queued_round" | "steered" | "ignored" | "denied";
+
+export interface NoteIntakeDeps extends ChatIntakeDeps {
+  /** The open runs' channels: a note on a ticket whose run is open is passed into that run. */
+  channels?: Pick<RunChannels, "active" | "steer">;
+  /** The clock the quiet window counts from; the wall clock when absent. */
+  now?: () => Date;
+}
+
+/** Loops a note wakes: running, or passed (a new comment starts a round). A handed-back loop wakes for a person only. */
+const WAKEABLE_STATES: readonly LoopState[] = [...ACTIVE_LOOP_STATES, "passed"];
+
+const wakes = (loop: Loop, bot: boolean): boolean => WAKEABLE_STATES.includes(loop.state) || (loop.state === "handed_back" && !bot);
+
+/** What the open run is told of a note: context for now, answered in its thread by the next round. */
+export const steeringNote = (author: string, body: string): string =>
+  `New comment from ${author} on the MR (answer it in the next round, not now):\n${body}`;
+
+/** Whether the note's author may give the steward work: a Developer or higher. Null when GitLab could not say. */
+const mayInstruct = async (gitlab: GitLabMrApi, event: GitlabWakeEvent, note: GitlabNote): Promise<boolean | null> => {
+  try {
+    const level = await gitlab.memberAccessLevel(event.projectId, note.authorId);
+    return level !== null && level >= DEVELOPER;
+  } catch (err) {
+    logger.warn({ noteId: note.id, err: errorMessage(err) }, "note: member access could not be read");
+    return null;
+  }
+};
+
+/**
+ * Makes the loop's next round start a quiet window after this note: the queued await is moved (or one is queued, opening
+ * a passed loop again), but never past twice the window after the batch's first note. A loop step already running, or a
+ * queued fix or restart, reads the MR's discussions itself, so nothing is queued for it. One transaction, synchronous.
+ */
+const queueRound = (stores: Stores, loop: Loop, now: Date, quietMinutes: number): void => {
+  transaction(stores.db, () => {
+    const step = stores.jobs.pendingStep(loopSubject(loop.id));
+    if (step !== null && (step.kind !== "await_review" || step.status === "running")) return;
+    // The batch's start counts only while its await is still queued; anything else starts a new batch.
+    const since = step !== null && loop.pendingNotesSince !== null ? new Date(loop.pendingNotesSince) : now;
+    const quietMs = quietMinutes * 60_000;
+    const due = new Date(Math.min(now.getTime() + quietMs, since.getTime() + 2 * quietMs));
+    let awaitId = step?.id ?? null;
+    if (awaitId === null) {
+      if (loop.state === "passed") stores.loops.update(loop.id, { state: "awaiting_review", waitStartedAt: null, endedAt: null });
+      awaitId = stores.jobs.enqueue({ kind: "loop", issueId: loop.issueId, identifier: loop.identifier, teamKey: loop.teamKey, loopId: loop.id, step: "await" });
+    }
+    stores.jobs.postpone(awaitId, due);
+    stores.loops.update(loop.id, { pendingNotesSince: since.toISOString() });
+  });
+};
+
+/**
+ * Any note on a steward MR. A `chat.prefix` note keeps the chat path (`chatIntake`). Otherwise the steward's own notes and
+ * system notes are ignored, and a person below Developer is denied; a bot needs no role. A note on a running or passed
+ * loop is passed into the ticket's open run when there is one (the next round answers it), and otherwise wakes the loop
+ * after a quiet window (`queueRound`). A person's note on a handed-back loop restarts it on the MR head. Unassigned and
+ * stopped loops are left alone: only a `chat.prefix` mention revives them.
+ */
+export const noteIntake = async (deps: NoteIntakeDeps, event: GitlabWakeEvent, note: GitlabNote): Promise<{ action: NoteAction; loopId: number | null }> => {
+  const { config, stores, gitlab } = deps;
+  const chat = await chatIntake(deps, { ...event, note });
+  if (chat !== null) return chat;
+  if (gitlab === undefined || config.codehost.kind !== "gitlab" || event.mrIid === null) return { action: "ignored", loopId: null };
+  if (!isOurProject(event, config.codehost.project) || fromSteward(note)) return { action: "ignored", loopId: null };
+  const found = ticketOf(stores, event)?.loop ?? null;
+  const bot = fromBot(config, note);
+  if (found === null) return { action: "ignored", loopId: null };
+  if (!wakes(found, bot)) return { action: "ignored", loopId: found.id };
+  if (!bot) {
+    const allowed = await mayInstruct(gitlab, event, note);
+    if (allowed === null) return { action: "ignored", loopId: found.id };
+    if (!allowed) return { action: "denied", loopId: found.id };
+  }
+
+  // Read again after GitLab answered: the loop may have moved meanwhile. Everything from here is synchronous.
+  const loop = stores.loops.get(found.id);
+  if (loop === null || !wakes(loop, bot)) return { action: "ignored", loopId: found.id };
+  if (loop.state === "handed_back") {
+    transaction(stores.db, () => reviveTicket(stores, loop, null));
+    return { action: "queued_round", loopId: loop.id };
+  }
+  const runId = deps.channels?.active(loop.issueId) ?? null;
+  if (runId !== null && deps.channels?.steer(runId, steeringNote(note.authorUsername, note.body)) === true) {
+    return { action: "steered", loopId: loop.id };
+  }
+  const quietMinutes = deps.settings?.get()["review.quietMinutes"] ?? DEFAULT_SETTINGS["review.quietMinutes"];
+  queueRound(stores, loop, deps.now?.() ?? new Date(), quietMinutes);
+  return { action: "queued_round", loopId: loop.id };
 };

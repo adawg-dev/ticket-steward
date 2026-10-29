@@ -47,6 +47,7 @@ describe("LoopStore", () => {
       adoptedFrom: "API-0",
       pendingPush: { sha: "d".repeat(40), pushed: false },
       handedBackAt: "2026-10-27T09:00:00.000Z",
+      pendingNotesSince: "2026-10-27T10:05:00.000Z",
     });
 
     expect(stores.loops.get(id)).toEqual({
@@ -64,6 +65,7 @@ describe("LoopStore", () => {
       adoptedFrom: "API-0",
       pendingPush: { sha: "d".repeat(40), pushed: false },
       handedBackAt: "2026-10-27T09:00:00.000Z",
+      pendingNotesSince: "2026-10-27T10:05:00.000Z",
       endedAt: null,
       createdAt: expect.any(String),
     });
@@ -77,6 +79,7 @@ describe("LoopStore", () => {
     expect(loop?.projectId).toBeNull();
     expect(loop?.pendingPush).toBeNull();
     expect(loop?.handedBackAt).toBeNull();
+    expect(loop?.pendingNotesSince).toBeNull();
   });
 
   it("get returns null for an unknown id", () => {

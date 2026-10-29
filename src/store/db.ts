@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS loops (
   adopted_from TEXT,
   pending_push TEXT,
   handed_back_at TEXT,
+  pending_notes_since TEXT,
   ended_at TEXT,
   created_at TEXT NOT NULL
 );
@@ -165,6 +166,7 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }
   { table: "jobs", column: "slot", definition: "INTEGER" },
   { table: "jobs", column: "run_id", definition: "TEXT" },
   { table: "loops", column: "decisions", definition: "TEXT NOT NULL DEFAULT '[]'" },
+  { table: "loops", column: "pending_notes_since", definition: "TEXT" },
 ];
 
 /** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */

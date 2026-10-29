@@ -420,13 +420,13 @@ describe("buildServer", () => {
       expect(isDue(jobId)).toBe(true);
     });
 
-    it("wakes the loop when Greptile edits its summary note", async () => {
+    it("never wakes a loop on a note whose author and body it cannot read", async () => {
       const { jobId } = waitingLoop("awaiting_review", { projectId: 42, mrIid: 7 });
 
       const response = await postGitlab("Note Hook", noteEvent("update"));
 
-      expect(response.json()).toEqual({ ok: true, action: "woken" });
-      expect(isDue(jobId)).toBe(true);
+      expect(response.json()).toEqual({ ok: true, action: "ignored" });
+      expect(isDue(jobId)).toBe(false);
     });
 
     it("wakes the loop on a pipeline event for its branch", async () => {
@@ -442,7 +442,7 @@ describe("buildServer", () => {
       const { jobId } = waitingLoop("awaiting_review", { projectId: 42, mrIid: 7 });
       stores.jobs.claimById(jobId);
 
-      const response = await postGitlab("Note Hook", noteEvent("update"));
+      const response = await postGitlab("Pipeline Hook", pipelineEvent());
 
       expect(response.json()).toEqual({ ok: true, action: "woken" });
       expect(stores.jobs.get(jobId)?.wakeRequested).toBe(true);
@@ -558,12 +558,39 @@ describe("buildServer", () => {
         expect(gitlab.replies).toEqual([]);
       });
 
-      it("ignores notes without the prefix as chat, and leaves them to the loop's wake", async () => {
+      it("queues one round a quiet window out for notes without the prefix, and no chat", async () => {
+        const loopId = sessionLoop();
+
+        expect((await postGitlab("Note Hook", chatNote("why did you drop the retry?"))).json()).toEqual({ ok: true, action: "queued_round" });
+        expect((await postGitlab("Note Hook", chatNote("/agentic workflows are neat"))).json()).toEqual({ ok: true, action: "queued_round" });
+
+        expect(jobsOfKind("chat")).toEqual([]);
+        const awaits = jobsOfKind("await_review");
+        expect(awaits.map((job) => job.subject)).toEqual([`loop:${loopId}`]);
+        expect(isDue(awaits[0]?.id ?? 0)).toBe(false);
+        expect(stores.loops.get(loopId)?.pendingNotesSince).toEqual(expect.any(String));
+      });
+
+      it("queues a round when Greptile edits its summary note", async () => {
         sessionLoop();
 
-        expect((await postGitlab("Note Hook", chatNote("why did you drop the retry?"))).json()).toEqual({ ok: true, action: "no_loop" });
-        expect((await postGitlab("Note Hook", chatNote("/agentic workflows are neat"))).json()).toEqual({ ok: true, action: "no_loop" });
-        expect(jobsOfKind("chat")).toEqual([]);
+        const response = await postGitlab("Note Hook", chatNote("Confidence 3/5", { username: "greptile-bot", userId: 999, noteId: 950 }));
+
+        expect(response.json()).toEqual({ ok: true, action: "queued_round" });
+        expect(jobsOfKind("await_review")).toHaveLength(1);
+      });
+
+      it("keeps a batch's quiet window when the pipeline finishes meanwhile", async () => {
+        const loopId = sessionLoop();
+        await postGitlab("Note Hook", chatNote("please add a test"));
+        const [batched] = jobsOfKind("await_review");
+
+        const response = await postGitlab("Pipeline Hook", pipelineEvent());
+
+        expect(response.json()).toEqual({ ok: true, action: "queued_round" });
+        expect(stores.jobs.get(batched?.id ?? 0)?.notBefore).toBe(batched?.notBefore);
+        expect(isDue(batched?.id ?? 0)).toBe(false);
+        expect(stores.loops.get(loopId)?.state).toBe("awaiting_review");
       });
 
       it("ignores a bare prefix with no message", async () => {
@@ -648,7 +675,7 @@ describe("buildServer", () => {
       it("leaves an unassigned loop alone on a note without the prefix", async () => {
         sessionLoop("unassigned");
 
-        expect((await postGitlab("Note Hook", chatNote("please continue"))).json()).toEqual({ ok: true, action: "no_loop" });
+        expect((await postGitlab("Note Hook", chatNote("please continue"))).json()).toEqual({ ok: true, action: "ignored" });
         expect(stores.jobs.list({ status: "queued", limit: 10 })).toEqual([]);
         expect(recording.calls).toEqual([]);
       });

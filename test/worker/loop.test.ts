@@ -280,6 +280,22 @@ describe("startWorker", () => {
     expect(runImplementMock).not.toHaveBeenCalled();
   });
 
+  it("takes the loop's batch of MR notes into the await it runs, so a later note starts a new quiet window", async () => {
+    const loopId = runningLoop("awaiting_review");
+    stores.loops.update(loopId, { pendingNotesSince: "2026-10-29T10:00:00.000Z" });
+    const runAwaitReview = vi.fn(async () => {
+      expect(stores.loops.get(loopId)?.pendingNotesSince).toBeNull();
+      return { status: "succeeded" } as const;
+    });
+    const jobId = stores.jobs.enqueue(loopStep(loopId, "await"));
+    start({ runAwaitReview });
+
+    await waitForStatus(jobId, "succeeded");
+
+    expect(runAwaitReview).toHaveBeenCalledTimes(1);
+    expect(stores.loops.get(loopId)?.pendingNotesSince).toBeNull();
+  });
+
   it("dispatches a fix job to runFix", async () => {
     const runFix = vi.fn(async () => ({ status: "succeeded" }) as const);
     const jobId = stores.jobs.enqueue({ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: 1, step: "fix" });
