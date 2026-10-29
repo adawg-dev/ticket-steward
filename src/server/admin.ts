@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z } from "zod";
 import { acquireLease } from "../chat/lease.js";
 import { latestSession, type AgentSession } from "../chat/session.js";
+import { kubernetesRuntime, type StewardConfig } from "../config/schema.js";
 import { errorMessage } from "../core/workspace.js";
 import { logger } from "../log.js";
 import { SettingsSchema } from "../settings/schema.js";
@@ -12,11 +13,18 @@ import { SettingsError, type SettingsStore } from "../settings/store.js";
 import type { Job, JobStatus, Loop, Stores } from "../store/index.js";
 import type { TemplateListing, TicketBundle } from "../tracker/types.js";
 
-/** The admin API's port, bound to 127.0.0.1 only: the CLI in the dispatcher pod (`kubectl exec … steward …`) is its client. */
+/** The admin API's port, bound to 127.0.0.1 only: the CLI beside `serve` (`kubectl exec`/`docker compose exec … steward …`) is its client. */
 export const ADMIN_PORT = 3022;
 export const ADMIN_HOST = "127.0.0.1";
 /** The token's file in the runtime dir; written at each start, mode 0600. */
 export const ADMIN_TOKEN_FILE = "admin.token";
+
+/**
+ * Where `serve` writes the admin API's token: the Kubernetes runtime's in-memory runtime dir, or `<dataDir>/run` on the
+ * local runtime (the Compose host), where the CLI runs beside `serve` and the data dir is the steward's alone.
+ */
+export const adminRuntimeDir = (config: Pick<StewardConfig, "runtime" | "dataDir">): string =>
+  kubernetesRuntime(config)?.runtimeDir ?? join(config.dataDir, "run");
 
 const JOB_STATUSES = ["queued", "running", "succeeded", "failed", "publish_failed", "skipped"] as const satisfies readonly JobStatus[];
 const DEFAULT_LIMIT = 20;

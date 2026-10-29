@@ -1,5 +1,5 @@
 import { createServer } from "node:net";
-import { rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -66,7 +66,7 @@ afterEach(async () => {
 });
 
 describe("connectAdmin", () => {
-  it("is null on the local runtime, without asking anything", async () => {
+  it("is null on the local runtime while serve has written no token, without asking anything", async () => {
     let asked = 0;
     const counting: typeof fetch = () => {
       asked += 1;
@@ -75,6 +75,16 @@ describe("connectAdmin", () => {
     const { config } = await loadConfig({ configPath });
     expect(await connectAdmin({ fetchImpl: counting }, config)).toBeNull();
     expect(asked).toBe(0);
+  });
+
+  it("talks to serve's admin API on the local runtime too, with the token in the data dir's run dir", async () => {
+    const { config } = await loadConfig({ configPath });
+    await mkdir(join(config.dataDir, "run"), { recursive: true });
+    await writeFile(join(config.dataDir, "run", "admin.token"), TOKEN, { mode: 0o600 });
+    const port = await serveAdmin();
+    const client = await connectAdmin({ fetchImpl: fetch }, config, { port });
+    if (client === null) throw new Error("the admin API did not answer");
+    expect(await client.listJobs({ limit: 5 })).toEqual([]);
   });
 
   it("is null without a token file, and when the admin port is closed", async () => {

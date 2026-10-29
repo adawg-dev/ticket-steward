@@ -7,7 +7,7 @@ import type { KubernetesChat } from "../k8s/chat.js";
 import { logger } from "../log.js";
 import { storeLedger } from "../push/ledger.js";
 import { remoteHeadOf } from "../push/service.js";
-import { ADMIN_HOST, ADMIN_PORT, buildAdminServer, heldChatRuns, writeAdminToken } from "../server/admin.js";
+import { ADMIN_HOST, ADMIN_PORT, adminRuntimeDir, buildAdminServer, heldChatRuns, writeAdminToken } from "../server/admin.js";
 import { seedSettings } from "../settings/schema.js";
 import { SettingsStore } from "../settings/store.js";
 import { buildServer } from "../server/app.js";
@@ -102,27 +102,27 @@ export const registerServe = (program: Command, ctx: CliContext): void => {
           stopReaping();
           return fail(ctx, `could not reattach to the run pods: ${errorMessage(err)}`);
         }
-        try {
-          // The CLI in this pod is the admin API's client; a new token each start, in memory only.
-          const token = await writeAdminToken(k8s.runtimeDir);
-          const { stores, tracker, chat } = runtime;
-          const templates = templateLister(runtime, ctx);
-          admin = buildAdminServer({
-            token,
-            stores,
-            settings,
-            resolveTicket: (key) => tracker.resolveIssueId(key),
-            fetchTicket: (issueId) => tracker.fetchTicket(issueId),
-            ...(templates === undefined ? {} : { listTemplates: () => templates.listTemplates(config.tracker.teams) }),
-            ...(chat === undefined ? {} : { chat }),
-          });
-          await admin.listen({ port: ADMIN_PORT, host: ADMIN_HOST });
-        } catch (err) {
-          stopReaping();
-          await internal.close();
-          return fail(ctx, `could not start the admin API: ${errorMessage(err)}`);
-        }
         workerDeps = { ...workerDeps, resume: { specs: kubernetes.adopted(), release: (runId) => kubernetes.release(runId) } };
+      }
+      try {
+        // The CLI beside serve is the admin API's client (Linear reads, settings, templates); a new token each start.
+        const token = await writeAdminToken(adminRuntimeDir(config));
+        const { stores, tracker, chat } = runtime;
+        const templates = templateLister(runtime, ctx);
+        admin = buildAdminServer({
+          token,
+          stores,
+          settings,
+          resolveTicket: (key) => tracker.resolveIssueId(key),
+          fetchTicket: (issueId) => tracker.fetchTicket(issueId),
+          ...(templates === undefined ? {} : { listTemplates: () => templates.listTemplates(config.tracker.teams) }),
+          ...(chat === undefined ? {} : { chat }),
+        });
+        await admin.listen({ port: ADMIN_PORT, host: ADMIN_HOST });
+      } catch (err) {
+        stopReaping();
+        await internal?.close();
+        return fail(ctx, `could not start the admin API: ${errorMessage(err)}`);
       }
       let worker;
       try {

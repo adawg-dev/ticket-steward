@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { kubernetesRuntime, type StewardConfig } from "../config/schema.js";
-import { ADMIN_HOST, ADMIN_PORT, ADMIN_TOKEN_FILE } from "../server/admin.js";
+import type { StewardConfig } from "../config/schema.js";
+import { ADMIN_HOST, ADMIN_PORT, ADMIN_TOKEN_FILE, adminRuntimeDir } from "../server/admin.js";
 import { SettingsSchema, type Settings, type SettingsPatch } from "../settings/schema.js";
 import type { TemplateListing, TicketBundle } from "../tracker/types.js";
 import type { CliContext } from "./context.js";
@@ -173,18 +173,16 @@ export const adminClient = (fetchImpl: typeof fetch, p: { token: string; port?: 
 };
 
 /**
- * The admin API when it answers: on the Kubernetes runtime, with the token `serve` wrote to the runtime dir. Null on the
- * local runtime (the Compose host), without a token file, or when nothing listens on the port; the CLI then opens the DB.
+ * The admin API when it answers, with the token `serve` wrote to its runtime dir (`adminRuntimeDir`), on either runtime.
+ * Null without a token file (serve never started here) or when nothing listens on the port; the CLI then opens the DB.
  * An API that answers but refuses the token is an error, not a fallback.
  */
 export const connectAdmin = async (
   ctx: Pick<CliContext, "fetchImpl">,
-  config: Pick<StewardConfig, "runtime">,
+  config: Pick<StewardConfig, "runtime" | "dataDir">,
   opts: { port?: number } = {},
 ): Promise<AdminClient | null> => {
-  const runtime = kubernetesRuntime(config);
-  if (runtime === null) return null;
-  const tokenFile = join(runtime.runtimeDir, ADMIN_TOKEN_FILE);
+  const tokenFile = join(adminRuntimeDir(config), ADMIN_TOKEN_FILE);
   let token: string;
   try {
     token = (await readFile(tokenFile, "utf8")).trim();

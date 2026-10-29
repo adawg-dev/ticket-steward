@@ -249,8 +249,11 @@ whole workspace can read. Posting is rate limited per session (`linear.activityI
 behind, transient actions are dropped first and the final response never is.
 
 **Settings.** Behaviour that may change while the steward runs lives in the dispatcher's DB, seeded from the config:
-`steward settings get [key]`, `steward settings set <key> <value>` (through serve's admin API; every change is
-audited). The Linear ones are `linear.reviewStateName`, `linear.moveToStarted`, `linear.reviveByMention` and
+`steward settings get [key]`, `steward settings set <key> <value>` (through serve's admin API when it answers, else
+straight in the DB; every change is audited). `serve` serves its admin API on `127.0.0.1:3022` on either runtime,
+with a token it writes at each start to its runtime dir (`<dataDir>/run/admin.token` on the local runtime), so run
+these commands beside it: `docker compose exec steward steward settings get` on Compose, `kubectl exec` on k3s.
+The Linear ones are `linear.reviewStateName`, `linear.moveToStarted`, `linear.reviveByMention` and
 `linear.activityIntervalMs`.
 
 **Moving from the label trigger.** A config that still has `tracker.labels` fails to load with "tracker.labels:
@@ -352,7 +355,7 @@ a push failure is `publish_failed`.
 
 **`steward implement KEY --dry-run`.** Prints the implement prompt a run on the ticket would
 get, from the ticket as `serve`'s admin API reads it (the CLI never holds a Linear token, so this
-needs the Kubernetes runtime's admin API) and the mirror's current base. Nothing runs and nothing
+runs beside `serve`, on either runtime) and the mirror's current base. Nothing runs and nothing
 is written. Without `--dry-run` it refuses: assigning the steward in Linear is the only way to
 start work.
 

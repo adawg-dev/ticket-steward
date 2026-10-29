@@ -69,7 +69,7 @@ export const adminTracker = (client: Pick<AdminClient, "ticketBundle">): Pick<Tr
   readDescription: async (issueId) => (await client.ticketBundle(issueId)).description,
 });
 
-export const NO_ADMIN_API = "the CLI reaches Linear only through steward serve's admin API, which only the kubernetes runtime serves and which does not answer here";
+export const NO_ADMIN_API = "the CLI reaches Linear only through steward serve's admin API, which does not answer here; run the command beside steward serve (in its container or pod)";
 
 /** A CLI command's tracker: reads through the admin API, connected on first use; it holds no token and writes nothing. */
 const cliTracker = (loaded: LoadedConfig, ctx: CliContext): Tracker => {
