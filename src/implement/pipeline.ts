@@ -228,7 +228,10 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
   }
   // A rerun after the agent pushed (the attempt was interrupted later) never runs the brain again over its own branch.
   const own = ctx.dryRun ? null : ownBranch(deps.stores.jobs.get(ctx.jobId), existing);
-  if (own !== null) return { outcome: await finish(ctx, deps, { result: null, handback: handback("readyForHuman", "an earlier attempt stopped after the agent pushed", own) }) };
+  if (own !== null) {
+    parkLoopFor(ctx, deps, paths, baseSha);
+    return { outcome: await finish(ctx, deps, { result: null, handback: handback("readyForHuman", "an earlier attempt stopped after the agent pushed", own) }) };
+  }
   if (existing[0] !== undefined) {
     return { outcome: await finish(ctx, deps, { result: null, handback: handback("readyForHuman", `a branch for ${ctx.identifier} already exists`, shortRef(existing[0].ref)) }) };
   }
@@ -291,7 +294,11 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
     parkLoopFor(ctx, deps, paths, baseSha);
     return { status: "failed", error: STOPPED_JOB_ERROR, retryable: false };
   }
-  if (!report.ok) return { status: "failed", error: report.error ?? "brain run failed", retryable: report.interrupted };
+  if (!report.ok) {
+    // A retry settles a pushed branch itself (the earlier-attempt hand-back); a final failure parks the loop here.
+    if (!report.interrupted) parkLoopFor(ctx, deps, paths, baseSha);
+    return { status: "failed", error: report.error ?? "brain run failed", retryable: report.interrupted };
+  }
 
   const validated = validateImplementResult(report.output);
   if (!validated.ok) return finish(ctx, deps, { result: null, handback: handback("readyForHuman", "the agent's result was invalid", validated.error) });

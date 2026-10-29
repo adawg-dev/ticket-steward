@@ -771,6 +771,32 @@ describe("the fix loop start", () => {
     expect(awaitJobs()).toEqual([]);
   });
 
+  it("parks a handed-back loop for an implement whose brain failed after it pushed", async () => {
+    const brain = agentBrain(implemented);
+    const failing: AgentBrain = { ...brain, runBrain: async (config: unknown, input: BrainInput) => ({ ...(await brain.runBrain(config, input)), ok: false, error: "brain crashed", output: undefined }) };
+    const ctx = claim();
+
+    expect(await runImplement(ctx, depsFor(failing, withGreptile()))).toMatchObject({ status: "failed", error: "brain crashed", retryable: false });
+
+    expect(stores.loops.forImplementJob(ctx.jobId)).toMatchObject({ state: "handed_back", branch: BRANCH, headSha: stores.jobs.get(ctx.jobId)?.commitSha });
+    expect(awaitJobs()).toEqual([]);
+  });
+
+  it("parks a handed-back loop when a retry finds the earlier attempt's pushed branch", async () => {
+    const ctx = claim();
+    const interrupted = agentBrain(implemented, async (workspace, push) => {
+      await commitAndPush(workspace, push);
+      throw new Error("steward stopped");
+    });
+    await runImplement(ctx, depsFor(interrupted, withGreptile()));
+
+    const outcome = await runImplement({ ...ctx, attempt: 2 }, depsFor(agentBrain(implemented), withGreptile()));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: an earlier attempt stopped after the agent pushed" });
+    expect(stores.loops.forImplementJob(ctx.jobId)?.state).toBe("handed_back");
+    expect(awaitJobs()).toEqual([]);
+  });
+
   it("starts no loop for a cli trigger, which keeps the per-attempt worktree", async () => {
     const brain = sessionBrain();
     const ctx = claim({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
