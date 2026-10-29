@@ -5,7 +5,8 @@ import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
 import type { RunContext } from "../../src/core/types.js";
 import { runAwaitReview } from "../../src/greptile/await.js";
-import { LOOP_MARKER, publishHandback } from "../../src/greptile/publish.js";
+import { LOOP_MARKER, publishHandback, publishPassed } from "../../src/greptile/publish.js";
+import { unassignTicket } from "../../src/linear/assignment.js";
 import type { ImplementResult } from "../../src/implement/result.js";
 import { logger } from "../../src/log.js";
 import { seedSettings } from "../../src/settings/schema.js";
@@ -513,6 +514,48 @@ describe("CI triage", () => {
     expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("succeeded");
     expect(gitlab.retried).toEqual([31]);
     expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("queues no fix when the steward is unassigned while triage reads GitLab: the loop stays parked", async () => {
+    const id = knownMrLoop();
+    red();
+    gitlab.failed = [{ id: 31, name: "unit", stage: "test", webUrl: "u", failureReason: "script_failure" }];
+    const failedJobs = gitlab.failedJobs.bind(gitlab);
+    gitlab.failedJobs = async (...args) => {
+      unassignTicket({ stores }, "issue-1");
+      return failedJobs(...args);
+    };
+
+    expect(await runAwaitReview(claim(id), makeDeps())).toEqual({ status: "succeeded", warning: `loop ${id} is already unassigned` });
+
+    expect(queuedFixes()).toBe(0);
+    expect(loopOf(id)).toMatchObject({ state: "unassigned", botRounds: 0 });
+  });
+
+  it("retries nothing and posts nothing when the steward is unassigned while triage reads GitLab", async () => {
+    const id = knownMrLoop();
+    red();
+    gitlab.failed = [{ id: 31, name: "unit", stage: "test", webUrl: "u", failureReason: "runner_system_failure" }];
+    const failedJobs = gitlab.failedJobs.bind(gitlab);
+    gitlab.failedJobs = async (...args) => {
+      unassignTicket({ stores }, "issue-1");
+      return failedJobs(...args);
+    };
+
+    expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("succeeded");
+
+    expect(gitlab.retried).toEqual([]);
+    expect(loopOf(id).state).toBe("unassigned");
+  });
+
+  it("publishes no pass or hand-back for a loop parked after the round was decided", async () => {
+    const id = knownMrLoop();
+    const decided = loopOf(id);
+    unassignTicket({ stores }, "issue-1");
+    expect(await publishPassed(makeDeps(), decided, null)).toEqual({ status: "succeeded", warning: `loop ${id} is already unassigned` });
+    expect(await publishHandback(makeDeps(), decided, "why")).toMatchObject({ status: "succeeded", warning: `loop ${id} is already unassigned` });
+    expect(gitlab.notes).toEqual([]);
+    expect(loopOf(id).state).toBe("unassigned");
   });
 
   it("runs a round on a real failure, and with ci.triage off retries nothing", async () => {

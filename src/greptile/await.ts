@@ -92,8 +92,10 @@ const retryFailures = async (
     const target = { project: mr.projectId, pipelineId, sha: mr.sha, defaultBranch: mr.targetBranch, branch: loop.branch };
     triage = await triageFailures({ gitlab, orbit, settings, now }, loop, failed, target);
     if (triage.retry.length === 0) return null;
-    // Recorded first, so a retry that fails partway never retries a job past its limit.
-    deps.stores.loops.update(loop.id, { ciRetries: triage.ciRetries, waitStartedAt: now.toISOString() });
+    // Recorded first, so a retry that fails partway never retries a job past its limit; a loop parked meanwhile retries nothing.
+    if (!deps.stores.loops.update(loop.id, { ciRetries: triage.ciRetries, waitStartedAt: now.toISOString() }, ACTIVE_LOOP_STATES)) {
+      return { status: "succeeded", warning: `loop ${loop.id} is already ${reload(deps, loop.id).state}` };
+    }
     for (const job of triage.retry) await gitlab.retryJob(mr.projectId, job.id);
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
@@ -185,12 +187,16 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
       }
       return publishPassed(deps, reload(deps, loopId), decision.summary);
     }
-    case "fix":
-      transaction(stores.db, () => {
-        stores.loops.update(loopId, { state: "fixing", waitStartedAt: null, botRounds: decision.startedBy === "bot" ? loop.botRounds + 1 : 0 });
+    case "fix": {
+      // Only while still running: an unassign while this poll read GitLab parked it, and no fix may follow that.
+      const queued = transaction(stores.db, () => {
+        const patch = { state: "fixing" as const, waitStartedAt: null, botRounds: decision.startedBy === "bot" ? loop.botRounds + 1 : 0 };
+        if (!stores.loops.update(loopId, patch, ACTIVE_LOOP_STATES)) return false;
         stores.jobs.enqueue({ kind: "loop", issueId: loop.issueId, identifier: loop.identifier, teamKey: loop.teamKey, loopId, step: "fix" });
+        return true;
       });
-      return { status: "succeeded" };
+      return queued ? { status: "succeeded" } : { status: "succeeded", warning: `loop ${loopId} is already ${reload(deps, loopId).state}` };
+    }
     case "triage":
       return fail("CI triage did not settle the round");
     case "handback":

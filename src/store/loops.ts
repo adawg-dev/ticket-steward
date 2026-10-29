@@ -317,8 +317,12 @@ export class LoopStore {
     return this.selectStranded.all(...ACTIVE_LOOP_STATES).map((row) => toLoop(row).loop);
   }
 
-  /** Writes the given fields; moving to an ended state also stamps `endedAt` unless the patch sets it. */
-  update(id: number, patch: LoopPatch): void {
+  /**
+   * Writes the given fields; moving to an ended state also stamps `endedAt` unless the patch sets it. With `onlyIn`, only while the loop is in one of those states (checked in the same statement), so a
+   * step that read the loop earlier never overwrites a state another writer set meanwhile (the steward unassigned).
+   * True when a row changed.
+   */
+  update(id: number, patch: LoopPatch, onlyIn?: readonly LoopState[]): boolean {
     const sets: Array<{ column: string; value: SqlValue }> = [];
     for (const key of Object.keys(patch)) {
       if (!isPatchKey(key)) continue;
@@ -329,10 +333,12 @@ export class LoopStore {
     if (patch.state !== undefined && ENDED_STATES.includes(patch.state) && patch.endedAt === undefined) {
       sets.push({ column: "ended_at", value: nowIso() });
     }
-    if (sets.length === 0) return;
-    this.db
-      .prepare<SqlValue[]>(`UPDATE loops SET ${sets.map(({ column }) => `${column} = ?`).join(", ")} WHERE id = ?`)
-      .run(...sets.map(({ value }) => value), id);
+    if (sets.length === 0) return false;
+    const guard = onlyIn === undefined ? "" : ` AND state IN (${onlyIn.map(() => "?").join(", ")})`;
+    const result = this.db
+      .prepare<SqlValue[]>(`UPDATE loops SET ${sets.map(({ column }) => `${column} = ?`).join(", ")} WHERE id = ?${guard}`)
+      .run(...sets.map(({ value }) => value), id, ...(onlyIn ?? []));
+    return result.changes > 0;
   }
 
   /** Loops not ended, or ended within the last `days`: the ones whose worktree and sessions retention keeps. */

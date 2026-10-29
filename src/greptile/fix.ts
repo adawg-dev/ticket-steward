@@ -102,12 +102,14 @@ const round = (fix: Fix, facts: RoundFacts, result: FixResult, outcome: LoopRoun
 const nextRound = (fix: Fix, patch: LoopPatch, finished: LoopRound): JobOutcome => {
   const { stores } = fix.deps;
   const loop = reload(fix);
-  transaction(stores.db, () => {
-    stores.loops.update(loop.id, { ...patch, round: loop.round + 1, waitStartedAt: null, state: "awaiting_review" });
+  const moved = transaction(stores.db, () => {
+    // Only from `fixing`: a loop parked meanwhile (the steward unassigned) waits for its revive instead.
+    if (!stores.loops.update(loop.id, { ...patch, round: loop.round + 1, waitStartedAt: null, state: "awaiting_review" }, ["fixing"])) return false;
     stores.loops.appendRound(loop.id, finished);
     stores.jobs.enqueue({ kind: "loop", issueId: loop.issueId, identifier: loop.identifier, teamKey: loop.teamKey, loopId: loop.id, step: "await" });
+    return true;
   });
-  return { status: "succeeded" };
+  return moved ? { status: "succeeded" } : { status: "succeeded", warning: `loop ${loop.id} is ${reload(fix).state}, not fixing` };
 };
 
 /**
@@ -370,6 +372,9 @@ const runRound = async (fix: Fix, observed: Observed, panel: { session: LinearSe
   const prepared = await prepareFix(fix, observed);
   if ("outcome" in prepared) return prepared.outcome;
   const { ctx, deps } = fix;
+  // Read again after preparing read GitLab: a loop parked meanwhile (the steward unassigned) runs no agent.
+  const current = reload(fix);
+  if (current.state !== "fixing") return { status: "succeeded", warning: `loop ${current.id} is ${current.state}, not fixing` };
   panel.session = linearSessionFor(deps, ctx.issueId, { workspacePath: prepared.spec.worktreePath });
   let executed: { report: RunReport; work: WorkReport };
   try {

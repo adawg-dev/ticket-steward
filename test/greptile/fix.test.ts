@@ -862,6 +862,21 @@ describe("runFix through an executor", () => {
     expect(gitlab.replies).toEqual([]);
   });
 
+  it("runs no agent when the steward is unassigned while the round is prepared", async () => {
+    const id = createLoop();
+    const currentUser = gitlab.currentUser.bind(gitlab);
+    gitlab.currentUser = async () => {
+      stores.loops.update(id, { state: "unassigned" });
+      return currentUser();
+    };
+    const brain = new FakeBrain();
+
+    expect(await runFix(claim(id), makeDeps(brain))).toEqual({ status: "succeeded", warning: `loop ${id} is unassigned, not fixing` });
+    expect(brain.runs).toBe(0);
+    expect(loopOf(id).state).toBe("unassigned");
+    expect(gitlab.notes).toEqual([]);
+  });
+
   it("fails retryably and keeps the tail when setup fails, and when the executor cannot start the run", async () => {
     const id = createLoop();
     const setup = executing({ ok: false, error: "setup failed:\npnpm: not found\n", setupFailed: true, sessionId: null, output: null });

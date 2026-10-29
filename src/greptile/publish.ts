@@ -4,7 +4,7 @@ import type { JobOutcome } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
 import { linearSessionFor } from "../linear/session.js";
 import { STOPPED_JOB_ERROR } from "../run/execute.js";
-import type { Loop, LoopPatch } from "../store/loops.js";
+import { ACTIVE_LOOP_STATES, type Loop, type LoopPatch } from "../store/loops.js";
 import type { FixResult } from "./result.js";
 import type { GreptileSummary } from "./summary.js";
 
@@ -37,9 +37,14 @@ type Step = { what: string; run: () => Promise<void> };
 
 /**
  * Runs each publish step; the loop state is written only once every step succeeded, so a retry publishes again. Then
- * the ticket's agent session hears `panel`, if any (best effort: a failed post is logged, never retried).
+ * the ticket's agent session hears `panel`, if any (best effort: a failed post is logged, never retried). Only a running
+ * loop is published for.
  */
 const publish = async (deps: PipelineDeps, loop: Loop, steps: Step[], patch: LoopPatch, done: JobOutcome, panel: string | null = null): Promise<JobOutcome> => {
+  // A loop parked (the steward unassigned) or ended since its step read it is left as it is, and nothing is posted.
+  const parked = (): JobOutcome => ({ status: "succeeded", warning: `loop ${loop.id} is already ${deps.stores.loops.get(loop.id)?.state ?? "gone"}` });
+  const current = deps.stores.loops.get(loop.id);
+  if (current === null || !ACTIVE_LOOP_STATES.includes(current.state)) return parked();
   for (const step of steps) {
     try {
       await step.run();
@@ -47,7 +52,7 @@ const publish = async (deps: PipelineDeps, loop: Loop, steps: Step[], patch: Loo
       return { status: "publish_failed", error: `${step.what}: ${errorMessage(err)}` };
     }
   }
-  deps.stores.loops.update(loop.id, patch);
+  if (!deps.stores.loops.update(loop.id, patch, ACTIVE_LOOP_STATES)) return parked();
   if (panel !== null) await linearSessionFor(deps, loop.issueId).finish({ type: "response", body: panel });
   return done;
 };
