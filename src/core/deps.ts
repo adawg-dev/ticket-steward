@@ -2,6 +2,7 @@ import type { runBrainDetached } from "../brain/index.js";
 import type { Brain } from "../brain/types.js";
 import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { CodeHost } from "../codehost/types.js";
+import type { OrbitQuery } from "../orbit/query.js";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
 import type { Settings } from "../settings/schema.js";
@@ -44,4 +45,6 @@ export interface PipelineDeps {
   linear?: LinearAgentApi;
   /** The runtime settings, read on each use; absent, their defaults apply. */
   settings?: { get(): Settings };
+  /** The dispatcher's remote Orbit query for CI triage, probed on first use; absent or null, triage goes on without it. */
+  orbit?: () => Promise<OrbitQuery | null>;
 }

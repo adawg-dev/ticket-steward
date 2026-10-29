@@ -19,7 +19,7 @@ const loop = (over: Partial<Loop> = {}): Loop => ({
   id: 1, issueId: "i", identifier: "API-1", teamKey: "API", implementJobId: 1, branch: "api-1-fix", baseSha: "a".repeat(40),
   headSha: SHA, worktreeName: "w", labelDriven: false, projectId: 42, mrIid: 7, mrUrl: null, sessionId: null, round: 1,
   state: "awaiting_review", history: [], decisions: [], waitStartedAt: minutesAgo(1), reviewCountAtTrigger: null, adoptedFrom: null,
-  pendingPush: null, handedBackAt: null, pendingNotesSince: null, botRounds: 0, endedAt: null, createdAt: minutesAgo(100), ...over,
+  pendingPush: null, handedBackAt: null, pendingNotesSince: null, botRounds: 0, ciRetries: {}, endedAt: null, createdAt: minutesAgo(100), ...over,
 });
 const summary = (over: Partial<GreptileSummary> = {}): GreptileSummary => ({
   body: "", score: 5, reviewCount: 2, lastReviewedSha: SHA.slice(0, 7), updatedAt: minutesAgo(1), source: "note", ...over,
@@ -30,7 +30,7 @@ const personItem = item({ discussionId: "d2", author: "ada", isBot: false, body:
 const baseInput = (over: Partial<RoundInput> = {}): RoundInput => ({
   loop: loop(), config, settings: DEFAULT_SETTINGS, now: NOW, ticketClosed: false,
   mr: fakeMergeRequest({ sha: SHA, headPipeline: { id: 9, sha: SHA, status: "success" } }),
-  greptile: summary(), workList: [], startedBy: "bot", greptileStatus: null, ...over,
+  greptile: summary(), workList: [], startedBy: "bot", greptileStatus: null, ciTriaged: true, ...over,
 });
 const withPipeline = (status: string, sha = SHA) => fakeMergeRequest({ sha: SHA, headPipeline: { id: 9, sha, status } });
 
@@ -126,6 +126,18 @@ describe("evaluateRound", () => {
     expect(d).toEqual({ kind: "handback", reason: "stopped after 5 rounds started by bots; a person's comment starts another" });
     const red = evaluateRound(baseInput({ mr: withPipeline("failed"), loop: loop({ botRounds: 5 }) }));
     expect(red).toMatchObject({ kind: "handback" });
+  });
+  it("asks for CI triage of a red head pipeline first, even at the bot-round cap, and only once triaged goes on", () => {
+    const red = { mr: withPipeline("failed"), ciTriaged: false };
+    expect(evaluateRound(baseInput(red))).toEqual({ kind: "triage", pipelineId: 9 });
+    expect(evaluateRound(baseInput({ ...red, loop: loop({ botRounds: 5 }) }))).toEqual({ kind: "triage", pipelineId: 9 });
+    expect(evaluateRound(baseInput({ ...red, workList: [personItem], startedBy: "person" }))).toEqual({ kind: "triage", pipelineId: 9 });
+    expect(evaluateRound(baseInput({ ...red, ciTriaged: true }))).toMatchObject({ kind: "fix", pipelineFailed: true });
+  });
+  it("skips CI triage with ci.triage off, and on a green pipeline", () => {
+    const settings = { ...DEFAULT_SETTINGS, "ci.triage": false };
+    expect(evaluateRound(baseInput({ settings, mr: withPipeline("failed"), ciTriaged: false }))).toMatchObject({ kind: "fix", pipelineFailed: true });
+    expect(evaluateRound(baseInput({ ciTriaged: false }))).toMatchObject({ kind: "passed" });
   });
   it("gives a person-started round a fix past the bot-round cap", () => {
     const d = evaluateRound(baseInput({ greptile: summary({ score: 3 }), workList: [personItem], startedBy: "person", loop: loop({ botRounds: 5, round: 12 }) }));

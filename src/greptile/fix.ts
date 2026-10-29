@@ -18,12 +18,13 @@ import { seedSettings } from "../settings/schema.js";
 import type { RunReport, RunSpec, WorkReport } from "../run/protocol.js";
 import { transaction, type Loop, type LoopPatch, type LoopRound } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
-import { collectCiFailures, type CiFailure } from "./ci.js";
+import { ciFailuresOf, type CiFailure } from "./ci.js";
 import { workList, type WorkItem } from "./evaluate.js";
 import { renderFixPrompt } from "./prompt.js";
 import { publishHandback, publishRoundMedia, publishStop, publishThreads } from "./publish.js";
 import { validateFixResult, type FixResult, type StoredFix } from "./result.js";
 import { findSummary } from "./summary.js";
+import { triageFailures } from "./triage.js";
 
 const SESSION_LOST = "the agent's session could not be resumed";
 /** The SDK's errors for a session it cannot load or resume. */
@@ -218,7 +219,8 @@ interface PreparedRound {
 const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound | { outcome: JobOutcome }> => {
   const { ctx, deps, gitlab, greptile, settings, loop, paths } = fix;
   const { mr, discussions } = observed;
-  const greptileOn = (deps.settings?.get() ?? seedSettings(deps.config))["greptile.enabled"];
+  const runtime = deps.settings?.get() ?? seedSettings(deps.config);
+  const greptileOn = runtime["greptile.enabled"];
   const summary = greptileOn ? findSummary(mr, discussions, greptile.botUsername) : null;
   if (greptileOn && summary === null) return { outcome: await publishHandback(deps, loop, `Greptile has no summary for ${mr.sha.slice(0, 7)}`) };
   const pipeline = mr.headPipeline !== null && mr.headPipeline.sha === mr.sha ? mr.headPipeline : null;
@@ -226,9 +228,18 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
   if (loop.sessionId === null) return { outcome: await decide(fix, handingBack(facts, null, SESSION_LOST, "the loop has no stored session"), mr) };
 
   let ciFailures: CiFailure[] = [];
+  let ciTriage: string[] = [];
   let work: WorkItem[];
   try {
-    if (pipeline?.status === "failed") ciFailures = await collectCiFailures(gitlab, mr.projectId, pipeline.id, greptile.ciLogLines, deps.redactor);
+    if (pipeline?.status === "failed") {
+      const failed = await gitlab.failedJobs(mr.projectId, pipeline.id);
+      ciFailures = await ciFailuresOf(gitlab, mr.projectId, failed, greptile.ciLogLines, deps.redactor);
+      // The await already retried what it could; triage again for what it found, retrying nothing here.
+      const orbit = (await deps.orbit?.()) ?? null;
+      const target = { project: mr.projectId, pipelineId: pipeline.id, sha: mr.sha, defaultBranch: mr.targetBranch, branch: loop.branch };
+      const triage = await triageFailures({ gitlab, orbit, settings: runtime, now: deps.now() }, loop, failed, target);
+      ciTriage = triage.real.length > 0 ? triage.notes : [];
+    }
     work = workList(discussions, (await gitlab.currentUser()).username, [greptile.botUsername]);
     await deps.mirror.fetch();
   } catch (err) {
@@ -246,6 +257,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
       summary: summary?.body ?? null,
       comments: work,
       ciFailures,
+      ciTriage,
       // The executor lists the commits in place of the marker, from the worktree it builds.
       personCommits: commits === null ? [] : [PERSON_COMMITS_MARKER],
       decisions: loop.decisions,

@@ -13,7 +13,7 @@ const implementVars: ImplementPromptVars = {
   branchTypes: "feature, fix, chore, refactor", hasChecks: false, checks: "", reply: "",
 };
 const fixInput: FixPromptInput = {
-  identifier: "ENG-1", round: 2, score: 3, summary: "Confidence Score: 3/5", comments: [], ciFailures: [], personCommits: [],
+  identifier: "ENG-1", round: 2, score: 3, summary: "Confidence Score: 3/5", comments: [], ciFailures: [], ciTriage: [], personCommits: [],
   decisions: [], workspacePath: "/ws", headSha: "deadbeef", stewardPort: 4321, artifactsDir: "/art", checks: "", hasChecks: false,
 };
 const chatInput: ChatPromptInput = {

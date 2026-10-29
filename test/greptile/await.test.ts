@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
@@ -7,6 +7,7 @@ import type { RunContext } from "../../src/core/types.js";
 import { runAwaitReview } from "../../src/greptile/await.js";
 import { LOOP_MARKER, publishHandback } from "../../src/greptile/publish.js";
 import type { ImplementResult } from "../../src/implement/result.js";
+import { logger } from "../../src/log.js";
 import { seedSettings } from "../../src/settings/schema.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
 import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
@@ -440,5 +441,91 @@ describe("the ticket's workflow state", () => {
 
     expect(linear.calls.filter((call) => call.kind === "state")).toEqual([]);
     expect(linear.activities().map((call) => call.content)).toEqual([{ type: "response", body: "I handed the merge request back to a person: the agent could not finish." }]);
+  });
+});
+
+describe("CI triage", () => {
+  const red = (): void => {
+    gitlab.mr = fakeMergeRequest({ sha: SHA, description: summaryBody(5), headPipeline: { id: 9, sha: SHA, status: "failed" } });
+  };
+  const queuedFixes = (): number => stores.db.prepare<[], { n: number }>("SELECT count(*) AS n FROM jobs WHERE kind = 'fix'").get()?.n ?? 0;
+
+  it("retries an infrastructure failure instead of a round: no fix, no bot round, a note on the MR and a thought in the panel", async () => {
+    const linear = new RecordingLinear();
+    stores.agentSessions.record("lin-1", "issue-1", "API-1");
+    const id = knownMrLoop();
+    stores.loops.update(id, { botRounds: 2, waitStartedAt: new Date(NOW.getTime() - 50 * 60_000).toISOString() });
+    red();
+    gitlab.failed = [{ id: 31, name: "unit", stage: "test", webUrl: "https://gitlab.example/acme/repo/-/jobs/31", failureReason: "runner_system_failure" }];
+
+    const outcome = await runAwaitReview(claim(id), { ...makeDeps(), linear });
+
+    expect(outcome).toEqual({ status: "deferred", until: new Date(NOW.getTime() + 60_000) });
+    expect(gitlab.retried).toEqual([31]);
+    expect(queuedFixes()).toBe(0);
+    expect(loopOf(id)).toMatchObject({
+      state: "awaiting_review", botRounds: 2, waitStartedAt: NOW.toISOString(), ciRetries: { unit: { sha: SHA, infra: 1, flaky: 0 } },
+    });
+    expect(gitlab.notes.filter((note) => note.includes("Retried"))).toEqual([expect.stringContaining("Retried unit (infrastructure failure: runner_system_failure)")]);
+    expect(linear.activities().map((call) => call.content)).toEqual([{ type: "thought", body: "Retried unit (infrastructure failure: runner_system_failure)" }]);
+  });
+
+  it("retries a flaky-looking failure even at the bot-round cap, then hands back once it fails again on the same commit", async () => {
+    const id = knownMrLoop();
+    stores.loops.update(id, { botRounds: 5 });
+    red();
+    gitlab.failed = [{ id: 31, name: "unit", stage: "test", webUrl: "u", failureReason: "script_failure" }];
+    gitlab.testReports.set(9, [{ suite: "unit", name: "adapter flushes", status: "failed" }]);
+    gitlab.pipelines.set("main", [{ id: 70, sha: "d", status: "failed" }]);
+    gitlab.testReports.set(70, [{ suite: "unit", name: "adapter flushes", status: "failed" }]);
+
+    expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("deferred");
+    expect(gitlab.retried).toEqual([31]);
+    expect(gitlab.notes.at(-1)).toContain('Retried unit (looked flaky: test "adapter flushes" also failed on main in pipeline #70)');
+
+    gitlab.failed = [{ id: 32, name: "unit", stage: "test", webUrl: "u", failureReason: "script_failure" }];
+    expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("succeeded");
+    expect(gitlab.retried).toEqual([31]);
+    expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("runs a round on a real failure, and with ci.triage off retries nothing", async () => {
+    const id = knownMrLoop();
+    red();
+    gitlab.failed = [{ id: 31, name: "unit", stage: "test", webUrl: "u", failureReason: "runner_system_failure" }];
+    const settings = { ...seedSettings(makeConfig()), "ci.triage": false };
+
+    expect(await runAwaitReview(claim(id), { ...makeDeps(), settings: { get: () => settings } })).toEqual({ status: "succeeded" });
+    expect(gitlab.retried).toEqual([]);
+    expect(loopOf(id)).toMatchObject({ state: "fixing", botRounds: 1 });
+  });
+
+  it("asks Orbit for flaky signals when it answers", async () => {
+    const id = knownMrLoop();
+    red();
+    gitlab.failed = [{ id: 31, name: "e2e", stage: "test", webUrl: "u", failureReason: "script_failure" }];
+    const queries: string[] = [];
+    const orbit = async () => async (cypher: string) => {
+      queries.push(cypher);
+      return { result: { rows: [{ n: 2 }] } };
+    };
+
+    expect((await runAwaitReview(claim(id), { ...makeDeps(), orbit })).status).toBe("deferred");
+    expect(queries).toHaveLength(1);
+    expect(gitlab.notes.at(-1)).toContain("Retried e2e (looked flaky: it failed 2 times on main in the last 14 days)");
+  });
+
+  it("keeps the retry when the MR note about it fails", async () => {
+    vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const id = knownMrLoop();
+    red();
+    gitlab.failed = [{ id: 31, name: "unit", stage: "test", webUrl: "u", failureReason: "api_failure" }];
+    await runAwaitReview(claim(id), makeDeps());
+    gitlab.failNextNote();
+    gitlab.failed = [{ id: 32, name: "unit", stage: "test", webUrl: "u", failureReason: "api_failure" }];
+
+    expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("deferred");
+    expect(gitlab.retried).toEqual([31, 32]);
+    expect(loopOf(id).ciRetries).toEqual({ unit: { sha: SHA, infra: 2, flaky: 0 } });
   });
 });

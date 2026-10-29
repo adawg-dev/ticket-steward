@@ -13,6 +13,8 @@ export { openDatabase } from "./db.js";
 export { INLINE_SLOT, JobStore, loopSubject, RETIRED_KIND_ERROR, unreadableOutcome, type Job, type JobKind, type JobStatus, type StoredJobKind } from "./jobs.js";
 export {
   ACTIVE_LOOP_STATES,
+  type CiRetries,
+  type CiRetry,
   LoopStore,
   type Loop,
   type LoopPatch,

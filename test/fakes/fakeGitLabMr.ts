@@ -1,4 +1,4 @@
-import type { FailedJob, GitLabMrApi, MergeRequestInfo, MrDiscussion } from "../../src/codehost/gitlabMr.js";
+import type { FailedJob, GitLabMrApi, MergeRequestInfo, MrDiscussion, PipelineRef, TestCase } from "../../src/codehost/gitlabMr.js";
 
 export const BOT = "steward-bot";
 
@@ -25,6 +25,13 @@ export class FakeGitLabMr implements GitLabMrApi {
   discussions: MrDiscussion[] = [];
   /** Failed jobs failedJobs answers, whatever the pipeline. */
   failed: FailedJob[] = [];
+  /** Job ids retryJob was called with, in order. */
+  readonly retried: number[] = [];
+  /** Test reports by pipeline id; a pipeline without one answers 404, as GitLab does. */
+  testReports = new Map<number, TestCase[]>();
+  /** What recentPipelines answers, by ref; the since time is recorded, not applied. */
+  pipelines = new Map<string, PipelineRef[]>();
+  readonly pipelineQueries: Array<{ ref: string; sinceIso: string }> = [];
   /** Job traces by job id; jobTraceTail returns the last lines of one. */
   traces = new Map<number, string>();
   /** Usernames userExists answers true for. */
@@ -126,6 +133,21 @@ export class FakeGitLabMr implements GitLabMrApi {
 
   async failedJobs(): Promise<FailedJob[]> {
     return structuredClone(this.failed);
+  }
+
+  async retryJob(_project: number | string, jobId: number): Promise<void> {
+    this.retried.push(jobId);
+  }
+
+  async testReport(_project: number | string, pipelineId: number): Promise<TestCase[]> {
+    const report = this.testReports.get(pipelineId);
+    if (report === undefined) throw new Error(`GitLab GET test_report answered 404`);
+    return structuredClone(report);
+  }
+
+  async recentPipelines(_project: number | string, ref: string, sinceIso: string): Promise<PipelineRef[]> {
+    this.pipelineQueries.push({ ref, sinceIso });
+    return structuredClone(this.pipelines.get(ref) ?? []);
   }
 
   async jobTraceTail(_project: number | string, jobId: number, lines: number): Promise<string> {

@@ -12,6 +12,7 @@ const input: FixPromptInput = {
     { discussionId: "disc-def", author: "Sam", isBot: false, body: "also handle empty", position: null },
   ],
   ciFailures: [{ name: "unit-tests", stage: "test", webUrl: "https://gl/1", logTail: "AssertionError: boom" }],
+  ciTriage: ["unit-tests failed again after a retry on this commit; treat it as a real failure"],
   personCommits: ["abc123 tweak copy"], decisions: ["Keep the v1 endpoint"],
   workspacePath: "/ws", headSha: "deadbeef", stewardPort: 4321, artifactsDir: "/art", checks: "- `pnpm lint`", hasChecks: true,
 };
@@ -28,6 +29,7 @@ describe("renderFixPrompt", () => {
     expect(out).toContain("Never resolve a thread");
     expect(out).toContain("unit-tests");
     expect(out).toContain("AssertionError: boom");
+    expect(out).toContain("## CI triage\n\nBefore this round the steward looked at the failed jobs:\n\n- unit-tests failed again after a retry on this commit; treat it as a real failure\n");
     expect(out).toContain("<b>raw</b>");
     expect(out).toContain("abc123 tweak copy");
     expect(out).toContain("4321");
@@ -44,8 +46,9 @@ describe("renderFixPrompt", () => {
     expect(out).not.toContain("Never run `git commit`");
   });
   it("omits optional sections when empty, Greptile's summary included when it is off", async () => {
-    const out = renderFixPrompt(await readFile("prompts/fix.md", "utf8"), { ...input, score: null, summary: null, comments: [], ciFailures: [], personCommits: [], decisions: [], hasChecks: false });
+    const out = renderFixPrompt(await readFile("prompts/fix.md", "utf8"), { ...input, score: null, summary: null, comments: [], ciFailures: [], ciTriage: [], personCommits: [], decisions: [], hasChecks: false });
     expect(out).not.toContain("tweak copy");
+    expect(out).not.toContain("CI triage");
     expect(out).not.toContain("Decisions a person made");
     expect(out).not.toContain("also handle empty");
     expect(out).not.toContain("pnpm lint");

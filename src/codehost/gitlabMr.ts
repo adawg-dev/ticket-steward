@@ -15,7 +15,10 @@ export interface MrNote {
   type: string | null; createdAt: string; updatedAt: string; position: NotePosition | null;
 }
 export interface MrDiscussion { id: string; notes: MrNote[] }
-export interface FailedJob { id: number; name: string; stage: string; webUrl: string }
+/** `failureReason` is GitLab's `failure_reason` (`script_failure`, `runner_system_failure`, ...); null when it gives none. */
+export interface FailedJob { id: number; name: string; stage: string; webUrl: string; failureReason: string | null }
+/** One test case of a pipeline's test report; `suite` is the job that ran it, `name` the class name and test name. */
+export interface TestCase { suite: string; name: string; status: string }
 export interface GitLabMrApi {
   currentUser(): Promise<{ username: string }>;
   tokenScopes(): Promise<string[]>;
@@ -30,6 +33,12 @@ export interface GitLabMrApi {
   resolveDiscussion(project: ProjectRef, iid: number, discussionId: string): Promise<void>;
   /** Failed jobs of the pipeline and of every downstream pipeline reached through its bridges (depth <= 3). */
   failedJobs(project: ProjectRef, pipelineId: number): Promise<FailedJob[]>;
+  /** Retries the job: a new job takes its place in its pipeline, which runs again. */
+  retryJob(project: ProjectRef, jobId: number): Promise<void>;
+  /** Every test case in the pipeline's test report; empty when the pipeline has no report. */
+  testReport(project: ProjectRef, pipelineId: number): Promise<TestCase[]>;
+  /** The newest pipelines (up to 100) on `ref` updated since `sinceIso`, newest first. */
+  recentPipelines(project: ProjectRef, ref: string, sinceIso: string): Promise<PipelineRef[]>;
   /** The last `lines` lines of the job's trace. */
   jobTraceTail(project: ProjectRef, jobId: number, lines: number): Promise<string>;
   /** Uploads a file to the project (`POST /projects/:id/uploads`); its Markdown embeds it in any note on the project. */
@@ -77,7 +86,13 @@ const NoteSchema = z.object({
     .nullish(),
 });
 const DiscussionSchema = z.object({ id: z.string(), notes: z.array(NoteSchema) });
-const JobSchema = z.object({ id: z.number(), name: z.string(), stage: z.string(), web_url: z.string() });
+const JobSchema = z.object({ id: z.number(), name: z.string(), stage: z.string(), web_url: z.string(), failure_reason: z.string().nullish() });
+const TestReportSchema = z.object({
+  test_suites: z.array(
+    z.object({ name: z.string(), test_cases: z.array(z.object({ name: z.string(), classname: z.string().nullish(), status: z.string() })) }),
+  ),
+});
+const PipelineSchema = z.object({ id: z.number(), sha: z.string(), status: z.string() });
 const BridgeSchema = z.object({ downstream_pipeline: z.object({ id: z.number() }).nullish() });
 const UserSchema = z.object({ username: z.string() });
 const TokenSchema = z.object({ scopes: z.array(z.string()) });
@@ -200,6 +215,27 @@ export class GitLabMrClient implements GitLabMrApi {
     return this.failedJobsAt(project, pipelineId, 0);
   }
 
+  async retryJob(project: ProjectRef, jobId: number): Promise<void> {
+    await this.request("POST", `${this.projectPath(project)}/jobs/${jobId}/retry`);
+  }
+
+  async testReport(project: ProjectRef, pipelineId: number): Promise<TestCase[]> {
+    const report = TestReportSchema.parse(await (await this.request("GET", `${this.projectPath(project)}/pipelines/${pipelineId}/test_report`)).json());
+    return report.test_suites.flatMap((suite) =>
+      suite.test_cases.map((test) => ({
+        suite: suite.name,
+        name: test.classname === null || test.classname === undefined || test.classname === "" ? test.name : `${test.classname} ${test.name}`,
+        status: test.status,
+      })),
+    );
+  }
+
+  async recentPipelines(project: ProjectRef, ref: string, sinceIso: string): Promise<PipelineRef[]> {
+    const query = `ref=${encodeURIComponent(ref)}&updated_after=${encodeURIComponent(sinceIso)}&order_by=id&sort=desc&per_page=${PER_PAGE}`;
+    const pipelines = z.array(PipelineSchema).parse(await (await this.request("GET", `${this.projectPath(project)}/pipelines?${query}`)).json());
+    return pipelines.map((pipeline) => ({ id: pipeline.id, sha: pipeline.sha, status: pipeline.status }));
+  }
+
   async jobTraceTail(project: ProjectRef, jobId: number, lines: number): Promise<string> {
     const trace = await (await this.request("GET", `${this.projectPath(project)}/jobs/${jobId}/trace`)).text();
     return trace.replace(/\n+$/, "").split("\n").slice(-lines).join("\n");
@@ -213,7 +249,9 @@ export class GitLabMrClient implements GitLabMrApi {
 
   private async failedJobsAt(project: ProjectRef, pipelineId: number, depth: number): Promise<FailedJob[]> {
     const base = `${this.projectPath(project)}/pipelines/${pipelineId}`;
-    const jobs = (await this.paged(`${base}/jobs?scope[]=failed`, JobSchema)).map((job) => ({ id: job.id, name: job.name, stage: job.stage, webUrl: job.web_url }));
+    const jobs = (await this.paged(`${base}/jobs?scope[]=failed`, JobSchema)).map((job) => ({
+      id: job.id, name: job.name, stage: job.stage, webUrl: job.web_url, failureReason: job.failure_reason ?? null,
+    }));
     if (depth >= MAX_DOWNSTREAM_DEPTH) return jobs;
     const bridges = await this.paged(`${base}/bridges`, BridgeSchema);
     for (const bridge of bridges) {

@@ -357,7 +357,7 @@ describe("runFix", () => {
 
   it("gives the agent the failed CI jobs and their log tails", async () => {
     gitlab.mr.headPipeline = { id: 9, sha: headSha, status: "failed" };
-    gitlab.failed = [{ id: 31, name: "unit-tests", stage: "test", webUrl: "https://gitlab.example/acme/repo/-/jobs/31" }];
+    gitlab.failed = [{ id: 31, name: "unit-tests", stage: "test", webUrl: "https://gitlab.example/acme/repo/-/jobs/31", failureReason: "script_failure" }];
     gitlab.traces.set(31, "setup\nFAIL adapter.test.ts > keeps the last chunk\n");
     const id = createLoop();
     const brain = editing({ result: changed(finding) });
@@ -367,6 +367,20 @@ describe("runFix", () => {
     expect(brain.lastInput().prompt).toContain("unit-tests");
     expect(brain.lastInput().prompt).toContain("FAIL adapter.test.ts > keeps the last chunk");
     expect(loopOf(id).history[0]?.pipeline).toBe("failed");
+  });
+
+  it("tells the agent what CI triage found about the failed jobs", async () => {
+    gitlab.mr.headPipeline = { id: 9, sha: headSha, status: "failed" };
+    gitlab.failed = [{ id: 31, name: "unit-tests", stage: "test", webUrl: "https://gitlab.example/acme/repo/-/jobs/31", failureReason: "script_failure" }];
+    const id = createLoop();
+    stores.loops.update(id, { ciRetries: { "unit-tests": { sha: headSha, infra: 0, flaky: 1 } } });
+    const brain = editing({ result: changed(finding) });
+
+    await runFix(claim(id), makeDeps(brain));
+
+    expect(brain.lastInput().prompt).toContain("## CI triage");
+    expect(brain.lastInput().prompt).toContain("- unit-tests failed again after a retry on this commit; treat it as a real failure");
+    expect(gitlab.retried).toEqual([]);
   });
 
   it("gives the agent every unanswered comment, people's and bots', and none resolved, answered, system or the steward's", async () => {

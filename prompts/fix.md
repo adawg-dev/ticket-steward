@@ -54,6 +54,16 @@ Nothing is waiting for an answer in a thread. Work from the CI failures{{#hasSum
 
 {{/ciFailures}}
 {{/hasCiFailures}}
+{{#hasCiTriage}}
+## CI triage
+
+Before this round the steward looked at the failed jobs:
+
+{{#ciTriage}}
+- {{.}}
+{{/ciTriage}}
+
+{{/hasCiTriage}}
 {{#hasPersonCommits}}
 ## Commits a person added since the last round
 

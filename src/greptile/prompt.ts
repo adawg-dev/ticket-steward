@@ -12,6 +12,8 @@ export interface FixPromptInput {
   /** The round's work list: every discussion waiting for an answer. */
   comments: WorkItem[];
   ciFailures: CiFailure[];
+  /** What CI triage found about the failed jobs, one line each. */
+  ciTriage: string[];
   /** The person's commits on the branch since the last round, one line each. */
   personCommits: string[];
   /** The loop's decisions: lasting instructions people gave about the MR, never to be undone. */
@@ -47,6 +49,7 @@ export const renderFixPrompt = (template: string, input: FixPromptInput, repo = 
       hasComments: input.comments.length > 0,
       hasSummary: input.summary !== null,
       hasCiFailures: input.ciFailures.length > 0,
+      hasCiTriage: input.ciTriage.length > 0,
       hasPersonCommits: input.personCommits.length > 0,
       hasDecisions: input.decisions.length > 0,
     },

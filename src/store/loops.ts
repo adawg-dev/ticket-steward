@@ -20,6 +20,10 @@ export interface LoopRound {
   outcome: "changed" | "no_changes" | "passed" | "handed_back";
 }
 
+/** CI triage's retries of one job (by name) on one commit: infrastructure failures and flaky-looking ones apart. */
+export interface CiRetry { sha: string; infra: number; flaky: number }
+export type CiRetries = Record<string, CiRetry>;
+
 /** One ticket's fix loop, from the implement push to its end. `headSha` is the last SHA the steward pushed. */
 export interface Loop {
   id: number;
@@ -52,6 +56,8 @@ export interface Loop {
   pendingNotesSince: string | null;
   /** Rounds in a row that only bot notes or a red pipeline started; capped by `greptile.maxRounds`, reset by a person's round. */
   botRounds: number;
+  /** CI triage's retries by job name, for the commit each was last retried on; another commit starts the job's count again. */
+  ciRetries: CiRetries;
   endedAt: string | null;
   createdAt: string;
 }
@@ -83,7 +89,9 @@ const DecisionsSchema = z.array(z.string());
 
 const PendingPushSchema = z.object({ sha: z.string(), pushed: z.boolean() });
 
-type LoopJsonColumn = "history" | "decisions" | "pending_push";
+const CiRetriesSchema = z.record(z.string(), z.object({ sha: z.string(), infra: z.number().int(), flaky: z.number().int() }));
+
+type LoopJsonColumn = "history" | "decisions" | "pending_push" | "ci_retries";
 
 interface LoopRow {
   id: number;
@@ -111,13 +119,14 @@ interface LoopRow {
   handed_back_at: string | null;
   pending_notes_since: string | null;
   bot_rounds: number;
+  ci_retries: string;
   ended_at: string | null;
   created_at: string;
 }
 
 /**
- * The loop, plus the JSON columns that could not be read: an unreadable history reads as empty and an unreadable pending
- * push as null. An unknown state reads as `stopped`, so the loop is never driven from a row it does not understand.
+ * The loop, plus the JSON columns that could not be read: an unreadable history (or CI retry record) reads as empty and an
+ * unreadable pending push as null. An unknown state reads as `stopped`, so the loop is never driven from a row it does not understand.
  */
 const toLoop = (row: LoopRow): { loop: Loop; unreadable: LoopJsonColumn[] } => {
   const unreadable: LoopJsonColumn[] = [];
@@ -148,6 +157,7 @@ const toLoop = (row: LoopRow): { loop: Loop; unreadable: LoopJsonColumn[] } => {
     handedBackAt: row.handed_back_at,
     pendingNotesSince: row.pending_notes_since,
     botRounds: row.bot_rounds,
+    ciRetries: readStored(row.ci_retries, "ci_retries", CiRetriesSchema, unreadable) ?? {},
     endedAt: row.ended_at,
     createdAt: row.created_at,
   };
@@ -178,6 +188,7 @@ const PATCH_COLUMNS: { [K in keyof Required<LoopPatch>]: { column: string; store
   handedBackAt: { column: "handed_back_at", store: (value) => value },
   pendingNotesSince: { column: "pending_notes_since", store: (value) => value },
   botRounds: { column: "bot_rounds", store: (value) => value },
+  ciRetries: { column: "ci_retries", store: (value) => JSON.stringify(value) },
   endedAt: { column: "ended_at", store: (value) => value },
 };
 

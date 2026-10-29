@@ -84,7 +84,7 @@ describe("GitLabMrClient", () => {
   });
 
   it("collects failed jobs of the pipeline and its downstream pipelines, parent first", async () => {
-    const job = (id: number, name: string) => ({ id, name, stage: "test", web_url: `https://g/jobs/${id}` });
+    const job = (id: number, name: string) => ({ id, name, stage: "test", web_url: `https://g/jobs/${id}`, failure_reason: id === 1 ? "runner_system_failure" : undefined });
     const { calls, fetchImpl } = recorder([
       reply(200, [job(1, "unit")]),
       reply(200, [{ id: 50, downstream_pipeline: { id: 2 } }, { id: 51, downstream_pipeline: null }]),
@@ -93,8 +93,8 @@ describe("GitLabMrClient", () => {
     ]);
     const jobs = await client(fetchImpl).failedJobs(42, 1);
     expect(jobs).toEqual([
-      { id: 1, name: "unit", stage: "test", webUrl: "https://g/jobs/1" },
-      { id: 2, name: "e2e", stage: "test", webUrl: "https://g/jobs/2" },
+      { id: 1, name: "unit", stage: "test", webUrl: "https://g/jobs/1", failureReason: "runner_system_failure" },
+      { id: 2, name: "e2e", stage: "test", webUrl: "https://g/jobs/2", failureReason: null },
     ]);
     const urls = calls.map((c) => c.url);
     expect(urls[0]).toContain("/projects/42/pipelines/1/jobs?scope[]=failed");
@@ -176,5 +176,41 @@ describe("GitLabMrClient", () => {
 
     expect(uploaded).toEqual({ markdown: "![after](/uploads/abc/after.png)" });
     expect(seen).toEqual([{ url: "https://g/api/v4/projects/acme%2Frepo/uploads", method: "POST", contentType: null, file: { name: "after.png", bytes: 3 } }]);
+  });
+
+  it("retries a job", async () => {
+    const { calls, fetchImpl } = recorder([reply(201, { id: 6 })]);
+    await client(fetchImpl).retryJob(42, 5);
+    expect(calls[0]).toMatchObject({ url: "https://g/api/v4/projects/42/jobs/5/retry", method: "POST" });
+  });
+
+  it("flattens a pipeline's test report into suite, test and status, the class name before the test's", async () => {
+    const { calls, fetchImpl } = recorder([
+      reply(200, {
+        total_count: 3,
+        test_suites: [
+          { name: "unit", test_cases: [{ name: "flushes", classname: "adapter", status: "failed" }, { name: "opens", classname: null, status: "success" }] },
+          { name: "e2e", test_cases: [{ name: "logs in", status: "error" }] },
+        ],
+      }),
+    ]);
+    expect(await client(fetchImpl).testReport(42, 9)).toEqual([
+      { suite: "unit", name: "adapter flushes", status: "failed" },
+      { suite: "unit", name: "opens", status: "success" },
+      { suite: "e2e", name: "logs in", status: "error" },
+    ]);
+    expect(calls[0]?.url).toBe("https://g/api/v4/projects/42/pipelines/9/test_report");
+  });
+
+  it("lists a ref's pipelines updated since a time, newest first, one page", async () => {
+    const { calls, fetchImpl } = recorder([reply(200, [{ id: 12, sha: "a", status: "failed", ref: "main" }, { id: 11, sha: "b", status: "success" }], { "x-next-page": "2" })]);
+    expect(await client(fetchImpl).recentPipelines(42, "main", "2026-10-15T12:00:00.000Z")).toEqual([
+      { id: 12, sha: "a", status: "failed" },
+      { id: 11, sha: "b", status: "success" },
+    ]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe(
+      "https://g/api/v4/projects/42/pipelines?ref=main&updated_after=2026-10-15T12%3A00%3A00.000Z&order_by=id&sort=desc&per_page=100",
+    );
   });
 });

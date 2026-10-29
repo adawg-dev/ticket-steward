@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS loops (
   handed_back_at TEXT,
   pending_notes_since TEXT,
   bot_rounds INTEGER NOT NULL DEFAULT 0,
+  ci_retries TEXT NOT NULL DEFAULT '{}',
   ended_at TEXT,
   created_at TEXT NOT NULL
 );
@@ -169,6 +170,7 @@ const ADDED_COLUMNS: Array<{ table: string; column: string; definition: string }
   { table: "loops", column: "decisions", definition: "TEXT NOT NULL DEFAULT '[]'" },
   { table: "loops", column: "pending_notes_since", definition: "TEXT" },
   { table: "loops", column: "bot_rounds", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "loops", column: "ci_retries", definition: "TEXT NOT NULL DEFAULT '{}'" },
 ];
 
 /** Indexes on added columns; created after addMissingColumns so older databases have the columns first. */

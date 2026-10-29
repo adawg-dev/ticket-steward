@@ -14,6 +14,9 @@ import { interactiveChatSpec } from "../chat/run.js";
 import { kubernetesChat, type KubernetesChat } from "../k8s/chat.js";
 import { clusterApis } from "../k8s/cluster.js";
 import { kubernetesExecutor, type KubernetesExecutor } from "../k8s/executor.js";
+import { lazyOrbitQuery } from "../orbit/query.js";
+import { execOrbit } from "../orbit/run.js";
+import { orbitRemote } from "../orbit/server.js";
 import { openStores, type Stores } from "../store/index.js";
 import { createLinearToken, createLinearTracker, type LinearToken } from "../tracker/linear/index.js";
 import type { Tracker } from "../tracker/types.js";
@@ -110,6 +113,10 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
   const injectedBrain = ctx.factories?.brain;
   const codehost = ctx.factories?.codehost ?? createCodeHost(config.codehost, secrets);
   const gitlab = ctx.factories?.gitlab ?? createGitLabMr(config, secrets);
+  // CI triage's Orbit, probed on the first red pipeline: it runs in the data dir, with GITLAB_TOKEN in Orbit's env only.
+  const orbit = lazyOrbitQuery(
+    orbitRemote({ exec: ctx.factories?.orbitExec ?? execOrbit, dataDir: config.dataDir, worktreePath: config.dataDir, codehost: config.codehost, secrets }),
+  );
   const channels = new RunChannels();
   const deps: PipelineDeps = {
     config,
@@ -119,7 +126,7 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
     tracker,
     brain: injectedBrain ?? createBrain(config.brain),
     codehost,
-    ...(gitlab === undefined ? {} : { gitlab }),
+    ...(gitlab === undefined ? {} : { gitlab, orbit }),
     mirror: openMirror(loaded),
     stores,
     redactor: await buildRedactor(loaded),

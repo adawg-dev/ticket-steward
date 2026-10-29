@@ -23,6 +23,8 @@ export type RoundDecision =
   | { kind: "wait"; waitingFor: "mr" | "review" | "pipeline"; deadline: Date | null }
   /** `summary`: Greptile's review of the head; null when Greptile is off. */
   | { kind: "passed"; summary: GreptileSummary | null }
+  /** The head pipeline is red and not yet triaged: its failed jobs may be retried before a round counts. */
+  | { kind: "triage"; pipelineId: number }
   | { kind: "fix"; workList: WorkItem[]; startedBy: StartedBy; pipelineFailed: boolean }
   | { kind: "handback"; reason: string }
   | { kind: "stop"; reason: string; note: boolean };
@@ -40,6 +42,8 @@ export interface RoundInput {
   startedBy: StartedBy;
   /** Only known with the Greptile MCP. */
   greptileStatus: GreptileStatus | null;
+  /** Whether CI triage already looked at this poll's red pipeline and retried nothing. */
+  ciTriaged: boolean;
 }
 
 /** Every steward note carries a hidden `ticket-steward:` marker (loop notes, chat replies). */
@@ -81,8 +85,9 @@ const DEAD_PIPELINE = new Set(["canceled", "skipped", "manual"]);
 
 /**
  * Decide what the review loop does next; every timeout counts from `loop.waitStartedAt`. With Greptile on, the head's
- * review is waited for first. Then: Greptile at the pass score on a green head ends a round only bots started; an
- * empty work list on a green head passes; a bot-started round past the bot-round cap hands back; anything else is a fix.
+ * review is waited for first. A red pipeline goes to CI triage first (`ci.triage`). Then: Greptile at the pass score on a
+ * green head ends a round only bots started; an empty work list on a green head passes; a bot-started round past the
+ * bot-round cap hands back; anything else is a fix.
  */
 export const evaluateRound = (input: RoundInput): RoundDecision => {
   const { loop, config, settings, now, mr } = input;
@@ -129,6 +134,7 @@ export const evaluateRound = (input: RoundInput): RoundDecision => {
   if (DEAD_PIPELINE.has(pipeline.status)) {
     return { kind: "handback", reason: `the pipeline for ${short} is ${pipeline.status}` };
   }
+  if (pipeline.status === "failed" && settings["ci.triage"] && !input.ciTriaged) return { kind: "triage", pipelineId: pipeline.id };
   const green = pipeline.status === "success";
   // Greptile edits one summary instead of posting at its pass score, so its score, not silence, ends bots' rounds.
   if (green && summary !== null && summary.score >= settings["greptile.passScore"] && input.startedBy === "bot") {

@@ -3,13 +3,15 @@ import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
+import { logger } from "../log.js";
 import { buildImplementSummary } from "../implement/publish.js";
 import { ACTIVE_LOOP_STATES, transaction, type Loop } from "../store/index.js";
-import { mergeRequestOpened } from "../linear/session.js";
-import { seedSettings } from "../settings/schema.js";
-import { evaluateRound, startedBy, workList } from "./evaluate.js";
+import { linearSessionFor, mergeRequestOpened } from "../linear/session.js";
+import { seedSettings, type Settings } from "../settings/schema.js";
+import { evaluateRound, startedBy, workList, type RoundInput } from "./evaluate.js";
 import { LOOP_MARKER, noteOnce, publishHandback, publishPassed, publishStop } from "./publish.js";
 import { findSummary } from "./summary.js";
+import { triageFailures, type Triage } from "./triage.js";
 
 interface Observed {
   ticketClosed: boolean;
@@ -73,6 +75,47 @@ const nextPoll = (now: Date, pollSeconds: number, deadline: Date | null): Date =
 };
 
 /**
+ * CI triage of the head's red pipeline: when every failed job is an infrastructure failure or looks flaky, they are
+ * retried and the loop waits for the pipeline again (a fresh wait), with no round counted; the MR and the agent panel say
+ * what was retried. Null when nothing was retried, and the round goes on.
+ */
+const retryFailures = async (
+  deps: PipelineDeps, loop: Loop, mr: MergeRequestInfo, pipelineId: number, settings: Settings, now: Date, pollSeconds: number,
+): Promise<JobOutcome | null> => {
+  const gitlab = deps.gitlab;
+  if (gitlab === undefined) throw new Error("no GitLab client");
+  let triage: Triage;
+  try {
+    const failed = await gitlab.failedJobs(mr.projectId, pipelineId);
+    const orbit = (await deps.orbit?.()) ?? null;
+    const target = { project: mr.projectId, pipelineId, sha: mr.sha, defaultBranch: mr.targetBranch, branch: loop.branch };
+    triage = await triageFailures({ gitlab, orbit, settings, now }, loop, failed, target);
+    if (triage.retry.length === 0) return null;
+    // Recorded first, so a retry that fails partway never retries a job past its limit.
+    deps.stores.loops.update(loop.id, { ciRetries: triage.ciRetries, waitStartedAt: now.toISOString() });
+    for (const job of triage.retry) await gitlab.retryJob(mr.projectId, job.id);
+  } catch (err) {
+    return { status: "failed", error: errorMessage(err), retryable: true };
+  }
+  // The jobs are retried: telling the MR and the panel is best effort, since a rerun of this job would find the pipeline running.
+  const { notes, ciRetries } = triage;
+  try {
+    const counts = triage.retry.map((job) => `${job.name}:${ciRetries[job.name]?.infra ?? 0}/${ciRetries[job.name]?.flaky ?? 0}`);
+    await noteOnce(deps, reload(deps, loop.id), LOOP_MARKER(loop.id, `ci-retry head=${mr.sha.slice(0, 7)} ${counts.join(",")}`), notes.join("\n\n"));
+  } catch (err) {
+    logger.warn({ loopId: loop.id, err: errorMessage(err) }, "ci triage: the merge request could not be told about the retries");
+  }
+  try {
+    const panel = linearSessionFor(deps, loop.issueId);
+    for (const note of notes) panel.thought(note);
+    await panel.poster?.flush();
+  } catch (err) {
+    logger.warn({ loopId: loop.id, err: errorMessage(err) }, "ci triage: the agent panel could not be told about the retries");
+  }
+  return { status: "deferred", until: nextPoll(now, pollSeconds, null) };
+};
+
+/**
  * The await-review job: polls the MR, its discussions, its Greptile review (when on) and its pipeline, then waits, passes,
  * queues a fix or ends the loop. A fix round started by bots alone (or a red pipeline) counts toward the bot-round cap; one
  * a person started resets it.
@@ -105,7 +148,7 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   const { mr } = observed;
   const settings = deps.settings?.get() ?? seedSettings(config);
   const work = observed.steward === null ? [] : workList(observed.discussions, observed.steward, [greptile.botUsername]);
-  const decision = evaluateRound({
+  const input: RoundInput = {
     loop,
     config: greptile,
     settings,
@@ -116,7 +159,15 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
     workList: work,
     startedBy: startedBy(work),
     greptileStatus: null,
-  });
+    ciTriaged: false,
+  };
+  let decision = evaluateRound(input);
+  // A red pipeline whose failures were all retried waits for its rerun: no round, and the bot-round cap is not reached.
+  if (decision.kind === "triage" && mr !== null) {
+    const retried = await retryFailures(deps, loop, mr, decision.pipelineId, settings, now, greptile.pollSeconds);
+    if (retried !== null) return retried;
+    decision = evaluateRound({ ...input, ciTriaged: true });
+  }
 
   switch (decision.kind) {
     case "wait":
@@ -139,6 +190,8 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
         stores.jobs.enqueue({ kind: "loop", issueId: loop.issueId, identifier: loop.identifier, teamKey: loop.teamKey, loopId, step: "fix" });
       });
       return { status: "succeeded" };
+    case "triage":
+      return fail("CI triage did not settle the round");
     case "handback":
       return publishHandback(deps, loop, decision.reason);
     case "stop":
