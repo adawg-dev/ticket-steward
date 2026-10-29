@@ -1,7 +1,7 @@
 import type { V1Container, V1Job, V1Volume } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
 import { StewardConfigSchema } from "../../src/config/schema.js";
-import { AWS_AUDIENCE, buildRunJob, CONFIG_BUNDLE_KEY, configUnpackCommand, jobNameOf, MINIO_AUDIENCE, RUN_LABELS } from "../../src/k8s/runJob.js";
+import { AWS_AUDIENCE, buildRunJob, CONFIG_BUNDLE_KEY, configUnpackCommand, jobNameOf, MINIO_AUDIENCE, RUN_LABELS, STEWARD_UID } from "../../src/k8s/runJob.js";
 import type { RunSpec } from "../../src/run/protocol.js";
 import { podSpecFor, RUNTIME, TOKENS } from "./helpers.js";
 
@@ -69,6 +69,13 @@ describe("buildRunJob", () => {
     for (const name of ["sessions-pull", "sessions-sync"]) expect(audienceOf(job, named(job, name))).toEqual([MINIO_AUDIENCE]);
     for (const name of ["config-unpack", "agent", "egress", "postgres", "redis", "rabbitmq"]) expect(audienceOf(job, named(job, name))).toEqual([]);
     expect(named(job, "tools").env?.find((variable) => variable.name === "STEWARD_TOOLS_TOKEN")?.value).toBe(TOKENS.tools);
+  });
+
+  it("runs egress as render-overlay's user, so it can read the 0600 rules file render-overlay writes", () => {
+    const job = build();
+    const renderOverlay = named(job, "render-overlay").securityContext;
+    expect(renderOverlay).toMatchObject({ runAsUser: STEWARD_UID, runAsGroup: STEWARD_UID });
+    expect(named(job, "egress").securityContext).toMatchObject({ runAsUser: renderOverlay?.runAsUser, runAsGroup: renderOverlay?.runAsGroup });
   });
 
   it("keeps stdin and a TTY for the agent of an interactive run only", () => {

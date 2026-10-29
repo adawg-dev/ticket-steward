@@ -23,6 +23,11 @@ const SPEC_DIR = "/run/steward/spec";
 export const SPEC_KEY = "spec.json";
 const GUARD_DIR = "/run/steward/guard";
 const RULES_DIR = "/run/egress-rules";
+/**
+ * The steward image's user. render-overlay writes the rules file mode 0600 as this user, so egress (whose image runs as
+ * mitmproxy, uid 1000) runs as it too to read them; its entrypoint sets mitmproxy's confdir, so it needs no home.
+ */
+export const STEWARD_UID = 1001;
 const EGRESS_CONFDIR = "/run/egress-confdir";
 
 /**
@@ -87,6 +92,7 @@ export const buildRunJob = (spec: RunSpec, p: { runtime: KubernetesRuntime; toke
   const specMount = mount("spec", SPEC_DIR, true);
   const sessionArgs = ["--identifier", spec.identifier, "--worktree", spec.worktreePath, "--bucket", runtime.minio.bucket, "--endpoint", runtime.minio.endpoint];
   const sidecar = (container: V1Container): V1Container => ({ ...container, restartPolicy: "Always" });
+  const asSteward = { runAsUser: STEWARD_UID, runAsGroup: STEWARD_UID };
 
   const init: V1Container[] = [
     {
@@ -108,6 +114,7 @@ export const buildRunJob = (spec: RunSpec, p: { runtime: KubernetesRuntime; toke
       command: steward("render-overlay", "--agent-out", POD_OVERLAY_DIR, "--rules-out", `${RULES_DIR}/rules.json`, "--guard-out", `${GUARD_DIR}/guard.json`),
       env: awsEnv,
       volumeMounts: [awsToken, config, mount("overlay", POD_OVERLAY_DIR), mount("rules", RULES_DIR), mount("guard", GUARD_DIR)],
+      securityContext: asSteward,
     },
     {
       name: "sessions-pull",
@@ -123,6 +130,7 @@ export const buildRunJob = (spec: RunSpec, p: { runtime: KubernetesRuntime; toke
       image: runtime.images.egress,
       env: env({ EGRESS_CONFDIR, EGRESS_CA_OUT: EGRESS_CA_FILE, EGRESS_RULES: `${RULES_DIR}/rules.json` }),
       volumeMounts: [mount("rules", RULES_DIR, true), mount("egress-ca", EGRESS_CA_DIR), mount("egress-confdir", EGRESS_CONFDIR)],
+      securityContext: asSteward,
     }),
     sidecar({ name: "keyproxy", image: runtime.images.steward, command: steward("keyproxy"), env: awsEnv, volumeMounts: [awsToken, config] }),
     sidecar({

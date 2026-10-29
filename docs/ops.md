@@ -805,6 +805,9 @@ docker build -f deploy/images/minio.Dockerfile -t "$REGISTRY/ticket-steward/mini
 
 - The steward image is the Compose image without Chromium, pnpm or psql; it keeps git, `glab` and Orbit for the
   tools sidecar and doctor.
+- Before pushing new steward or egress images, run the smoke test that has them work together as the run pod does
+  (render-overlay writes the egress rules, egress reads them as the Job's user and opens its port):
+  `STEWARD_SMOKE_STEWARD_IMAGE=<steward image> STEWARD_SMOKE_EGRESS_IMAGE=<egress image> npx vitest run test/deploy/imageSmoke.test.ts`.
 - The agent image carries the steward (for `steward run-pod`), Claude Code from the Agent SDK, Node 24, pnpm
   11.13.0, git, psql, Playwright's Chromium, `glab` 1.125.0 and Orbit 0.161.0 with the checksums of `Dockerfile`, and
   a pnpm store prefetched (`pnpm fetch`) from the lockfile and workspace file of kickoff's base branch, taken from
