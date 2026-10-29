@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, readFile, readlink, realpath, utimes, writeFile } from "node:fs/promises";
-import { dirname, join, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { GetObjectCommand, paginateListObjectsV2, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { AssumeRoleWithWebIdentityCommand, STSClient } from "@aws-sdk/client-sts";
@@ -46,7 +46,7 @@ export const sessionFolder = (configDir: string, worktreePath: string): string =
  * service-account token in `tokenFile`, so no access key is stored anywhere. The token is re-read on every call, as
  * the kubelet rotates it. Errors name the file, never the token.
  */
-export const minioCredentials = async (p: { endpoint: string; tokenFile: string; durationSeconds: 3600; roleArn?: string }): Promise<AwsCredentialIdentity> => {
+export const minioCredentials = async (p: { endpoint: string; tokenFile: string; durationSeconds: 3600; roleArn?: string; policy?: string }): Promise<AwsCredentialIdentity> => {
   let token: string;
   try {
     token = (await readFile(p.tokenFile, "utf8")).trim();
@@ -58,7 +58,7 @@ export const minioCredentials = async (p: { endpoint: string; tokenFile: string;
   let credentials;
   try {
     ({ Credentials: credentials } = await sts.send(
-      new AssumeRoleWithWebIdentityCommand({ RoleArn: p.roleArn, RoleSessionName: "steward-sessions", WebIdentityToken: token, DurationSeconds: p.durationSeconds }),
+      new AssumeRoleWithWebIdentityCommand({ RoleArn: p.roleArn, RoleSessionName: "steward-sessions", WebIdentityToken: token, DurationSeconds: p.durationSeconds, Policy: p.policy }),
     ));
   } catch (error) {
     throw new Error(`MinIO STS: AssumeRoleWithWebIdentity at ${p.endpoint} with the token in ${p.tokenFile} failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
@@ -70,6 +70,21 @@ export const minioCredentials = async (p: { endpoint: string; tokenFile: string;
     throw new Error(`MinIO STS: AssumeRoleWithWebIdentity at ${p.endpoint} returned incomplete credentials`);
   }
   return { accessKeyId, secretAccessKey, sessionToken, expiration };
+};
+
+/**
+ * The inline session policy a run's sessions containers sign in with: MinIO intersects it with the role's policy, so
+ * their credentials reach `sessions/<identifier>/` only, not every ticket's transcripts.
+ */
+export const sessionPolicy = (bucket: string, identifier: string): string => {
+  const prefix = sessionObjectPrefix(identifier);
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      { Effect: "Allow", Action: ["s3:GetObject", "s3:PutObject"], Resource: [`arn:aws:s3:::${bucket}/${prefix}*`] },
+      { Effect: "Allow", Action: ["s3:ListBucket"], Resource: [`arn:aws:s3:::${bucket}`], Condition: { StringLike: { "s3:prefix": [`${prefix}*`] } } },
+    ],
+  });
 };
 
 /**
@@ -137,10 +152,17 @@ export const s3ObjectStore = (p: { endpoint: string; bucket: string; credentials
   };
 };
 
+/**
+ * Whether a relative `/`-separated name could leave the session folder or is not a transcript: an empty, `.` or `..`
+ * segment, a backslash, or a segment starting with `..`, which no session file has and the kubelet's projected-volume
+ * layout (`..data`, `..<timestamp>`) does.
+ */
+const unsafeName = (name: string): boolean => name.split("/").some((part) => part === "" || part === "." || part.startsWith("..")) || name.includes("\\");
+
 /** The local path, relative and `/`-separated, an object under `prefix` goes to; refuses one that would leave the folder. */
 const relativeName = (prefix: string, key: string): string => {
   const name = key.slice(prefix.length);
-  if (!key.startsWith(prefix) || name.split("/").some((part) => part === "" || part === "." || part === "..") || name.includes("\\")) {
+  if (!key.startsWith(prefix) || unsafeName(name)) {
     throw new Error(`refusing object ${JSON.stringify(key)}: its name leaves the session folder`);
   }
   return name;
@@ -191,22 +213,43 @@ const localFiles = async (root: string): Promise<Map<string, Stamp>> => {
 };
 
 /**
- * A session file's bytes, or null when it is no longer a regular file inside `root`. The agent writes in this folder
- * and this container holds the MinIO token, so a symlink (or a parent directory swapped for one) must not get some
- * other file uploaded: the final component is opened without following links, and on Linux the opened file's real
- * path must still lie under `root`'s.
+ * Whether every component of `path` below `top` is a real directory: "missing" when one does not exist yet, "link"
+ * when one is a symlink or not a directory.
  */
-const readInside = async (root: string, name: string): Promise<Buffer | null> => {
+const realDirsBelow = async (top: string, path: string): Promise<"ok" | "missing" | "link"> => {
+  let current = top;
+  for (const part of relative(top, path).split(sep)) {
+    current = join(current, part);
+    let stats;
+    try {
+      stats = await lstat(current);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return "missing";
+      throw error;
+    }
+    if (stats.isSymbolicLink() || !stats.isDirectory()) return "link";
+  }
+  return "ok";
+};
+
+/**
+ * A session file's bytes, or null when it is no longer a regular file inside `folder`. The agent writes in this folder
+ * and this container holds the MinIO token, so a symlink (or a parent directory swapped for one, even after the push
+ * checked them) must not get some other file uploaded: the final component is opened without following links, and the
+ * opened file's real path, from /proc, must lie under `folder` as computed from the config dir, never a path resolved
+ * through the agent's folder. Without /proc nothing is read.
+ */
+const readInside = async (folder: string, name: string): Promise<Buffer | null> => {
   let handle;
   try {
-    handle = await open(join(root, ...name.split("/")), constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(join(folder, ...name.split("/")), constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if (error instanceof Error && "code" in error && (error.code === "ELOOP" || error.code === "ENOENT")) return null;
     throw error;
   }
   try {
     const opened = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
-    if (opened !== null && !opened.startsWith(`${await realpath(root)}${sep}`)) return null;
+    if (opened === null || !opened.startsWith(`${folder}${sep}`)) return null;
     if (!(await handle.stat()).isFile()) return null;
     return await handle.readFile();
   } finally {
@@ -219,14 +262,21 @@ export interface PushResult {
   unchanged: number;
 }
 
-/** Uploads a ticket's session folder, sending only files whose size or mtime changed since it last sent them. */
+/**
+ * Uploads a ticket's session folder (`sessionFolder(configDir, worktree)`), sending only files whose size or mtime
+ * changed since it last sent them. `configDir` is the sessions volume's mount point, which the agent cannot replace;
+ * every directory below it down to the folder must be a real one, so the agent cannot point the folder at the
+ * container's token.
+ */
 export class SessionPusher {
   readonly prefix: string;
+  readonly folder: string;
   private readonly sent = new Map<string, Stamp>();
   private seeded = false;
 
-  constructor(private readonly p: { store: ObjectStore; identifier: string; folder: string }) {
+  constructor(private readonly p: { store: ObjectStore; identifier: string; configDir: string; worktree: string }) {
     this.prefix = sessionObjectPrefix(p.identifier);
+    this.folder = sessionFolder(p.configDir, p.worktree);
   }
 
   /**
@@ -245,14 +295,26 @@ export class SessionPusher {
     if (!this.seeded) await this.seed();
     let pushed = 0;
     let unchanged = 0;
-    for (const [name, stamp] of await localFiles(this.p.folder)) {
+    let top: string;
+    try {
+      top = await realpath(this.p.configDir);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return { pushed, unchanged };
+      throw error;
+    }
+    const folder = join(top, relative(this.p.configDir, this.folder));
+    const dirs = await realDirsBelow(top, folder);
+    if (dirs === "missing") return { pushed, unchanged };
+    if (dirs === "link") throw new Error(`the session folder ${this.folder} is not a real directory under ${this.p.configDir}; nothing pushed`);
+    for (const [name, stamp] of await localFiles(folder)) {
+      if (unsafeName(name)) continue;
       const sent = this.sent.get(name);
       if (sent !== undefined && sameStamp(sent, stamp)) {
         unchanged += 1;
         continue;
       }
       // The stamp is from before the read: a file still growing differs next time and is sent again.
-      const body = await readInside(this.p.folder, name);
+      const body = await readInside(folder, name);
       if (body === null) continue;
       await this.p.store.put(`${this.prefix}${name}`, body);
       this.sent.set(name, stamp);

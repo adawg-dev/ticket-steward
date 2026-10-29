@@ -7,6 +7,7 @@ import {
   SESSIONS_BUCKET,
   SESSIONS_CONFIG_DIR,
   sessionFolder,
+  sessionPolicy,
   SessionPusher,
   syncSession,
   SYNC_INTERVAL_SECONDS,
@@ -37,17 +38,17 @@ const withSessionOptions = (command: Command): Command =>
     .option("--token-file <path>", "the projected service-account token (audience minio)", MINIO_TOKEN_FILE)
     .option("--role-arn <arn>", "the role to assume, when MinIO's OpenID provider is configured with a role policy");
 
-/** The bucket through MinIO STS with the pod's token, or the test's fake. */
+/** The bucket through MinIO STS with the pod's token, its credentials limited to this ticket's prefix, or the test's fake. */
 const objectStore = (ctx: CliContext, opts: SessionOptions): ObjectStore =>
   ctx.factories?.objectStore ??
   s3ObjectStore({
     endpoint: opts.endpoint,
     bucket: opts.bucket,
-    credentials: () => minioCredentials({ endpoint: opts.endpoint, tokenFile: opts.tokenFile, durationSeconds: 3600, ...(opts.roleArn === undefined ? {} : { roleArn: opts.roleArn }) }),
+    credentials: () => minioCredentials({ endpoint: opts.endpoint, tokenFile: opts.tokenFile, durationSeconds: 3600, policy: sessionPolicy(opts.bucket, opts.identifier), ...(opts.roleArn === undefined ? {} : { roleArn: opts.roleArn }) }),
   });
 
 const pusherFor = (ctx: CliContext, opts: SessionOptions): SessionPusher =>
-  new SessionPusher({ store: objectStore(ctx, opts), identifier: opts.identifier, folder: sessionFolder(opts.configDir, opts.worktree) });
+  new SessionPusher({ store: objectStore(ctx, opts), identifier: opts.identifier, configDir: opts.configDir, worktree: opts.worktree });
 
 const describePush = (opts: SessionOptions, pusher: SessionPusher, result: PushResult): string =>
   `pushed ${plural(result.pushed, "file")} to s3://${opts.bucket}/${pusher.prefix}, ${result.unchanged} unchanged`;

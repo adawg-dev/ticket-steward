@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildProgram } from "../../src/cli/program.js";
-import { minioCredentials, pullSession, s3ObjectStore, sessionFolder, sessionObjectPrefix, SessionPusher, syncSession, type ObjectStore, type PushResult } from "../../src/sessions/store.js";
+import { minioCredentials, pullSession, s3ObjectStore, sessionFolder, sessionObjectPrefix, sessionPolicy, SessionPusher, syncSession, type ObjectStore, type PushResult } from "../../src/sessions/store.js";
 import { ExitSignal, makeContext } from "../cli/helpers.js";
 import { FAKE_ACCESS_KEY, MemoryObjectStore, startFakeMinio, type FakeMinio } from "../fakes/fakeMinio.js";
 
@@ -98,7 +98,7 @@ describe("steward sessions pull and push", () => {
     const folder = sessionFolder(dir, WORKTREE);
     await writeIn(join(folder, "s1.jsonl"), "one\n");
     await writeIn(join(folder, "s2.jsonl"), "two\n");
-    const pusher = new SessionPusher({ store, identifier: "ENG-7", folder });
+    const pusher = new SessionPusher({ store, identifier: "ENG-7", configDir: dir, worktree: WORKTREE });
 
     expect(await pusher.push()).toEqual({ pushed: 2, unchanged: 0 });
     expect(await pusher.push()).toEqual({ pushed: 0, unchanged: 2 });
@@ -133,9 +133,57 @@ describe("steward sessions pull and push", () => {
     await symlink(join(dir, "secrets", "minio", "token"), join(folder, "token.jsonl"));
     await symlink(join(dir, "secrets"), join(folder, "linked"));
 
-    expect(await new SessionPusher({ store, identifier: "ENG-7", folder }).push()).toEqual({ pushed: 1, unchanged: 0 });
+    expect(await new SessionPusher({ store, identifier: "ENG-7", configDir: join(dir, "sessions"), worktree: WORKTREE }).push()).toEqual({ pushed: 1, unchanged: 0 });
 
     expect([...store.objects.keys()]).toEqual(["sessions/ENG-7/s1.jsonl"]);
+  });
+
+  /** The kubelet's layout of a projected token volume: `token` -> `..data/token`, `..data` -> `..<timestamp>`. */
+  const projectedTokenDir = async (): Promise<string> => {
+    const tokenDir = join(dir, "secrets", "minio");
+    await writeIn(join(tokenDir, "..2026_10_29_10_00_00.123456789", "token"), "the sync container's token\n");
+    await symlink("..2026_10_29_10_00_00.123456789", join(tokenDir, "..data"));
+    await symlink(join("..data", "token"), join(tokenDir, "token"));
+    return tokenDir;
+  };
+
+  it.each([
+    ["the session folder", (configDir: string) => sessionFolder(configDir, WORKTREE)],
+    ["its projects dir", (configDir: string) => join(configDir, "projects")],
+  ])("uploads nothing when %s is a symlink to the token's projected volume", async (_what, linked) => {
+    const store = new MemoryObjectStore();
+    const configDir = join(dir, "sessions");
+    const tokenDir = await projectedTokenDir();
+    await mkdir(dirname(linked(configDir)), { recursive: true });
+    await symlink(tokenDir, linked(configDir));
+
+    await expect(new SessionPusher({ store, identifier: "ENG-7", configDir, worktree: WORKTREE }).push()).rejects.toThrow(
+      `the session folder ${sessionFolder(configDir, WORKTREE)} is not a real directory under ${configDir}; nothing pushed`,
+    );
+
+    expect(store.puts).toEqual([]);
+  });
+
+  it("skips a name with a segment starting with '..', as the kubelet's token layout has", async () => {
+    const store = new MemoryObjectStore();
+    const configDir = join(dir, "sessions");
+    const folder = sessionFolder(configDir, WORKTREE);
+    await writeIn(join(folder, "s1.jsonl"), "one\n");
+    await writeIn(join(folder, "..2026_10_29", "token"), "copied\n");
+
+    expect(await new SessionPusher({ store, identifier: "ENG-7", configDir, worktree: WORKTREE }).push()).toEqual({ pushed: 1, unchanged: 0 });
+
+    expect([...store.objects.keys()]).toEqual(["sessions/ENG-7/s1.jsonl"]);
+  });
+
+  it("refuses to pull an object with a segment starting with '..'", async () => {
+    const store = new MemoryObjectStore();
+    await store.put("sessions/ENG-7/..2026_10_29/token", new TextEncoder().encode("x\n"));
+
+    await expect(pullSession({ store, identifier: "ENG-7", folder: sessionFolder(join(dir, "sessions"), WORKTREE) })).rejects.toThrow(
+      'refusing object "sessions/ENG-7/..2026_10_29/token": its name leaves the session folder',
+    );
+    expect(await listTree(dir)).toEqual([]);
   });
 
   it("refuses an object whose key leaves the ticket's folder and writes nothing", async () => {
@@ -186,7 +234,7 @@ describe("syncSession", () => {
       controller.abort();
     };
 
-    const done = syncSession({ pusher: new SessionPusher({ store: flaky, identifier: "ENG-7", folder }), intervalMs: 5, signal: controller.signal, onPush, onError: (err) => errors.push(err.message) });
+    const done = syncSession({ pusher: new SessionPusher({ store: flaky, identifier: "ENG-7", configDir: dir, worktree: WORKTREE }), intervalMs: 5, signal: controller.signal, onPush, onError: (err) => errors.push(err.message) });
 
     expect(await done).toEqual({ pushed: 1, unchanged: 0 });
     expect(store.text("sessions/ENG-7/s1.jsonl")).toBe("one\ntwo\n");
@@ -209,6 +257,19 @@ describe("sessions against MinIO", () => {
     expect(credentials.expiration?.getTime()).toBeGreaterThan(Date.now() + 3500_000);
     expect(fake().stsCalls).toEqual([expect.objectContaining({ Action: "AssumeRoleWithWebIdentity", WebIdentityToken: TOKEN, DurationSeconds: "3600" })]);
     expect(fake().stsCalls[0]).not.toHaveProperty("RoleArn");
+  });
+
+  it("limits the credentials to the ticket's prefix with an inline session policy", async () => {
+    await minioCredentials({ endpoint: fake().endpoint, tokenFile: tokenFile(), durationSeconds: 3600, policy: sessionPolicy("steward-sessions", "ENG-7") });
+
+    expect(JSON.parse(fake().stsCalls[0]?.Policy ?? "null")).toEqual({
+      Version: "2012-10-17",
+      Statement: [
+        { Effect: "Allow", Action: ["s3:GetObject", "s3:PutObject"], Resource: ["arn:aws:s3:::steward-sessions/sessions/ENG-7/*"] },
+        { Effect: "Allow", Action: ["s3:ListBucket"], Resource: ["arn:aws:s3:::steward-sessions"], Condition: { StringLike: { "s3:prefix": ["sessions/ENG-7/*"] } } },
+      ],
+    });
+    expect(() => sessionPolicy("steward-sessions", "../*")).toThrow("not a ticket identifier");
   });
 
   it("names the token file, never the token, when sign-in fails", async () => {
