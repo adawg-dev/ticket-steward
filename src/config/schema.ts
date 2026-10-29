@@ -125,7 +125,7 @@ const Quantity = z.string().regex(/^[0-9]+(\.[0-9]+)?(m|k|Ki|M|Mi|G|Gi|T|Ti)?$/)
 
 /**
  * Where runs execute: in the steward's own process on this host (`local`), or each run as a Kubernetes Job whose agent
- * container holds no credential (`kubernetes`; the claude-code brain only, `slots` and `resourceGuard` do not apply).
+ * container holds no credential (`kubernetes`; the claude-code brain and `secrets.source` "aws" only, `slots` and `resourceGuard` do not apply).
  */
 const RuntimeSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("local") }),
