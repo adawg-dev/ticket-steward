@@ -407,6 +407,17 @@ export const podChannel = (p: {
   const timer = setInterval(() => void flush(), p.flushMs ?? EVENTS_FLUSH_MS);
   timer.unref();
 
+  /** Tells the dispatcher the brain ended, so it refuses steers nobody would read. Best effort: a failure is logged. */
+  const endSteering = async (): Promise<void> => {
+    try {
+      const response = await p.fetchImpl(`${base}/steer/end`, { method: "POST", headers, redirect: "error", signal: AbortSignal.timeout(EVENTS_REQUEST_TIMEOUT_MS) });
+      await response.body?.cancel();
+      if (!response.ok) p.warn(`the steward answered ${response.status} to the end of steering`);
+    } catch (err) {
+      p.warn(`the end of steering was not delivered: ${errorMessage(err)}`);
+    }
+  };
+
   const poll = async (apply: (commands: RunCommand[]) => void): Promise<void> => {
     const waitMs = p.steerWaitMs ?? MAX_STEER_WAIT_MS;
     let delay = backoff.first;
@@ -460,6 +471,8 @@ export const podChannel = (p: {
     close: async () => {
       closed.abort();
       clearInterval(timer);
+      // First, so a steer sent while the last lines go out is refused (the person's message falls back to a chat).
+      await endSteering();
       const deadline = Date.now() + EVENTS_FINAL_FLUSH_MS;
       while (pending.length > 0 && !eventsRefused && Date.now() < deadline) {
         await sending;

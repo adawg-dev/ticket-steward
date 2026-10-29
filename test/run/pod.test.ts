@@ -469,7 +469,8 @@ describe("podChannel", () => {
     channel.onLine("three");
     await channel.close();
 
-    const delivered = callback.received.filter((r) => callback.received.indexOf(r) >= 2).flatMap((r) => (JSON.parse(r.body) as { lines: string[] }).lines);
+    const events = callback.received.filter((r) => r.path.endsWith("/events"));
+    const delivered = events.filter((r) => events.indexOf(r) >= 2).flatMap((r) => (JSON.parse(r.body) as { lines: string[] }).lines);
     expect(delivered).toEqual(["one", "two", "three"]);
     expect(warnings.some((warning) => warning.includes("503"))).toBe(true);
   });
@@ -482,15 +483,19 @@ describe("podChannel", () => {
     for (let i = 0; i < 450; i += 1) channel.onLine(`line ${i}`);
     await channel.close();
 
-    expect(callback.received.map((r) => (JSON.parse(r.body) as { lines: string[] }).lines.length)).toEqual([200, 200, 50]);
+    const events = callback.received.filter((r) => r.path.endsWith("/events"));
+    expect(events.map((r) => (JSON.parse(r.body) as { lines: string[] }).lines.length)).toEqual([200, 200, 50]);
   });
 
   it("stops polling a steering the dispatcher refuses (401), and polls again after a 503", async () => {
     const steered: string[] = [];
     const handlers = { steer: (message: string) => void steered.push(message), stop: () => undefined };
     let calls = 0;
-    const fetchImpl: typeof fetch = () => {
+    const urls: string[] = [];
+    const fetchImpl: typeof fetch = (input) => {
       calls += 1;
+      urls.push(String(input));
+      if (urls.at(-1)?.endsWith("/steer/end") === true) return Promise.resolve(Response.json({ ok: true }));
       if (calls === 1) return Promise.resolve(new Response("{}", { status: 503 }));
       if (calls === 2) return Promise.resolve(Response.json({ commands: [{ type: "steer", message: "use v2" }] }));
       return Promise.resolve(new Response("{}", { status: 401 }));
@@ -504,6 +509,18 @@ describe("podChannel", () => {
     await channel.close();
 
     expect(steered).toEqual(["use v2"]);
-    expect(calls).toBe(3);
+    expect(urls.filter((url) => url.includes("/steer?"))).toHaveLength(3);
+  });
+
+  it("tells the dispatcher, on close, that the brain ended, before its last lines go out", async () => {
+    const callback = await recorder(() => ({ ok: true }));
+    servers.push(callback.server);
+    const channel = podChannel({ callbackUrl: callback.url, token: RUNNER_TOKEN, runId: "7-1", fetchImpl: fetch, warn: () => undefined, ...quick, flushMs: 60_000 });
+
+    channel.onLine("last");
+    await channel.close();
+
+    expect(callback.received.map((r) => `${r.method} ${r.path}`)).toEqual(["POST /internal/runs/7-1/steer/end", "POST /internal/runs/7-1/events"]);
+    expect(callback.received[0]?.authorization).toBe(`Bearer ${RUNNER_TOKEN}`);
   });
 });

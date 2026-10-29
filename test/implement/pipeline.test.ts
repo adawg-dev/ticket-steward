@@ -395,6 +395,25 @@ describe("runImplement", () => {
     expect(channels.active(issue.id)).toBeNull();
   });
 
+  it("refuses a steer once the local run's brain has ended, while the job still finishes", async () => {
+    const channels = new RunChannels();
+    const refused: boolean[] = [];
+    // The worktree read after the brain is the window: the brain's result is in, the job is not finished.
+    const brain = agentBrain(implemented);
+    const runBrain: PipelineDeps["runBrain"] = async (config, input) => {
+      const run = await brain.runBrain(config, input);
+      setImmediate(() => {
+        const runId = channels.active(issue.id);
+        if (runId !== null) refused.push(channels.steer(runId, "too late"));
+      });
+      return run;
+    };
+    const deps: PipelineDeps = { ...depsFor(brain), runBrain, channels };
+
+    expect(await runImplement(claim(), { ...deps, executor: localExecutor(deps) })).toEqual({ status: "succeeded" });
+    expect(refused).toEqual([false]);
+  });
+
   it("hands back to needs-info without touching git", async () => {
     const ctx = claim();
     const outcome = await runImplement(ctx, depsFor(agentBrain({ ...implemented, outcome: "needs_info", questions: ["Which stream?"] }, async () => undefined)));

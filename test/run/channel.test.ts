@@ -38,6 +38,23 @@ describe("RunChannels", () => {
     expect(await channels.next("7-1", 60_000)).toEqual([]);
   });
 
+  it("refuses steers and stops once the brain ended, but still passes the run's last lines", async () => {
+    const channels = new RunChannels();
+    const lines: string[] = [];
+    channels.open("7-1", (line) => lines.push(line), "issue-1");
+    const waiting = channels.next("7-1", 60_000);
+
+    channels.endSteering("7-1");
+
+    expect(await waiting).toEqual([]);
+    expect(channels.steer("7-1", "too late")).toBe(false);
+    expect(channels.stop("7-1")).toBe(false);
+    expect(await channels.next("7-1", 10)).toEqual([]);
+    channels.line("7-1", "last line");
+    expect(lines).toEqual(["last line"]);
+    expect(channels.active("issue-1")).toBe("7-1");
+  });
+
   it("keeps the commands for the next poll when the waiting poller left", async () => {
     const channels = new RunChannels();
     channels.open("7-1", () => undefined);

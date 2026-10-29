@@ -111,6 +111,9 @@ export const localExecutor = (deps: PipelineDeps): RunExecutor => ({
         ...(deps.runBrain === undefined ? {} : { runBrain: deps.runBrain }),
       });
       ok = report.ok;
+      // The brain has ended: a steer from now on would reach nothing, so callers fall back instead.
+      steering?.end();
+      channels?.endSteering(spec.runId);
       return { report, work: await workOf(runDeps, spec, worktree) };
     } finally {
       steering?.end();

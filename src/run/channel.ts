@@ -11,6 +11,8 @@ interface Channel {
   issueId: string | null;
   onLine: (line: string) => void;
   queue: RunCommand[];
+  /** False once the brain ended: its lines may still arrive, but no steer or stop can reach it any more. */
+  steerable: boolean;
   /** The one `next` waiting for a command; a newer `next` answers it empty. */
   waiter: { resolve: (commands: RunCommand[]) => void; timer: NodeJS.Timeout } | null;
 }
@@ -33,7 +35,7 @@ export class RunChannels {
   open(runId: string, onLine: (line: string) => void, issueId: string | null = null, jobId: number | null = null): void {
     this.close(runId);
     const stopped = jobId !== null && this.pendingStops.delete(jobId);
-    this.channels.set(runId, { issueId, onLine, queue: stopped ? [{ type: "stop" }] : [], waiter: null });
+    this.channels.set(runId, { issueId, onLine, queue: stopped ? [{ type: "stop" }] : [], steerable: true, waiter: null });
   }
 
   /** Holds a stop for the job until its run opens; a job that ends without opening a run never takes it. */
@@ -46,6 +48,20 @@ export class RunChannels {
     const channel = this.channels.get(runId);
     if (channel === undefined) return;
     this.channels.delete(runId);
+    this.answer(channel, []);
+  }
+
+  /**
+   * The run's brain ended (its result is in, or the run failed): from now on `steer` and `stop` are refused, so a caller
+   * falls back to what it does without an open run (a chat after it, a review round) instead of a message nobody reads.
+   * Commands still queued are dropped (logged); the channel stays open for the run's last lines until `close`.
+   */
+  endSteering(runId: string): void {
+    const channel = this.channels.get(runId);
+    if (channel === undefined || !channel.steerable) return;
+    channel.steerable = false;
+    const dropped = channel.queue.splice(0);
+    if (dropped.length > 0) logger.warn({ runId, dropped: dropped.length }, "commands for a run whose brain had ended were dropped");
     this.answer(channel, []);
   }
 
@@ -107,7 +123,7 @@ export class RunChannels {
 
   private push(runId: string, command: RunCommand): boolean {
     const channel = this.channels.get(runId);
-    if (channel === undefined) return false;
+    if (channel === undefined || !channel.steerable) return false;
     channel.queue.push(command);
     if (channel.waiter !== null) this.answer(channel, channel.queue.splice(0));
     return true;

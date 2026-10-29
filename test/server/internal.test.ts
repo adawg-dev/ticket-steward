@@ -184,4 +184,15 @@ describe("the internal run API", () => {
     expect((await steer(10, tools)).statusCode).toBe(401);
     expect((await app.inject({ method: "GET", url: `/internal/runs/${spec.runId}/steer?waitMs=soon`, headers: { authorization: `Bearer ${runner}` } })).statusCode).toBe(400);
   });
+
+  it("ends the run's steering when its pod says the brain ended: later steers are refused", async () => {
+    const { spec, runner, tools } = startRun("API-1");
+    channels.open(spec.runId, () => undefined, spec.issueId);
+    const end = (token: string) => app.inject({ method: "POST", url: `/internal/runs/${spec.runId}/steer/end`, headers: { authorization: `Bearer ${token}` } });
+
+    expect((await end(tools)).statusCode).toBe(401);
+    expect(channels.steer(spec.runId, "still on")).toBe(true);
+    expect((await end(runner)).json()).toEqual({ ok: true });
+    expect(channels.steer(spec.runId, "too late")).toBe(false);
+  });
 });

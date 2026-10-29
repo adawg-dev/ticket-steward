@@ -14,7 +14,7 @@ export const INTERNAL_PORT = 3021;
 export interface InternalDeps {
   runs: RunCallbacks;
   /** The runs' event and steering channels, which the executors open and close. */
-  channels: Pick<RunChannels, "line" | "next">;
+  channels: Pick<RunChannels, "line" | "next" | "endSteering">;
   tokens: Pick<RunTokens, "verify">;
   /** The steward's own push ledger; the run's target comes from its spec, never from the request. */
   ledger: PushLedger;
@@ -112,6 +112,13 @@ export const buildInternalServer = (deps: InternalDeps): FastifyInstance => {
     } finally {
       reply.raw.off("close", onClose);
     }
+  });
+
+  /** The run pod's brain ended: no steer or stop reaches it any more, so the dispatcher refuses them from now on. */
+  app.post<{ Params: RunParams }>("/internal/runs/:runId/steer/end", async (request, reply) => {
+    if ((await authorize(request, reply, "runner")) === null) return reply;
+    deps.channels.endSteering(request.params.runId);
+    return { ok: true };
   });
 
   app.post<{ Params: RunParams }>("/internal/runs/:runId/work", async (request, reply) => {
