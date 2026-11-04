@@ -497,7 +497,9 @@ is the stable `ticket-<KEY>`. Loop worktrees are kept for active loops and for `
 `chat.sessionRetentionDays` (default 180, with or without a `chat` block) after the ticket's last job, so an agent's
 session can be resumed after its worktree is gone. Resuming recreates the worktree at the same path (sessions are keyed
 by path) at the branch head, or at the implement job's base when nothing was pushed, then copies the overlay and runs
-`workspace.setup` again. The brain never receives GitLab, Linear or Greptile credentials.
+`workspace.setup` again. A worktree that still exists is reused as it stands, with the overlay copied in again; with
+`slots`, `workspace.setup` runs in it again too, since the run's slot starts with empty databases. The brain never
+receives GitLab, Linear or Greptile credentials.
 
 ### 1.7c Chat on the merge request (optional)
 

@@ -81,14 +81,17 @@ export const sessionWorktree = async (
   return { worktree, created: true };
 };
 
-/** `sessionWorktree`, with `workspace.setup` run in a recreated one (`steward chat`, which runs no executor). */
+/**
+ * `sessionWorktree`, with `workspace.setup` run in a recreated one, or in any one on a slot, whose services start empty
+ * (`steward chat`, which runs no executor).
+ */
 export const ensureWorktree = async (
   deps: Pick<PipelineDeps, "config" | "mirror" | "redactor" | "signal">,
   session: Pick<AgentSession, "worktreeName" | "headSha">,
   placement: { env: Record<string, string>; port: number; slot: Slot | null },
 ): Promise<Worktree> => {
   const { worktree, created } = await sessionWorktree(deps, session, placement);
-  if (!created) return worktree;
+  if (!created && placement.slot === null) return worktree;
   const setup = await runSetup(deps.config.workspace.setup, worktree.path, placement.env, {
     timeoutMs: deps.config.workspace.setupTimeoutMinutes * MINUTE_MS,
     tailBytes: SETUP_TAIL_BYTES,

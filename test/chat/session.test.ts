@@ -229,6 +229,15 @@ describe("ensureWorktree", () => {
     expect(existsSync(join(worktree.path, "setup-ran"))).toBe(false);
   });
 
+  it("runs setup again in a reused worktree on a slot, whose services start empty", async () => {
+    await createWorktree(repo.mirror, join(repo.dataDir, "work"), "ticket-API-1", repo.sha);
+    const onSlot = { ...placement, slot: { n: 1, appPort: 4101, ports: { postgres: 15132, redis: 16179, rabbitmq: 17172 } } };
+
+    const worktree = await ensureWorktree(deps(), { worktreeName: "ticket-API-1", headSha: repo.sha }, onSlot);
+
+    expect(existsSync(join(worktree.path, "setup-ran"))).toBe(true);
+  });
+
   it("moves a clean worktree that is behind up to the head", async () => {
     const created = await createWorktree(repo.mirror, join(repo.dataDir, "work"), "ticket-API-1", repo.sha);
     const head = await commitFile(repo.repo, "later.txt", "later\n");

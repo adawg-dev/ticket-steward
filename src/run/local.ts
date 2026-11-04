@@ -18,7 +18,7 @@ import type { RunSpec, WorkReport } from "./protocol.js";
 /** The run's worktree: built for this run, or the session's, which a chat reuses and keeps (sessions are keyed by path). */
 interface LocalWorkspace {
   worktree: Worktree;
-  /** `workspace.setup` already ran in it for an earlier run: a reused session worktree. */
+  /** `workspace.setup` already ran in it for an earlier run and nothing it set up was reset: a reused session worktree without a slot. */
   setUp: boolean;
 }
 
@@ -33,7 +33,8 @@ const prepareLocalWorkspace = async (deps: PipelineDeps, spec: RunSpec, env: Rec
   if (spec.kind === "chat") {
     const session = { worktreeName: basename(spec.worktreePath), headSha: spec.checkout.sha };
     const { worktree, created } = await sessionWorktree(deps, session, { env, port, slot });
-    return { worktree, setUp: !created };
+    // A slot's Postgres, Redis and RabbitMQ are created empty for every run, so the setup that loads them runs again.
+    return { worktree, setUp: !created && slot === null };
   }
   const worktree = await createWorktree(deps.mirror, dirname(spec.worktreePath), basename(spec.worktreePath), spec.checkout.sha);
   onWorktree(worktree);

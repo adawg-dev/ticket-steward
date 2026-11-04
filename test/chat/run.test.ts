@@ -22,6 +22,8 @@ import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr, fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
 import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
+import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
+import { SlotClient } from "../../src/workspace/slots.js";
 import { freeTcpPort, tmpRepo, type TmpRepo } from "../fakes/tmpRepo.js";
 import { commitFile, git } from "../workspace/helpers.js";
 
@@ -269,6 +271,23 @@ describe("runChat", () => {
     expect(await readFile(log, "utf8")).toBe("ran\n");
     expect(await runChat(claim(loopId), deps)).toEqual({ status: "succeeded" });
     expect(await readFile(log, "utf8")).toBe("ran\n");
+  });
+
+  it("runs setup again in a reused worktree when the run has a slot, whose services start empty", async () => {
+    const loopId = createLoop();
+    const appPortBase = (await freeTcpPort()) - 1;
+    const slots = { count: 1, socket: "/run/steward-slot.sock", appPortBase, upTimeoutSeconds: 180, env: {} };
+    const base = makeDeps(new FakeBrain({ result: { reply: "ok" } }));
+    const deps: PipelineDeps = {
+      ...base,
+      config: { ...base.config, workspace: { ...base.config.workspace, port: undefined, setup: ["echo ran >> ../setup.log"] }, slots },
+      slot: { n: 1, client: new SlotClient(slots, fakeSlotRunner().run) },
+    };
+    const log = join(repo.dataDir, "work", "setup.log");
+
+    expect(await runChat(claim(loopId), deps)).toEqual({ status: "succeeded" });
+    expect(await runChat(claim(loopId), deps)).toEqual({ status: "succeeded" });
+    expect(await readFile(log, "utf8")).toBe("ran\nran\n");
   });
 
   it("a push through the tool moves the loop's head, so the loop reads it as its own", async () => {
