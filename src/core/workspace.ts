@@ -16,7 +16,7 @@ import { orbitMcpSpec } from "../orbit/server.js";
 import { DB_FILENAME } from "../store/db.js";
 import type { AttemptPatch } from "../store/index.js";
 import { copyOverlay, OverrideKeysError } from "../workspace/overlay.js";
-import { freePort, isPortFree } from "../workspace/retention.js";
+import { freePort, isPortFree, killProcessesIn } from "../workspace/retention.js";
 import { runSetup } from "../workspace/setup.js";
 import { copySkills } from "../workspace/skills.js";
 import { renderSlotEnv, SlotError, type Slot } from "../workspace/slots.js";
@@ -242,11 +242,19 @@ export const brainInput = (
   };
 };
 
-/** Frees the app port, removes the worktree unless a failure keeps it, and brings the job's slot down. */
+/**
+ * Ends what the run left running in its worktree (the agent's background dev servers and watchers survive the brain's
+ * process-group kill), frees the app port, removes the worktree unless a failure keeps it, and brings the job's slot down.
+ * The next run that needs a dev server starts its own: its slot's services are new, so a survivor would point at nothing.
+ */
 export const cleanupWorkspace = async (deps: PipelineDeps, worktree: Worktree | null, outcome: JobOutcome): Promise<void> => {
   const port = jobPort(deps);
   const keep = outcome.status !== "succeeded" && deps.config.workspace.keepOnFailure;
   try {
+    if (worktree !== null) {
+      const { killed } = await killProcessesIn(worktree.path);
+      if (killed.length > 0) logger.info({ worktree: worktree.path, killed: killed.length }, "ended processes the run left running");
+    }
     if (!(await isPortFree(port))) await freePort(port);
     if (worktree !== null && !keep) await worktree.destroy();
   } catch (err) {

@@ -22,7 +22,7 @@ RUN pnpm build && pnpm prune --prod
 FROM ${NODE_IMAGE}
 # git for the mirror and worktrees, tini as PID 1, psql for kickoff's reset-dbs.sh, the rest for agent shell work.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates tini postgresql-client curl jq ripgrep procps \
+  && apt-get install -y --no-install-recommends git ca-certificates tini postgresql-client curl jq ripgrep procps lsof \
   && rm -rf /var/lib/apt/lists/*
 # pnpm for kickoff's workspace.setup, at kickoff's packageManager version; npm checks the registry integrity hash.
 RUN npm install -g pnpm@11.13.0

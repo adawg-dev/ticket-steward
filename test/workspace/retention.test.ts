@@ -1,9 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readdir, utimes, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 
-import { freePort, isPortFree, sessionProjectDir, sweep } from "../../src/workspace/index.js";
+import { freePort, isPortFree, killProcessesIn, processesIn, sessionProjectDir, sweep } from "../../src/workspace/index.js";
 import { removeDir, tmpDir } from "./helpers.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -152,6 +153,74 @@ describe("freePort", () => {
     await probe.close();
 
     expect(await freePort(probe.port)).toEqual({ killed: [] });
+  });
+});
+
+/** A detached `sleep` in `cwd`, in its own process group like an agent's background shell; `ignoreTerm` makes it ignore SIGTERM. */
+const sleeper = (cwd: string, ignoreTerm = false): ChildProcess => {
+  const child = spawn("sh", ["-c", ignoreTerm ? "trap '' TERM; sleep 300" : "exec sleep 300"], { cwd, detached: true, stdio: "ignore" });
+  child.unref();
+  return child;
+};
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+describe.runIf(existsSync("/proc/self/cwd"))("killProcessesIn", () => {
+  let root: string;
+  const started: ChildProcess[] = [];
+  const start = (cwd: string, ignoreTerm = false): number => {
+    const child = sleeper(cwd, ignoreTerm);
+    started.push(child);
+    if (child.pid === undefined) throw new Error("sleeper did not start");
+    return child.pid;
+  };
+
+  beforeEach(async () => {
+    root = await tmpDir();
+  });
+
+  afterEach(async () => {
+    for (const child of started.splice(0)) if (child.pid !== undefined && alive(child.pid)) process.kill(-child.pid, "SIGKILL");
+    await removeDir(root);
+  });
+
+  it("kills what a run left running in its worktree, in its own process group or not, and spares the rest", async () => {
+    const worktree = join(root, "work", "ticket-API-1");
+    await mkdir(join(worktree, "apps", "user-app"), { recursive: true });
+    const outside = join(root, "elsewhere");
+    await mkdir(outside, { recursive: true });
+    const devServer = start(join(worktree, "apps", "user-app"));
+    const stranger = start(outside);
+    await vi.waitFor(async () => expect(await processesIn(worktree)).toContain(devServer));
+
+    const { killed } = await killProcessesIn(worktree, { graceMs: 2000 });
+
+    expect(killed).toContain(devServer);
+    expect(killed).not.toContain(stranger);
+    await vi.waitFor(() => expect(alive(devServer)).toBe(false));
+    expect(alive(stranger)).toBe(true);
+  });
+
+  it("kills a process that ignores SIGTERM once the grace period ends", async () => {
+    const worktree = join(root, "work", "ticket-API-2");
+    await mkdir(worktree, { recursive: true });
+    const stubborn = start(worktree, true);
+    await vi.waitFor(async () => expect(await processesIn(worktree)).toContain(stubborn));
+
+    await killProcessesIn(worktree, { graceMs: 300 });
+
+    await vi.waitFor(async () => expect(await processesIn(worktree)).toEqual([]));
+  });
+
+  it("finds nothing for a directory that does not exist", async () => {
+    expect(await killProcessesIn(join(root, "gone"))).toEqual({ killed: [] });
   });
 });
 

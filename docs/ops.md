@@ -677,7 +677,8 @@ Host ports come from the helper's `ports <n>`: Postgres `15032 + 100n`, Redis `1
 Per job: free the app port, `down` then `up` the slot (abandoned after `upTimeoutSeconds`, at most 290; the helper
 instance itself is capped at 300 s), create the worktree, copy the overlay with the overrides, run
 `workspace.setup` (`reset-dbs.sh` reads `e2e/user/.env`, which now holds the slot's values), run the
-brain with `STEWARD_PORT` set to the slot's app port, publish, and `down` the slot. A slot that does not
+brain with `STEWARD_PORT` set to the slot's app port, end every process still running in the worktree (a dev server
+or watcher the agent started in the background survives the brain's process-group kill), publish, and `down` the slot. A slot that does not
 come up fails the job as retryable with `setup failed: slot <n>: …` and the helper's output tail in the
 attempt's `setupTail`. `steward serve` brings every slot down when it starts and when it stops;
 retention sweeps only while no job runs, so under sustained load on every slot the hourly sweep waits for a moment when all slots are idle. `steward chat` leases a slot of its own; jobs run only under serve (`steward jobs retry ID` refuses without it).

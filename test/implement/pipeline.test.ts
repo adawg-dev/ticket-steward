@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -538,6 +540,32 @@ describe("runImplement", () => {
 
     expect(outcome).toEqual({ status: "succeeded" });
     expect(await git(repo.repo, ["rev-parse", "--verify", `refs/heads/${BRANCH}`])).toBe(stores.jobs.get(ctx.jobId)?.commitSha);
+  });
+
+  it.runIf(existsSync("/proc/self/cwd"))("ends what the agent left running in its worktree when the run ends", async () => {
+    let devServer: number | undefined;
+    // Like a dev server the agent started in the background: its own process group, so the brain's group kill misses it.
+    const startDevServer: AgentStep = async (workspace) => {
+      const child = spawn("sh", ["-c", "exec sleep 300"], { cwd: workspace, detached: true, stdio: "ignore" });
+      child.unref();
+      devServer = child.pid;
+    };
+    const brain = agentBrain(implemented, async (workspace, push) => {
+      await startDevServer(workspace, push);
+      await commitAndPush(workspace, push);
+    });
+
+    expect(await runImplement(claim(), depsFor(brain))).toEqual({ status: "succeeded" });
+    expect(devServer).toBeDefined();
+    const alive = (): boolean => {
+      try {
+        process.kill(devServer ?? 0, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await vi.waitFor(() => expect(alive()).toBe(false));
   });
 
   it("runs the brain and the push tool's checks against the slot's app port", async () => {
