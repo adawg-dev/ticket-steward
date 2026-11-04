@@ -90,7 +90,9 @@ export const playwrightMcpSpec = (artifactsDir: string): StdioMcpServerSpec => {
   return {
     command: process.execPath,
     // Console output at info level ran to 100k+ characters per call; warnings and errors are what bugs show up as.
-    args: [join(dirname(packagePath), relative), "--console-level", "warning", "--caps=devtools", "--output-dir", artifactsDir],
+    // `--browser chromium`: without it the server launches the Chrome channel (/opt/google/chrome), which the image
+    // does not ship; the bundled Chromium under PLAYWRIGHT_BROWSERS_PATH is what doctor checks for.
+    args: [join(dirname(packagePath), relative), "--browser", "chromium", "--console-level", "warning", "--caps=devtools", "--output-dir", artifactsDir],
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), ...playwrightEnv() },
   };
 };

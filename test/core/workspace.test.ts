@@ -89,6 +89,11 @@ describe("brainInput", () => {
     expect(args.slice(args.indexOf("--output-dir"), args.indexOf("--output-dir") + 2)).toEqual(["--output-dir", paths.artifactsDir]);
   });
 
+  it("runs Playwright on the bundled Chromium, not the Chrome channel it defaults to", () => {
+    const args = brainInput(fullDeps, paths, worktree, "prompt", {}, "implement").mcpServers.playwright?.args ?? [];
+    expect(args.slice(args.indexOf("--browser"), args.indexOf("--browser") + 2)).toEqual(["--browser", "chromium"]);
+  });
+
   it("adds the Orbit server with no secrets and points the agent's own orbit at the data dir's graph", () => {
     const input = brainInput(fullDeps, paths, worktree, "prompt", { PATH: "/bin" }, "implement");
     expect(input.mcpServers.orbit?.args).toEqual(["/bin/steward", "mcp", "orbit", "--config", "/etc/steward/config.json", "--workspace", worktree.path]);
