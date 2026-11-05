@@ -138,6 +138,27 @@ CREATE TABLE IF NOT EXISTS unassigned_tickets (
   unassigned_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  job_id INTEGER NOT NULL,
+  issue_id TEXT NOT NULL,
+  loop_id INTEGER,
+  round INTEGER,
+  point TEXT NOT NULL,
+  subject TEXT,
+  requested TEXT NOT NULL,
+  model TEXT NOT NULL,
+  answers TEXT,
+  latency_ms INTEGER NOT NULL,
+  cost REAL,
+  error TEXT,
+  input_chars INTEGER NOT NULL,
+  input_sha256 TEXT NOT NULL,
+  outcome TEXT
+);
+CREATE INDEX IF NOT EXISTS decisions_job ON decisions (job_id, point);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
