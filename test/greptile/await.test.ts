@@ -258,7 +258,7 @@ describe("runAwaitReview", () => {
     const jobId = loopOf(id).implementJobId;
     expect(created?.description).toBe([
       "## What\n\nFlushes the buffer.",
-      "## Screenshots\n\n**Screenshots and recordings**\n\nAfter\n\n![after.png](/uploads/1/after.png)",
+      "**Screenshots and recordings**\n\nAfter\n\n![after.png](/uploads/1/after.png)",
       "Closes API-1",
       `Opened by Ticket Steward for [API-1](${issue.url}), job ${jobId}.`,
       LOOP_MARKER(id, "implement-summary"),
@@ -276,8 +276,25 @@ describe("runAwaitReview", () => {
     const [created] = gitlab.created;
     expect(created?.title).toBe("API-1: Adapter drops the last chunk");
     expect(created?.description).toContain("Flush the buffer before closing the stream.\n\n**For the reviewer**\n- Check the streaming test.");
-    expect(created?.description).not.toContain("## Screenshots");
+    expect(created?.description).not.toContain("Screenshots and recordings");
     expect(created?.description).toContain(`Closes API-1\n\nOpened by Ticket Steward for [API-1](${issue.url}), job ${loopOf(id).implementJobId}.`);
+  });
+
+  it("titles the MR with the first line of the agent's title, trimmed", async () => {
+    const id = createLoop(true, undefined, implementJob(undefined, { ...implemented, mrTitle: "  fix(api): API-1 flush the last chunk  \nmore detail" }));
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.created[0]?.title).toBe("fix(api): API-1 flush the last chunk");
+  });
+
+  it("falls back to the ticket's title for an agent title over 255 characters, clamped to 255", async () => {
+    tracker = new FakeTracker([{ ...structuredClone(issue), title: "t".repeat(300) }]);
+    const id = createLoop(true, undefined, implementJob(undefined, { ...implemented, mrTitle: "x".repeat(256) }));
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.created[0]?.title).toBe(`API-1: ${"t".repeat(300)}`.slice(0, 255));
   });
 
   it("redacts the description it opens the MR with", async () => {

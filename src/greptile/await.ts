@@ -1,4 +1,4 @@
-import { GitLabApiError, type MergeRequestInfo, type MrDiscussion, type MrNote } from "../codehost/gitlabMr.js";
+import { GitLabApiError, MAX_MR_TITLE, type MergeRequestInfo, type MrDiscussion, type MrNote } from "../codehost/gitlabMr.js";
 import { readAuthorKinds, type AuthorKind } from "../codehost/mrAuthors.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
@@ -37,7 +37,7 @@ const mrExists = (err: unknown): boolean =>
   err instanceof GitLabApiError && (err.status === 409 || (err.status === 422 && err.message.includes("already exists")));
 
 /**
- * Opens the MR for the implement job's push, with the agent's title and description; null when the implement job handed
+ * Opens the MR for the implement job's push, with the agent's title (its first line) and description; null when the implement job handed
  * back or stored no result, or when the create failed (logged, and retried by the next poll). When CI opened one
  * meanwhile, that one is used.
  */
@@ -47,8 +47,9 @@ const openMergeRequest = async (deps: PipelineDeps, loop: Loop, project: string,
   const stored = deps.stores.jobs.get(loop.implementJobId)?.implementResult ?? null;
   if (stored === null || stored.result === null || stored.handback !== null) return null;
   const { result } = stored;
-  const written = result.mrTitle?.trim() ?? "";
-  const title = written === "" ? `${loop.identifier}: ${ticket.title}` : written;
+  // The first line of the agent's title; an empty or over-long one gives way to the ticket's, clamped to GitLab's limit.
+  const written = result.mrTitle?.split("\n")[0]?.trim() ?? "";
+  const title = written !== "" && written.length <= MAX_MR_TITLE ? written : `${loop.identifier}: ${ticket.title}`.slice(0, MAX_MR_TITLE);
   const description = buildMrDescription({
     loopId: loop.id, identifier: loop.identifier, ticketUrl: ticket.url, jobId: loop.implementJobId, result,
     ...(stored.media === undefined ? {} : { media: stored.media }),

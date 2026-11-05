@@ -42,7 +42,7 @@ export const buildMrDescription = (input: {
   const written = result.mrDescription?.trim() ?? "";
   return [
     written === "" ? summaryBody(result).join("\n") : written,
-    ...(media.length > 0 ? [["## Screenshots", "", ...media].join("\n")] : []),
+    ...(media.length > 0 ? [media.join("\n")] : []),
     `Closes ${input.identifier}`,
     `Opened by Ticket Steward for [${input.identifier}](${input.ticketUrl}), job ${input.jobId}.`,
     LOOP_MARKER(input.loopId, "implement-summary"),
