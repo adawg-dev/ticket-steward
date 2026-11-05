@@ -327,17 +327,22 @@ describe("runAwaitReview", () => {
   });
 
   it("uses the MR CI opened while the steward was opening its own, and posts the summary on it", async () => {
+    const linear = new RecordingLinear();
+    stores.agentSessions.record("lin-1", "issue-1", "API-1");
     const id = createLoop();
     gitlab.createMergeRequest = async () => {
       gitlab.openMr = fakeMergeRequest({ sha: SHA });
       throw new GitLabApiError(409, "GitLab POST /projects/acme%2Frepo/merge_requests answered 409: Another open merge request already exists for this source branch");
     };
 
-    expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("deferred");
+    expect((await runAwaitReview(claim(id), { ...makeDeps(), linear })).status).toBe("deferred");
+    await runAwaitReview(claim(id), { ...makeDeps(), linear });
 
     expect(loopOf(id)).toMatchObject({ mrIid: 7, state: "awaiting_review" });
     expect(gitlab.notes).toHaveLength(1);
     expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "implement-summary"));
+    // The ticket hears of the MR once: the session links it and the ticket moves to review.
+    expect(linear.calls.filter((call) => call.kind === "urls")).toHaveLength(1);
   });
 
   it("opens no MR for a handed-back implement", async () => {
