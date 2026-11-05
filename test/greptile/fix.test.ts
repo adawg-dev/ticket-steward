@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { INTERRUPTED_ERROR } from "../../src/brain/index.js";
 import type { BrainInput, BrainRun } from "../../src/brain/types.js";
+import type { DecisionsClient, ModelAnswer } from "../../src/decisions/client.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
@@ -298,6 +299,50 @@ describe("runFix", () => {
     expect(gitlab.notes[0]).toContain("**Screenshots and recordings**\n\nThe last chunk now renders\n\n![after.png](/uploads/1/after.png)");
     expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "round 0 media after=start"));
     expect(loopOf(id)).toMatchObject({ round: 1, state: "awaiting_review" });
+  });
+
+  describe("decisions in shadow mode", () => {
+    const shadowClient = (fail = false) => {
+      const asked: string[] = [];
+      const client: DecisionsClient = {
+        models: ["jev-latest"],
+        ask: async (input, _questions, models = ["jev-latest"]) => {
+          asked.push(input);
+          if (fail) throw new Error("decisions down");
+          return models.map((requested): ModelAnswer => ({ model: requested, requested, answers: [], latencyMs: 1, cost: null, error: null }));
+        },
+      };
+      return { asked, client };
+    };
+    const itemRows = (): Array<{ subject: string | null; round: number | null; outcome: string | null }> =>
+      stores.db.prepare<[], { subject: string | null; round: number | null; outcome: string | null }>("SELECT subject, round, outcome FROM decisions WHERE point = 'fix_item' ORDER BY id").all();
+
+    it("asks about each work item and records the agent's action as its outcome", async () => {
+      const id = createLoop();
+      const { asked, client } = shadowClient();
+      const outcome = await runFix(claim(id), { ...makeDeps(editing({ result: changed(finding) })), decisions: client });
+      expect(outcome).toEqual({ status: "succeeded" });
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain("Null check missing on the last chunk.");
+      expect(itemRows()).toEqual([{ subject: finding, round: 1, outcome: "fixed" }]);
+    });
+
+    it("records a declined thread as declined", async () => {
+      const id = createLoop();
+      const { client } = shadowClient();
+      await runFix(claim(id), { ...makeDeps(new FakeBrain({ result: declined(finding) })), decisions: client });
+      expect(itemRows()).toEqual([{ subject: finding, round: 1, outcome: "declined" }]);
+    });
+
+    it("a decisions client that rejects leaves the round as without one", async () => {
+      const id = createLoop();
+      const { client } = shadowClient(true);
+      const ctx = claim(id);
+      const outcome = await runFix(ctx, { ...makeDeps(new FakeBrain({ result: declined(finding) })), decisions: client });
+      expect(outcome).toEqual({ status: "succeeded" });
+      expect(stores.jobs.get(ctx.jobId)?.fixResult?.result).toEqual(declined(finding));
+      expect(itemRows()).toEqual([]);
+    });
   });
 
   it("declines every finding: no push, replies only, and the next await judges the unchanged head at once", async () => {

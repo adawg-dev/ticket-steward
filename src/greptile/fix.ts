@@ -23,6 +23,7 @@ import type { TicketBundle } from "../tracker/types.js";
 import { ciFailuresOf, type CiFailure } from "./ci.js";
 import { peopleOn, workList, type WorkItem } from "./evaluate.js";
 import { renderFixPrompt } from "./prompt.js";
+import { askReview, recordReviewOutcomes } from "../decisions/review.js";
 import { publishHandback, publishRoundMedia, publishStop, publishThreads } from "./publish.js";
 import { validateFixResult, type FixResult, type StoredFix } from "./result.js";
 import { findSummary } from "./summary.js";
@@ -272,6 +273,8 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
     const kindOf = await readAuthorKinds(gitlab, mr.projectId, discussions, { steward, trustedBots: greptileBot === null ? [] : [greptileBot] });
     work = workList(discussions, kindOf);
     people = peopleOn(discussions, work, kindOf);
+    // Shadow only: recorded for evaluation, never read back. askReview never throws.
+    await askReview(deps, { jobId: ctx.jobId, issueId: ctx.issueId, loopId: loop.id, round: loop.round + 1 }, work, summary);
     await deps.mirror.fetch();
   } catch (err) {
     return { outcome: { status: "failed", error: errorMessage(err), retryable: true } };
@@ -364,6 +367,7 @@ const finishFix = async (fix: Fix, prepared: PreparedRound, executed: { report: 
   const validated = validateFixResult(report.output, items);
   if (!validated.ok) return decide(fix, handingBack(facts, null, "the agent's result was invalid", validated.error), mr);
   recordDecisions(fix, validated.result, prepared.people);
+  recordReviewOutcomes(deps, ctx.jobId, validated.result.threads);
   const attach = (): Promise<MediaUploads | undefined> =>
     attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab: fix.gitlab, project: mr.projectId });
   return handleResult(fix, work, facts, validated.result, items.length, mr, attach);
