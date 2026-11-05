@@ -232,8 +232,8 @@ stop there and raise it.
 
 - Delegating a ticket to the steward (assigning it in Linear's agent field) starts an implement run, unless the
   ticket already has a loop, which is resumed instead (§1.7b). With `linear.moveToStarted` on (the default) the ticket
-  moves to its team's first started state if it is not there or later; when the MR opens it moves to
-  `linear.reviewStateName` ("In Review").
+  moves to its team's first started state if it is not there or later; when the MR opens (the steward opens it on
+  the loop's first poll after the push, §1.7a) it moves to `linear.reviewStateName` ("In Review").
 - An @mention on a ticket the steward has worked on answers in a chat run that resumes its session; on a ticket it
   never had, the answer is "Assign me to the ticket to start work."
 - A prompt in the agent panel steers the active run (the run gets it between turns), or resumes the session in a chat
@@ -269,14 +269,15 @@ with "`<key>` was removed with enrich": delete top-level `prompt`, `tracker.gate
 
 **Linear stays quiet outside the panel.** The steward never comments on, rewrites or uploads to a Linear ticket; it
 talks in the agent panel, moves the workflow state, and sets itself back as delegate on a revive. Everything for the
-code goes on the merge request: the implement summary (once the loop finds the MR), every round's replies and note,
+code goes on the merge request: the implement summary (the MR description when the steward opens the MR; a note when CI
+opened it first), every round's replies and note,
 hand-back and stop notes.
 
 ### 1.7a Implement
 
 The decision **whether an agent implements a ticket** stays with people: only delegating the ticket to the steward
-starts it. The steward never opens a merge request, and its git work is pushing one new branch and fast-forwarding it;
-the kickoff pipeline opens the MR.
+starts it. Its git work is pushing one new branch and fast-forwarding it; with a `reviewLoop` block the steward then
+opens the merge request through the GitLab API (below). People merge; the steward never approves or merges.
 
 **Push token.** Implementation needs `GITLAB_PUSH_TOKEN` in `.env`: a GitLab **project access
 token** with the **Developer** role and only the **`write_repository`** scope. Never give it
@@ -333,11 +334,26 @@ file in the job dir (not a ref, which the mirror's `--prune` fetch would delete)
 runs from a fresh scratch bare repo in the job dir with hooks disabled, with
 `--force-with-lease`, so it can never force a branch or create one that exists. Each
 token-carrying `ls-remote` runs from a steward-made directory or scratch repo, never the
-mirror or worktree. The steward never opens the MR; the kickoff pipeline does once the
-branch lands. After the run the steward only reads what the agent did: it hands back "the
+mirror or worktree. The push tool never opens the MR (the loop does, below). After the run the steward only reads what the agent did: it hands back "the
 agent did not push its change" when nothing was pushed, and "the agent left unpushed work"
 (listing it) when uncommitted changes or unpushed commits remain. It never commits or pushes
 for the agent.
+
+**What the agent returns.** Besides the outcome, summary, review notes, checks, media, level and design, a result
+carries `mrTitle` (a conventional commit with the ticket key, under 72 characters) and `mrDescription` (Markdown with
+`## What`, `## Changes`, `## Behavior change`, `## Not in this MR` and `## Tests`, each only when it has content; no
+screenshots, `Closes` line, footer or `@` mentions). Both are empty for `failed` and `needs_info`; results stored before
+the fields existed still parse and fall back as below.
+
+**The MR is opened by the steward.** On the loop's first poll after the implement push (§1.7b) the steward opens the
+merge request: ready (not draft), target `workspace.baseBranch`, source branch kept (`remove_source_branch=false`), no
+squash. The title is the agent's `mrTitle`, or `<KEY>: <ticket title>` when it wrote none. The description is the agent's
+`mrDescription` (the old summary body when it wrote none), then the screenshots and videos from `media`, `Closes <KEY>`
+with the Linear link, a footer and the hidden loop marker; it replaces the "implement summary" note, which is not posted
+as well. If CI's `open_mr` job opened an MR from the branch first (or wins the race), the steward uses that one and posts
+the summary as a note, as before. A create that fails is logged as a warning and tried again on the next poll, bounded
+by `mrTimeoutMinutes`; it hands back "no MR was opened" when that runs out. The ticket moves to In Review when the MR
+opens.
 
 **The secret scan is best-effort.** It catches accidental leaks: a plain-text overlay or
 steward secret in an added line or the commit message. A diff it cannot read or that is too
@@ -362,7 +378,7 @@ One implement job can hold the worker for about 90 minutes (setup, up to 60 of b
 checks); other heavy jobs queue behind it unless `slots` gives the worker more lanes.
 
 To smoke-test, delegate a throwaway ticket to the steward and watch its agent panel, the pushed branch and the move
-to the review state once the MR opens (and, with a `reviewLoop` block, the implement summary note on the MR). The first real push is also what proves the
+to the review state once the MR opens (and, with a `reviewLoop` block, the steward-opened MR with its description). The first real push is also what proves the
 token's Developer access: doctor's `push token` line only runs `ls-remote`.
 
 Whatever the trigger, the steward never works on a Done or Canceled ticket. The state is
@@ -370,18 +386,18 @@ checked at intake, when a job starts, and by the push tool before every push (wh
 
 ### 1.7b Review loop on the merge request (optional)
 
-With a `reviewLoop` block the steward does not stop at the push. It waits for the pipeline to open the merge request,
-then treats every comment on it, from people and bots alike, as work: it resumes the implementing brain session to
+With a `reviewLoop` block the steward does not stop at the push. It opens the merge request (or finds the one CI
+opened first), then treats every comment on it, from people and bots alike, as work: it resumes the implementing brain session to
 answer each one (a change pushed through the push tool and a reply, or a reply alone) and repeats while comments keep
 coming. Greptile is one reviewer among them, and optional: with a `greptile` block and the setting on, the loop asks
-for and waits for its review of every push. It needs `implement`, `codehost.kind: "gitlab"` and `brain.kind: "claude-code"`.
+for and waits for its review of every pushed round. It needs `implement`, `codehost.kind: "gitlab"` and `brain.kind: "claude-code"`.
 
 ```ts
 reviewLoop: {
   prompt: "./prompts/fix.md",             // required; `steward init` writes prompts/fix.md
   maxRounds: 5,                           // rounds in a row started only by bots or a red pipeline (setting greptile.maxRounds)
   pollSeconds: 300,                       // fallback poll; GitLab webhooks wake the loop at once
-  mrTimeoutMinutes: 30,                   // wait for the pipeline to open the MR
+  mrTimeoutMinutes: 30,                   // the MR must exist within this (the steward opens it; CI's may come first)
   reviewTimeoutMinutes: 30,               // wait for Greptile to review the head
   pipelineTimeoutMinutes: 30,             // wait for the head pipeline to finish
   ciLogLines: 200,                        // failed-job log lines given to the brain
@@ -444,7 +460,7 @@ branch or passing on retry on other refs. A retry costs no round and runs no age
 is told what triage found.
 
 Waits are counted from the first poll of the wait, not from the push. Per round there are up to 30 minutes for the MR
-to open, then 30 minutes for Greptile's review and the pipeline together (they run in parallel and share one clock);
+to open (normally the first poll), then 30 minutes for Greptile's review and the pipeline together (they run in parallel and share one clock);
 every fix round starts its waits over. The last poll of a wait is moved up to its deadline, so a wait that runs out
 hands back right then, not one poll interval later. On kickoff MR pipelines take 7.3 minutes at the median (14.4 at most) and Greptile's
 first review 3.2 (12.3 at most).
@@ -474,11 +490,12 @@ file exists.
 
 **Kickoff side.**
 
-- `.greptile/config.json` must have `"autoReview": ["open", "push"]` so every push is reviewed.
+- Greptile reviews on MR open only; the steward asks for the review of each fix push itself (`@greptileai review`), so
+  no "on new pushes" setting is needed.
 - `excludeAuthors` must not match the steward's GitLab user, or Greptile never reviews its pushes.
-- CI's `open:dev-mr` must open non-draft MRs; Greptile skips drafts.
+- The steward opens its MR ready; if CI's `open:dev-mr` opens it first, that must be non-draft too, since Greptile skips drafts.
 
-**States.** `awaiting_mr` (waiting for the pipeline to open the MR), `awaiting_review` (waiting for Greptile and the
+**States.** `awaiting_mr` (waiting for the MR to exist), `awaiting_review` (waiting for Greptile and the
 pipeline), `fixing` (a fix job is running), then an end state: `passed`, `handed_back` or `stopped` (the ticket was closed
 or the MR was merged or closed; for a merged or closed MR the steward says so in a note on it), or `unassigned` (see
 below).
