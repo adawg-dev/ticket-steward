@@ -654,14 +654,19 @@ An implement run has one of three levels. The level sets how much process surrou
 | `design` | drafts a design with `egm-draft`, has a fresh read-only `goldfish` subagent review it (`steward-goldfish`), then plans and implements as `standard`; a goldfish reviews the final diff before the push |
 
 - **Choosing.** The highest of: the `implement.defaultLevel` setting, `design` when the ticket carries the label in
-  `implement.designLabel` (any case), and the level carried from an earlier run of the ticket.
-- **Stepping up.** The prompt tells the agent to move up a level, and do that level's missing steps, when the change
-  touches migrations, auth/RBAC, multi-tenancy or billing, spans more packages than planned, or the ticket has more than
-  one reasonable reading. A step-up to `design` has no goldfish reviewer; the agent says so in `reviewNotes`. The
-  result reports `level: { started, finished, reason }`.
+  `implement.designLabel` (any case), and, when the run answers the questions of an implement that ended `needs_info`,
+  the level that implement finished at (at least `design` when it stored a design). No other earlier run carries a level.
+- **Stepping up.** During the rollout, step-up applies from `standard` only: a `small` run is today's run plus one
+  simplify pass and is never told to step up. It will be re-enabled at `small` when the default level moves. At
+  `standard`, the prompt tells the agent to move up to `design`, and do its missing steps, when the change touches
+  migrations, auth/RBAC, multi-tenancy or billing, spans more packages than planned, or the ticket has more than one
+  reasonable reading. A step-up to `design` has no goldfish reviewer; the agent says so in `reviewNotes`.
+- **Recorded level.** The stored result has `level: { started, finished, reason }`. The steward sets `started` to the
+  level it chose for the run and raises `finished` to at least that; an agent that reports a lower level, or none, is
+  not handed back for it.
 - **Design reviews.** At most two. If blocking findings remain after the second, or one needs a product decision, the
   run ends `needs_info` with the open findings and the design; the answer resumes the same session at the design step.
-- **Artifacts.** `design.md` and `plan.md` live only in the run's artifacts dir and are never committed. The design is
+- **Artifacts.** `design.md`, `design_draft.md` and `plan.md` live only in the run's artifacts dir and are never committed. The design is
   shown in the Linear agent session.
 
 Settings and config:
@@ -699,8 +704,10 @@ label tickets that needed design discussion. Live checks still to do:
 - `steward-simplify` ran on the final diff of a `small` ticket;
 - no `plan.md` or `design.md` in the pushed commits (`git show --stat`);
 - `goldfish` calls appear in a design transcript and reached the model through the keyproxy;
-- the policy hook logged or denied the subagent's tool calls (if it does not fire: the subagent is read-only and the
-  overlay holds only `STEWARD_PH_` placeholders);
+- the policy hook logged or denied the subagent's tool calls. `Agent` in the allowed tools lets the agent start any
+  `subagent_type`, including `general-purpose`, which has write and Bash tools, so the `goldfish` definition being
+  read-only is no guard on its own: the PreToolUse policy hook is what guards subagent tool calls (the SDK's hook input
+  carries `agent_id` for them), and this check confirms it fires for them;
 - `egm-draft` works headless.
 
 ### 1.8 Doctor, then start the service
