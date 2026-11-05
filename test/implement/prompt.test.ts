@@ -70,4 +70,56 @@ describe("implement prompt", () => {
     expect(renderImplementPrompt(levels, vars)).toBe("S");
     expect(renderImplementPrompt(levels, { ...vars, small: false, design: true })).toBe("D");
   });
+
+  describe("process levels", () => {
+    const small = renderImplementPrompt(template, vars);
+    const standard = renderImplementPrompt(template, { ...vars, small: false, standard: true });
+    const design = renderImplementPrompt(template, { ...vars, small: false, design: true });
+
+    it("gives a small run one simplify pass over its diff and no plan or design", () => {
+      expect(small).toContain(`run the \`steward-simplify\` skill on \`git diff ${"a".repeat(40)}...HEAD\``);
+      expect(small).not.toContain("For each task in the plan");
+      expect(small).not.toContain("egm-draft");
+      expect(small).toMatchSnapshot();
+    });
+
+    it("gives a standard run a plan in the artifacts dir and per-task simplify, without a design", () => {
+      expect(standard).toContain("`steward-plan`");
+      expect(standard).toContain("/jobs/1/artifacts/plan.md");
+      expect(standard).toContain("For each task in the plan");
+      expect(standard).not.toContain("subagent_type");
+      expect(standard).toMatchSnapshot();
+    });
+
+    it("gives a design run an EGM design reviewed by the goldfish subagent, then the standard steps", () => {
+      expect(design).toContain("/jobs/1/artifacts/design.md");
+      expect(design).toContain("`egm-draft`");
+      expect(design).toContain("subagent_type `goldfish`");
+      expect(design).toContain("`steward-plan`");
+      expect(design).not.toMatch(/\bTask\b/);
+      expect(design).toMatchSnapshot();
+    });
+
+    it("names the step-up triggers below the design level", () => {
+      expect(small).toContain("migrations, auth/RBAC, multi-tenancy or billing/credits");
+      expect(small).toContain("step up to `standard`");
+      expect(standard).toContain("step up to `design`");
+      expect(design).not.toContain("Step up a level");
+    });
+
+    it("asks every level for the level and design result fields and keeps plans and designs out of commits", () => {
+      for (const prompt of [small, standard, design]) {
+        expect(prompt).toContain("- `level`: `started`");
+        expect(prompt).toContain("- `design`: the text of `/jobs/1/artifacts/design.md`");
+        expect(prompt).toContain("(`design.md`, `plan.md`) live only in `/jobs/1/artifacts` and are never committed");
+      }
+      expect(standard).toContain("the level this run was given (`standard`)");
+    });
+
+    it("continues from the design so far when answers resume a design run", () => {
+      const resumed = renderImplementPrompt(template, { ...vars, small: false, design: true, hasDesign: true, designText: "# Flush <all> chunks" });
+      expect(resumed).toContain("# Flush <all> chunks");
+      expect(design).not.toContain("design so far");
+    });
+  });
 });

@@ -31,6 +31,56 @@ Earlier in this conversation you stopped to ask questions about this ticket. A p
 Carry on from where you stopped and implement the ticket with this answer. If it still leaves the ticket unclear, return `outcome: "needs_info"` again with what is still open.
 
 {{/reply}}
+## How to work
+
+{{#small}}
+This ticket is at the `small` level. Implement it, then run the `steward-simplify` skill on `git diff {{sha}}...HEAD` before your final checks.
+{{/small}}
+{{#standard}}
+This ticket is at the `standard` level:
+
+1. Write a plan with the `steward-plan` skill to `{{artifactsDir}}/plan.md`.
+2. Run the `steward-simplify` skill on the plan.
+3. For each task in the plan: implement it, run its checks, run `steward-simplify` on the task's diff, then commit.
+{{/standard}}
+{{#design}}
+This ticket is at the `design` level: design it, have the design reviewed, and only then plan and write code.
+
+{{#hasDesign}}
+Here is the design so far, from before you asked your questions:
+
+{{designText}}
+
+Save it to `{{artifactsDir}}/design.md`, apply the answers to it, and continue at step 2.
+
+{{/hasDesign}}
+1. Draft `{{artifactsDir}}/design.md` with the `egm-draft` skill. It is written for a person at the keyboard, and there is none here:
+   - Answer every question and approval gate it raises yourself, from the ticket{{#hasBrief}}, the agent brief{{/hasBrief}} and the code. Never stop to wait for a person.
+   - Where it asks the author to choose between options, choose the one that fits the ticket and the code best, and record the others and why you rejected them under its alternatives.
+   - Write only `{{artifactsDir}}/design.md`: no `design_draft.md`, nothing under `docs/designs/`, no sitemap. Skip its save-location step and its hand-off to `egm-review`.
+   - Its design-only rule ends when you approve the design.
+2. Review the design with the `steward-goldfish` skill in design mode, through the `goldfish` subagent (Agent tool, subagent_type `goldfish`).
+3. Fix each finding in `design.md` or note why it does not hold. When the review has no `blocking` finding, approve the design yourself. Otherwise revise it and review it once more. If `blocking` findings are still open after the second review, or one needs a product decision, stop without writing code: return `outcome: "needs_info"` with each open blocker as a question and `design` filled in.
+4. With the design approved, write a plan from it with the `steward-plan` skill to `{{artifactsDir}}/plan.md` and run the `steward-simplify` skill on the plan.
+5. For each task in the plan: implement it, run its checks, run `steward-simplify` on the task's diff, then commit.
+6. Before you push, review again with `steward-goldfish` in diff mode (the design, the ticket and `git diff {{sha}}...HEAD`, through a new `goldfish` subagent). Fix what it finds, or say in `reviewNotes` why you did not.
+{{/design}}
+{{^design}}
+
+Step up a level when, at any point:
+
+- the change touches database migrations, auth/RBAC, multi-tenancy or billing/credits;
+- it spans more packages than you planned;
+- the ticket has more than one reasonable reading that the ticket and the code can settle (when only a person can choose, return `outcome: "needs_info"` instead).
+
+{{/design}}
+{{#small}}
+On a trigger, step up to `standard`: write a plan for the rest of the work with the `steward-plan` skill to `{{artifactsDir}}/plan.md`, run `steward-simplify` on it, and follow it task by task. Never step down.
+{{/small}}
+{{#standard}}
+On a trigger, step up to `design`: draft `{{artifactsDir}}/design.md` for the rest of the work with the `egm-draft` skill, answering its questions and gates yourself from the ticket and the code and writing no other file, then update the plan from it. This run has no goldfish reviewer, so say in `reviewNotes` that the design was not reviewed. Never step down.
+{{/standard}}
+
 ## Codebase graph
 
 Orbit indexed this checkout before you started. To find code, prefer `orbit grep '<words>'` (it ignores case, `_` and `-`; `a|b` matches either) and `orbit context <path:start-end or name>` in the shell over grep: they return definitions with their callers and the tests that cover them. For merge requests, issues, pipelines, job logs and questions across GitLab, use the `orbit_context`, `orbit_query` and `orbit_schema` tools. Either may be unavailable; when one fails, fall back to plain search and `recent_changes` and do not retry it.
@@ -46,6 +96,7 @@ Orbit indexed this checkout before you started. To find code, prefer `orbit grep
 6. Never copy values from `.env` files into source files.
 7. Credentials are not yours to find. Never look for tokens, keys or passwords in environment variables, repository files, `.env` files or secret stores, and never try to reach GitLab, Linear or a model API with one: use your tools, which already carry the access they need. A value in a `.env` file that starts with `STEWARD_PH_` is a placeholder the steward's proxy swaps for the real value on its way to the service it belongs to. Use it as it is; never print, replace or try to reveal what it stands for.
 8. Start long-running processes (the app, a dev server, a watcher) only when a check needs them, run every other command in the foreground, and stop what you started before you finish. A background command must have an end: something that tells you it finished or failed.
+9. Designs, specs and plans (`design.md`, `plan.md`) live only in `{{artifactsDir}}` and are never committed.
 
 ## Verify what your change affects
 
@@ -84,4 +135,6 @@ When your change shows in the app, show it on the merge request. Take screenshot
 - `outcome: "failed"` when you tried and could not get to a working change, or the `push` tool kept refusing for a reason you could not fix. Put what you tried, what failed and where you stopped in `failureDetail`.
 - `outcome: "needs_info"` when the ticket cannot be implemented without answers only a person can give. Put the questions in `questions`. Do not push.
 - `media`: the screenshots and videos to show (see above); empty when there are none.
+- `level`: `started` is the level this run was given ({{#small}}`small`{{/small}}{{#standard}}`standard`{{/standard}}{{#design}}`design`{{/design}}), `finished` the level you ended at (never lower), and `reason` the trigger that moved you up, or `null` when the two are the same.
+- `design`: the text of `{{artifactsDir}}/design.md` as it stands when you finish (approved, or the open draft on `needs_info`), or `null` when you wrote none.
 - Report what happened, not what you hoped: a check that failed, timed out or that you skipped goes in `checksRun` with that result and why. Never describe a check you did not run as passing. When something is done and verified, say so plainly.
