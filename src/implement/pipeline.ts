@@ -26,10 +26,10 @@ import { injectToken, splitCredentials, type RemoteCredentials } from "../worksp
 import { DEFAULT_SETTINGS } from "../settings/schema.js";
 import { extractAgentBrief } from "./brief.js";
 import { bundleBase, remoteTicketBranches } from "./git.js";
-import { chooseLevel, type Level } from "./level.js";
+import { chooseLevel, higher, type Level } from "./level.js";
 import { renderImplementPrompt } from "./prompt.js";
 import { publishImplement } from "./publish.js";
-import { validateImplementResult, type Handback, type StoredImplement } from "./result.js";
+import { atRunLevel, validateImplementResult, type Handback, type ImplementResult, type StoredImplement } from "./result.js";
 
 /** How much of a failed check's output a hand-back keeps. */
 export const CHECK_TAIL_BYTES = 8 * 1024;
@@ -165,13 +165,20 @@ const pushLanded = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, 
 /** The spec's run id: the job's attempt, or the dry run's process. */
 export const runIdOf = (ctx: RunContext): string => (ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`);
 
+/** Where the questions this run answers were asked: the level that run finished at, and at least design when it wrote one, so the design carries on. */
+const carriedLevel = (asked: ImplementResult | null | undefined): Level | null => {
+  if (asked === null || asked === undefined) return null;
+  const finished = asked.level?.finished ?? null;
+  return asked.design === null ? finished : higher(finished ?? "design", "design");
+};
+
 /** The level this run works at: the design label, the setting, or the level of the run whose questions it answers, whichever is highest. */
 export const levelFor = (ctx: RunContext, deps: PipelineDeps, bundle: TicketBundle): Level =>
   chooseLevel({
     labels: bundle.labels,
     designLabel: deps.config.implement?.designLabel,
     defaultLevel: (deps.settings?.get() ?? DEFAULT_SETTINGS)["implement.defaultLevel"],
-    carried: answeredImplement(ctx, deps)?.implementResult?.result?.level?.finished ?? null,
+    carried: carriedLevel(answeredImplement(ctx, deps)?.implementResult?.result),
   });
 
 const limitsOf = (settings: ImplementConfig, level: Level): { timeoutMinutes: number; maxTurns: number } =>
@@ -295,6 +302,7 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
     checks: stewardChecks(settings.checks, baseSha),
     interactive: false,
     tools: level === "design" ? ["Skill", "Agent"] : ["Skill"],
+    level,
   };
   return { spec };
 };
@@ -327,7 +335,8 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
 
   const validated = validateImplementResult(report.output);
   if (!validated.ok) return finish(ctx, deps, { result: null, handback: handback("readyForHuman", "the agent's result was invalid", validated.error) });
-  const result = validated.result;
+  // The steward chose the run's level; a spec from before levels ran today's process, `small`.
+  const result = atRunLevel(validated.result, spec.level ?? "small");
   if (!ctx.dryRun) recordIntakeOutcome(deps, ctx.jobId, result.outcome);
   if (result.outcome === "needs_info") return finish(ctx, deps, { result, handback: handback("needsInfo", "the ticket needs more information") });
   if (result.outcome === "failed") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent could not finish") });

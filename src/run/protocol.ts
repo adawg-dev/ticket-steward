@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { MediaUploadsSchema } from "../codehost/media.js";
+import { LevelSchema } from "../implement/level.js";
 import { PushTargetSchema } from "../push/target.js";
 
 /**
@@ -47,6 +48,8 @@ export const RunSpecSchema = z.object({
   interactive: z.boolean(),
   /** Extra brain tools for the run: `Skill` turns skills on, `Agent` adds the goldfish subagent. Older specs have none. */
   tools: z.array(z.enum(["Skill", "Agent"])).default([]),
+  /** The process level the steward chose for an implement run; absent on other runs and on specs from before levels. */
+  level: LevelSchema.exactOptional(),
 });
 
 export type RunSpec = z.infer<typeof RunSpecSchema>;

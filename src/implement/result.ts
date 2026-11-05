@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { MediaListSchema, MediaUploadsSchema } from "../codehost/media.js";
-import { levelRank, LevelSchema } from "./level.js";
+import { higher, LevelSchema, type Level } from "./level.js";
 
 export const ImplementResultSchema = z.object({
   outcome: z.enum(["implemented", "failed", "needs_info"]),
@@ -11,7 +11,7 @@ export const ImplementResultSchema = z.object({
   failureDetail: z.string().nullable(),
   /** Screenshots and recordings of the change, for the merge request. */
   media: MediaListSchema,
-  /** The process level the run started and finished at; null on results stored before levels. */
+  /** The process level the run started and finished at; null on results stored before levels. The steward sets `started` (see `atRunLevel`). */
   level: z.object({ started: LevelSchema, finished: LevelSchema, reason: z.string().nullable() }).nullable().default(null),
   /** The design written for the ticket, shown in the agent session; null when none. */
   design: z.string().nullable().default(null),
@@ -28,8 +28,13 @@ export const validateImplementResult = (output: unknown): { ok: true; result: Im
   if (result.summary.trim() === "") return { ok: false, error: "summary is empty" };
   if (result.outcome === "needs_info" && result.questions.every((q) => q.trim() === "")) return { ok: false, error: "needs_info without questions" };
   if (result.outcome === "failed" && (result.failureDetail === null || result.failureDetail.trim() === "")) return { ok: false, error: "failed without failureDetail" };
-  if (result.level !== null && levelRank(result.level.finished) < levelRank(result.level.started)) return { ok: false, error: "level finished below where it started" };
   return { ok: true, result };
+};
+
+/** The result with its level started where the steward started the run, and never finished lower; no level from the agent means it stayed there. */
+export const atRunLevel = (result: ImplementResult, started: Level): ImplementResult => {
+  const finished = higher(started, result.level?.finished ?? started);
+  return { ...result, level: { started, finished, reason: finished === started ? null : (result.level?.reason ?? null) } };
 };
 
 export const HandbackSchema = z.object({

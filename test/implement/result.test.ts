@@ -1,4 +1,4 @@
-import { validateImplementResult, type ImplementResult } from "../../src/implement/result.js";
+import { atRunLevel, validateImplementResult, type ImplementResult } from "../../src/implement/result.js";
 
 const implemented: ImplementResult = {
   outcome: "implemented",
@@ -49,8 +49,22 @@ describe("validateImplementResult", () => {
     expect(validateImplementResult(older)).toEqual({ ok: true, result: implemented });
   });
 
-  it("rejects a level that finished below where it started", () => {
-    expect(validateImplementResult({ ...implemented, level: { started: "standard", finished: "small", reason: null } })).toEqual({ ok: false, error: "level finished below where it started" });
+  it("accepts any level the agent reports: the steward stamps it with the run's level", () => {
+    expect(validateImplementResult({ ...implemented, level: { started: "standard", finished: "small", reason: null } }).ok).toBe(true);
     expect(validateImplementResult({ ...implemented, level: { started: "small", finished: "design", reason: "needs a design" } }).ok).toBe(true);
+  });
+});
+
+describe("atRunLevel", () => {
+  it("starts the level where the steward started the run and never finishes it lower", () => {
+    expect(atRunLevel({ ...implemented, level: { started: "design", finished: "small", reason: "smaller than it looked" } }, "standard").level).toEqual({ started: "standard", finished: "standard", reason: null });
+  });
+
+  it("keeps a step-up above the run's level, with its reason", () => {
+    expect(atRunLevel({ ...implemented, level: { started: "small", finished: "design", reason: "a migration" } }, "standard").level).toEqual({ started: "standard", finished: "design", reason: "a migration" });
+  });
+
+  it("reads no level from the agent as the run's level, unchanged", () => {
+    expect(atRunLevel(implemented, "small")).toEqual({ ...implemented, level: { started: "small", finished: "small", reason: null } });
   });
 });

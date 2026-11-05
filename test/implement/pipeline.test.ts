@@ -220,10 +220,29 @@ describe("runImplement", () => {
     expect(await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(job?.commitSha);
     expect(await git(repo.repo, ["log", "-1", "--format=%s", `refs/heads/${BRANCH}`])).toBe("API-1: Keep the last chunk");
     expect(job?.pushedAt).not.toBeNull();
-    expect(job?.implementResult).toEqual({ result: implemented, handback: null, baseSha: await git(repo.repo, ["rev-parse", "main"]) });
+    expect(job?.implementResult).toEqual({ result: { ...implemented, level: { started: "small", finished: "small", reason: null } }, handback: null, baseSha: await git(repo.repo, ["rev-parse", "main"]) });
     expect(tracker.labelsOf("issue-1")).toEqual(["ready-for-agent"]);
     expect(brain.calls[0]?.output).toBe("implement");
     expect(brain.calls[0]?.timeoutMs).toBe(60_000);
+  });
+
+  it("stores the run's level as where the run started, and clamps a lower finished level instead of handing back", async () => {
+    const brain = agentBrain({ ...implemented, level: { started: "design", finished: "small", reason: "smaller than it looked" } });
+    const settings = { get: (): Settings => ({ ...DEFAULT_SETTINGS, "implement.defaultLevel": "standard" }) };
+    const ctx = claim();
+
+    expect(await runImplement(ctx, brain.bind({ ...makeDeps(brain.runBrain), settings }))).toEqual({ status: "succeeded" });
+
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.result?.level).toEqual({ started: "standard", finished: "standard", reason: null });
+  });
+
+  it("stores no level from the agent as the run's level", async () => {
+    const brain = agentBrain(implemented);
+    const ctx = claim();
+
+    expect(await runImplement(ctx, depsFor(brain))).toEqual({ status: "succeeded" });
+
+    expect(stores.jobs.get(ctx.jobId)?.implementResult?.result?.level).toEqual({ started: "small", finished: "small", reason: null });
   });
 
   it("gives the run a push tool that creates the ticket branch on the job's base", async () => {
@@ -564,7 +583,7 @@ describe("runImplement", () => {
       const ctx = claim();
       const outcome = await runImplement(ctx, { ...depsFor(agentBrain(implemented)), decisions: client });
       expect(outcome).toEqual({ status: "succeeded" });
-      expect(stores.jobs.get(ctx.jobId)?.implementResult?.result).toEqual(implemented);
+      expect(stores.jobs.get(ctx.jobId)?.implementResult?.result).toEqual({ ...implemented, level: { started: "small", finished: "small", reason: null } });
       expect(outcomes(ctx.jobId)).toEqual([]);
     });
   });
@@ -795,6 +814,7 @@ describe("runImplement in the ticket's agent session", () => {
       await run(trigger);
       expect(specs[0]?.limits).toMatchObject({ timeoutMinutes: 120, maxTurns: 400 });
       expect(specs[0]?.prompt).toContain("level=design");
+      expect(specs.map((spec) => spec.level)).toEqual(["design", "small"]);
       expect(specs[1]?.limits).toMatchObject({ timeoutMinutes: 1, maxTurns: 5 });
     });
 
@@ -818,6 +838,19 @@ describe("runImplement in the ticket's agent session", () => {
       const specs: RunSpec[] = [];
       await runImplement(claim({ ...trigger, message: "The S3 adapter.", author: "Ada" }), { ...makeDeps(undefined, config), linear, executor: thinking("Implementing.", {}, specs) });
       expect(specs[0]?.prompt).toBe("level=design hasDesign=yes design=D1 use S3");
+    });
+
+    it("an answer to questions asked with a design resumes at design, whatever level the run stored", async () => {
+      const config = makeConfig({ prompt: await levelPrompt() });
+      const asked = claim();
+      const drafted = { ...questions, level: { started: "small" as const, finished: "small" as const, reason: null }, design: "D1 use S3" };
+      await runImplement(asked, { ...makeDeps(undefined, config), linear, executor: thinking("Reading.", { output: drafted, sessionId: "session-q" }) });
+      stores.jobs.finish(asked.jobId, { status: "succeeded" });
+
+      const specs: RunSpec[] = [];
+      await runImplement(claim({ ...trigger, message: "The S3 adapter.", author: "Ada" }), { ...makeDeps(undefined, config), linear, executor: thinking("Implementing.", {}, specs) });
+      expect(specs[0]?.prompt).toBe("level=design hasDesign=yes design=D1 use S3");
+      expect(specs[0]?.level).toBe("design");
     });
 
     it("the default level setting applies", async () => {
