@@ -21,7 +21,9 @@ Rewrite the plan in place. A shorter plan that still meets the ticket is the goa
 
 ## On a diff
 
-Run `git diff <from>...HEAD` (or `git diff` for uncommitted work) and read every hunk. For each, ask:
+Run `git diff <from>...HEAD` (or `git diff` for uncommitted work) and read every hunk. `git diff` leaves out new files
+nobody has added yet: the change also includes every new file `git status --short` lists as untracked (`??`), and you
+read each of those in full too. For each hunk and new file, ask:
 
 - **Reuse.** Does the codebase already have a function, component, type or pattern that does this? Use it, and delete
   the new one.

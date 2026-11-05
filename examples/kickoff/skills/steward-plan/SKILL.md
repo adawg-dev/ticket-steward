@@ -78,7 +78,8 @@ Run `steward-simplify` on the plan, then work through it yourself, in this sessi
 
 1. Implement the task's steps.
 2. Run its verification and fix what fails.
-3. Run `steward-simplify` on the task's diff (`git diff HEAD` before you commit), then re-run the verification.
+3. Run `steward-simplify` on the task's diff (`git diff HEAD` before you commit, plus the untracked new files
+   `git status --short` lists as `??`), then re-run the verification.
 4. Commit it, following the prompt's commit rules. `plan.md` and `design.md` are never in a commit.
 
 When a task shows the plan was wrong, update `plan.md` and carry on. When the work turns out bigger than the plan (more

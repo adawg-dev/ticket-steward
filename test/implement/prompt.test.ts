@@ -89,7 +89,7 @@ describe("implement prompt", () => {
       expect(standard).toContain("/jobs/1/artifacts/plan.md");
       expect(standard).toContain("For each task in the plan");
       expect(standard).not.toContain("subagent_type");
-      expect(standard).toContain("on the task's uncommitted diff (`git diff HEAD`), then commit");
+      expect(standard).toContain("which you must read too, then commit");
       expect(standard).toMatchSnapshot();
     });
 
@@ -102,10 +102,20 @@ describe("implement prompt", () => {
       expect(design).toMatchSnapshot();
     });
 
-    it("names the step-up triggers below the design level", () => {
-      expect(small).toContain("migrations, auth/RBAC, multi-tenancy or billing/credits");
-      expect(small).toContain("step up to `standard`");
+    it("has every simplify pass over a diff read the untracked new files too", () => {
+      const untracked = "every new file `git status --short` lists as untracked (`??`)";
+      expect(small).toContain(`\`git diff ${"a".repeat(40)}\` (your whole change, committed or not) and ${untracked}`);
+      for (const prompt of [standard, design]) {
+        expect(prompt).toContain(`on the task's uncommitted diff (\`git diff HEAD\`) and ${untracked}`);
+        expect(prompt).not.toContain("git add -N");
+      }
+    });
+
+    it("names the step-up triggers only at the standard level", () => {
+      expect(standard).toContain("migrations, auth/RBAC, multi-tenancy or billing/credits");
       expect(standard).toContain("step up to `design`");
+      for (const text of ["Step up", "step up", "trigger", "migrations, auth/RBAC", "never lower", "moved you up"]) expect(small).not.toContain(text);
+      expect(small).toContain("- `level`: `started` and `finished` are both `small` and `reason` is `null`.");
       for (const prompt of [standard, design]) {
         expect(prompt).toContain("Its design-only rule (no production code) ends when you approve the design, and never applies to code you already wrote.");
         expect(prompt).toContain("Skip its save-location step and its hand-off to `egm-review`.");
@@ -118,7 +128,7 @@ describe("implement prompt", () => {
       for (const prompt of [small, standard, design]) {
         expect(prompt).toContain("- `level`: `started`");
         expect(prompt).toContain("- `design`: the text of `/jobs/1/artifacts/design.md`");
-        expect(prompt).toContain("(`design.md`, `plan.md`) live only in `/jobs/1/artifacts` and are never committed");
+        expect(prompt).toContain("(`design.md`, `design_draft.md`, `plan.md`) live only in `/jobs/1/artifacts` and are never committed");
       }
       expect(standard).toContain("the level this run was given (`standard`)");
     });
