@@ -137,7 +137,7 @@ describe("retentionProtection", () => {
     const dir = await sessionDir("1-1", 200);
 
     expect((await runSweep()).removedSessionDirs).toEqual([]);
-    expect((await runSweep({ prefix: "/agent", sessionRetentionDays: 90 })).removedSessionDirs).toEqual(expect.arrayContaining([dir]));
+    expect((await runSweep({ prefix: "/agent", sessionRetentionDays: 90, anyMergeRequest: false })).removedSessionDirs).toEqual(expect.arrayContaining([dir]));
   });
 
   it("keeps a running loop's session dir however old, and an ended loop's for 180 days after its end", async () => {

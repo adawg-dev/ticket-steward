@@ -29,6 +29,8 @@ const SettingFields = {
   "ci.retryLimit": z.number().int().nonnegative(),
   /** How far back the default branch's failures count as a flaky signal. */
   "ci.lookbackDays": z.number().int().positive(),
+  /** Off: no `/agent` chats on MRs the steward did not open, whatever the config allows; on does nothing the config does not allow. */
+  "chat.anyMergeRequest": z.boolean(),
 };
 
 /** Every setting, each required: what is in effect. Unknown keys are refused. */
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: Settings = {
   "ci.triage": true,
   "ci.retryLimit": 1,
   "ci.lookbackDays": 14,
+  "chat.anyMergeRequest": true,
 };
 
 export const SETTING_KEYS: readonly SettingKey[] = SettingsSchema.keyof().options;

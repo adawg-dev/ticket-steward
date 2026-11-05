@@ -9,6 +9,11 @@ import type { StdioMcpServerSpec } from "../brain/types.js";
  * `title` is the ticket's title when the run started, which names a first push's branch where the push server reads no
  * ticket (the local executor's, which holds no Linear credential); null for a push onto an existing branch.
  * `port` is the run's app port, so the steward's checks see the same env as the run's setup.
+ *
+ * `mrBranch` is an MR chat's: `branch` is the MR's own source branch (a person's), pinned when the run starts, and
+ * `baseSha` the MR head then, so a push only ever fast-forwards what was there. `subjectKey` is the ticket key every
+ * commit subject must start with in that mode (null: no prefix rule), and `checksBaseSha` the MR's diff base for
+ * `{{baseSha}}` in the checks (unset: `baseSha`).
  */
 export const PushTargetSchema = z.object({
   jobId: z.number().int().positive(),
@@ -16,11 +21,13 @@ export const PushTargetSchema = z.object({
   identifier: z.string().min(1),
   issueId: z.string().min(1),
   title: z.string().nullable(),
-  mode: z.enum(["create", "fastForward"]),
+  mode: z.enum(["create", "fastForward", "mrBranch"]),
   branch: z.string().min(1).nullable(),
   baseSha: z.string().regex(/^[0-9a-f]{40}$/),
   loopId: z.number().int().positive().nullable(),
   port: z.number().int().positive(),
+  subjectKey: z.string().min(1).nullable().optional(),
+  checksBaseSha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional(),
 });
 
 export type PushTarget = z.infer<typeof PushTargetSchema>;

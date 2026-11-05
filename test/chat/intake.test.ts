@@ -42,12 +42,16 @@ const config = (): StewardConfig => ({
     botUsername: "greptile-bot", maxRounds: 5, prompt: "/dev/null", pollSeconds: 300, mrTimeoutMinutes: 30,
     reviewTimeoutMinutes: 30, pipelineTimeoutMinutes: 30, ciLogLines: 200,
   },
-  chat: { prefix: "/agent", sessionRetentionDays: 180 },
+  chat: { prefix: "/agent", sessionRetentionDays: 180, anyMergeRequest: false },
 });
 
+let anyMergeRequest = false;
+let settingOff = false;
+
 const deps = (): NoteIntakeDeps => {
-  const steward = config();
-  return { config: steward, stores, gitlab, channels, settings: { get: () => seedSettings(steward) }, now: () => now };
+  const base = config();
+  const steward: StewardConfig = { ...base, chat: { prefix: "/agent", sessionRetentionDays: 180, anyMergeRequest } };
+  return { config: steward, stores, gitlab, channels, settings: { get: () => ({ ...seedSettings(steward), "chat.anyMergeRequest": !settingOff }) }, now: () => now };
 };
 
 const intake = (body: string, over: Partial<GitlabNote> = {}, at: Partial<GitlabWakeEvent> = {}) => {
@@ -85,6 +89,8 @@ beforeEach(async () => {
   gitlab.members.set(REPORTER, 20);
   channels = new RunChannels();
   now = new Date(T0);
+  anyMergeRequest = false;
+  settingOff = false;
 });
 
 afterEach(async () => {
@@ -248,6 +254,44 @@ describe("noteIntake", () => {
 
     expect((await intake("/agent why this?")).action).toBe("chat");
     expect(queued().map((job) => job.kind).sort()).toEqual(["await_review", "chat"]);
+  });
+
+  describe("on a merge request the steward did not open", () => {
+    it("queues an MR chat keyed by the MR when the config allows it", async () => {
+      anyMergeRequest = true;
+
+      expect(await intake("/agent fix the flaky test", {}, { branch: "adam/tidy" })).toEqual({ action: "chat_mr", loopId: null });
+
+      expect(queued().map((job) => job.trigger)).toEqual([{
+        kind: "chat", issueId: "mr:42!7", identifier: "!7", teamKey: "", loopId: null, projectId: 42, mrIid: 7,
+        discussionId: "disc-1", noteId: expect.any(Number), author: "ada", message: "fix the flaky test",
+      }]);
+    });
+
+    it("answers that there is no session when the config or the setting does not allow it", async () => {
+      expect((await intake("/agent fix it", {}, { branch: "adam/tidy" })).action).toBe("chat_no_session");
+      anyMergeRequest = true;
+      settingOff = true;
+      expect((await intake("/agent fix it", {}, { branch: "adam/tidy" })).action).toBe("chat_no_session");
+      expect(queued()).toEqual([]);
+    });
+
+    it("still takes the ticket's path on the steward's own MR, and still denies a Reporter", async () => {
+      anyMergeRequest = true;
+      loopIn("awaiting_review");
+
+      expect((await intake("/agent why this?")).action).toBe("chat");
+      expect(queued().find((job) => job.kind === "chat")?.issueId).toBe("issue-1");
+      expect((await intake("/agent fix it", { authorId: REPORTER }, { branch: "adam/tidy" })).action).toBe("chat_denied");
+    });
+
+    it("takes a note on another MR from a steward branch's name as that MR's chat, not the ticket's", async () => {
+      anyMergeRequest = true;
+      loopIn("awaiting_review");
+
+      expect((await intake("/agent from MR 8", {}, { mrIid: 8 })).action).toBe("chat_mr");
+      expect(queued().find((job) => job.kind === "chat")?.issueId).toBe("mr:42!8");
+    });
   });
 
   it("ignores a note on a branch with no loop", async () => {

@@ -298,6 +298,61 @@ describe("pushFromWorktree refusals", () => {
   });
 });
 
+describe("pushFromWorktree onto a merge request's own branch (an MR chat)", () => {
+  const PERSON_BRANCH = "adam/tidy-adapter";
+
+  /** A person's branch on the remote at their own commit, and an MR chat's job and target for it. */
+  const personBranch = async (over: Partial<PushTarget> = {}): Promise<{ head: string; target: PushTarget }> => {
+    const head = await agentCommit("Tidy the adapter");
+    await git(worktree.path, ["push", "-q", repo.repo, `${head}:refs/heads/${PERSON_BRANCH}`]);
+    const chatJob = stores.jobs.enqueue({
+      kind: "chat", issueId: "mr:42!7", identifier: "!7", teamKey: "", loopId: null, projectId: 42, mrIid: 7, discussionId: null, noteId: 1, author: "ada", message: "fix it",
+    });
+    const target = createTarget({ jobId: chatJob, identifier: "!7", issueId: "mr:42!7", title: "Tidy the adapter", mode: "mrBranch", branch: PERSON_BRANCH, baseSha: head, subjectKey: null, checksBaseSha: repo.sha, ...over });
+    return { head, target };
+  };
+
+  it("fast-forwards the person's branch with commits under any subject, without reading a Linear ticket", async () => {
+    const { head, target } = await personBranch();
+    const sha = await agentCommit("Keep the last chunk", "export const adapter = 7;\n");
+
+    expect(await push(target, null)).toEqual({ ok: true, branch: PERSON_BRANCH, sha, commits: 1 });
+    expect(await remoteHead(PERSON_BRANCH)).toBe(sha);
+    expect(stores.pushes.forJob(target.jobId)).toMatchObject([{ branch: PERSON_BRANCH, sha, previousSha: head }]);
+  });
+
+  it("needs the ticket key on every subject when the branch names one", async () => {
+    const { target } = await personBranch({ subjectKey: "API-1" });
+    await agentCommit("Keep the last chunk", "export const adapter = 7;\n");
+
+    expect(await push(target, null)).toMatchObject({ ok: false, reason: 'every commit subject must start with "API-1: "; amend or reword these commits' });
+  });
+
+  it("refuses when the person pushed meanwhile, and leaves their branch alone", async () => {
+    const { target } = await personBranch();
+    await git(repo.repo, ["branch", "-f", PERSON_BRANCH, repo.sha]);
+    await agentCommit("Keep the last chunk", "export const adapter = 7;\n");
+
+    expect(await push(target, null)).toMatchObject({ ok: false, reason: "the push was rejected" });
+    expect(await remoteHead(PERSON_BRANCH)).toBe(repo.sha);
+  });
+
+  it("refuses a protected branch whatever the run was told", async () => {
+    const { target } = await personBranch();
+    await agentCommit("Keep the last chunk", "export const adapter = 7;\n");
+
+    expect(await push({ ...target, branch: "main" }, null)).toMatchObject({ ok: false, reason: "refusing to push to main: it is a protected branch" });
+  });
+
+  it("runs the checks against the MR's diff base", async () => {
+    const { target } = await personBranch();
+    await agentCommit("Keep the last chunk", "export const adapter = 7;\n");
+    const deps = makeDeps(makeConfig([`test "{{baseSha}}" = "${repo.sha}"`]));
+
+    expect(await push(target, null, deps)).toMatchObject({ ok: true });
+  });
+});
+
 describe("pushFromWorktree pushes", () => {
   it("creates the ticket branch at HEAD and records the job as pushed", async () => {
     await agentCommit("API-1: keep the last chunk");

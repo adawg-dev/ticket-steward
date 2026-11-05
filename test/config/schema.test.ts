@@ -184,8 +184,9 @@ describe("chat config", () => {
     expect(StewardConfigSchema.parse(minimalInput).chat).toBeUndefined();
   });
 
-  it("defaults the prefix and session retention", () => {
-    expect(StewardConfigSchema.parse({ ...minimalInput, chat: {} }).chat).toEqual({ prefix: "/agent", sessionRetentionDays: 180 });
+  it("defaults the prefix and session retention, with chats on any MR off", () => {
+    expect(StewardConfigSchema.parse({ ...minimalInput, chat: {} }).chat).toEqual({ prefix: "/agent", sessionRetentionDays: 180, anyMergeRequest: false });
+    expect(StewardConfigSchema.parse({ ...minimalInput, chat: { anyMergeRequest: true } }).chat?.anyMergeRequest).toBe(true);
   });
 
   it("rejects a non-positive retention", () => {

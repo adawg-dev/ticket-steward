@@ -44,8 +44,23 @@ describe("GitLabMrClient", () => {
       projectId: 42, iid: 7, state: "opened", sha: "c".repeat(40), title: "Fix", description: "",
       webUrl: mrBody.web_url, sourceBranch: "api-1-fix", targetBranch: "main", updatedAt: "2026-10-27T10:00:00Z",
       headPipeline: { id: 9, sha: "c".repeat(40), status: "failed" },
+      sourceProjectId: null, draft: false, diffBaseSha: null,
     });
     expect(calls[0]).toMatchObject({ url: "https://gitlab.example/api/v4/projects/42/merge_requests/7", method: "GET", headers: { "private-token": "glpat-test" } });
+  });
+
+  it("maps the source project, draft flag and diff base when GitLab sends them", async () => {
+    const { fetchImpl } = recorder([reply(200, { ...mrBody, source_project_id: 42, draft: true, diff_refs: { base_sha: "b".repeat(40), head_sha: "c".repeat(40) } })]);
+    expect(await client(fetchImpl).getMergeRequest(42, 7)).toMatchObject({ sourceProjectId: 42, draft: true, diffBaseSha: "b".repeat(40) });
+  });
+
+  it("says whether a branch is protected, by URL-encoded name, and false on a 404", async () => {
+    const { calls, fetchImpl } = recorder([reply(200, { name: "dev" }), reply(404, { message: "404 Not found" })]);
+    const c = client(fetchImpl);
+    expect(await c.isProtectedBranch(42, "dev")).toBe(true);
+    expect(await c.isProtectedBranch(42, "fix/a b")).toBe(false);
+    expect(calls[0]?.url).toBe("https://g/api/v4/projects/42/protected_branches/dev");
+    expect(calls[1]?.url).toBe("https://g/api/v4/projects/42/protected_branches/fix%2Fa%20b");
   });
 
   it("maps a missing head pipeline to null", async () => {

@@ -561,7 +561,7 @@ describe("buildServer", () => {
         gitlab.members.set(REPORTER, 20);
         recording = new RecordingLinear();
         app = buildServer({
-          config: { ...makeConfig(), greptile: GREPTILE, chat: { prefix: "/agent", sessionRetentionDays: 180 } },
+          config: { ...makeConfig(), greptile: GREPTILE, chat: { prefix: "/agent", sessionRetentionDays: 180, anyMergeRequest: false } },
           secrets: { LINEAR_WEBHOOK_SECRET: WEBHOOK_SECRET, GITLAB_WEBHOOK_SIGNING_TOKEN: SIGNING_TOKEN },
           stores,
           tracker,

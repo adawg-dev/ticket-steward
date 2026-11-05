@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { INTERRUPTED_ERROR } from "../brain/index.js";
 import { chatPromptPath } from "../cli/paths.js";
-import type { GitLabMrApi } from "../codehost/gitlabMr.js";
+import type { GitLabMrApi, MergeRequestInfo } from "../codehost/gitlabMr.js";
 import { attachedMedia, renderMedia } from "../codehost/media.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { readRepoPartial, renderPrompt } from "../core/prompt.js";
@@ -18,6 +18,7 @@ import type { TriggerEvent } from "../tracker/types.js";
 import { logger } from "../log.js";
 import type { Worktree } from "../workspace/worktree.js";
 import { CHAT_MARKER, NO_SESSION_REPLY, validateChatResult, type StoredChat } from "./result.js";
+import { mrChatOf, mrChatRefusal, mrWorktreeName, ticketKeyOf } from "./mr.js";
 import { latestSession, type AgentSession } from "./session.js";
 import { linearSessionFor, stoppedResponse, type LinearSession } from "../linear/session.js";
 import { reviveTicket } from "../linear/assignment.js";
@@ -56,11 +57,31 @@ export interface ChatPromptInput {
   hasChecks: boolean;
   /** The loop's decisions so far, so the agent neither records them again nor contradicts them. */
   decisions: string[];
+  /** What every commit subject starts with (followed by `: `); empty when no prefix is required. */
+  subjectPrefix?: string;
+  /** An MR chat: `/agent` on a person's merge request, with no session of the ticket's behind it. */
+  mr?: {
+    title: string;
+    description: string;
+    sourceBranch: string;
+    targetBranch: string;
+    /** The Linear ticket the branch or title names, for context only. */
+    ticket: { identifier: string; title: string; description: string } | null;
+    /** A later `/agent` on the same MR: the session holds the earlier conversation. */
+    resumed: boolean;
+  };
 }
 
 /** Fill the chat prompt template (mustache, unescaped, like the other prompts), with the repo's own section as `{{> repo}}`. */
 export const renderChatPrompt = (template: string, input: ChatPromptInput, repo = ""): string =>
-  renderPrompt(template, { ...input, fromLinear: input.fromLinear ?? false, hasDecisions: input.decisions.length > 0 }, repo);
+  renderPrompt(template, {
+    ...input,
+    fromLinear: input.fromLinear ?? false,
+    hasDecisions: input.decisions.length > 0,
+    subjectPrefix: input.subjectPrefix ?? input.identifier,
+    isMrChat: input.mr !== undefined,
+    mr: input.mr ?? false,
+  }, repo);
 
 /** Where a chat answers: the note's discussion on the MR (and the ticket's agent session), or the agent session alone. */
 interface Answer {
@@ -271,6 +292,16 @@ const recordDecisions = (deps: Pick<PipelineDeps, "stores" | "redactor">, sessio
   }
 };
 
+/**
+ * An MR chat that pushed onto a person's branch: the reply says, in the steward's words, which head it moved from and to
+ * and how to undo it, whatever the agent wrote.
+ */
+const withUndo = (ctx: RunContext, session: AgentSession, work: WorkReport, reply: string): string => {
+  if (mrChatOf(ctx.issueId) === null || work.pushedSha === null || session.branch === null) return reply;
+  const from = session.headSha.slice(0, 8);
+  return `${reply}\n\nPushed to \`${session.branch}\`: \`${from}\` → \`${work.pushedSha.slice(0, 8)}\`. To undo, revert those commits or reset the branch to \`${from}\`.`;
+};
+
 /** The reply with the screenshots and recordings the run attached, if any. */
 const withMedia = (reply: string, media: string[]): string => (media.length === 0 ? reply : `${reply}\n\n${media.join("\n")}`);
 
@@ -333,7 +364,7 @@ const finishChat = async (
   }
   recordDecisions(deps, session, validated.result.decisions);
   const media = renderMedia(await attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab: answer.gitlab, project: mediaProject(deps, answer, session) }));
-  const reply = withLeftover(withMedia(validated.result.reply, media), leftover);
+  const reply = withLeftover(withMedia(withUndo(ctx, session, work, validated.result.reply), media), leftover);
   return decide(ctx, deps, answer, { reply, warning: leftover === "" ? null : "the agent left unpushed work" });
 };
 
@@ -345,8 +376,16 @@ const mediaProject = (deps: PipelineDeps, answer: Answer, session: AgentSession)
 };
 
 /** The brain run: prepare, execute (in-process or in a run pod) with its lines in the agent panel, finish. */
-const converse = async (ctx: RunContext, deps: PipelineDeps, answer: Answer, session: AgentSession): Promise<JobOutcome> => {
-  const prepared = await prepareChat(ctx, deps, answer, session);
+const converse = async (ctx: RunContext, deps: PipelineDeps, answer: Answer, session: AgentSession): Promise<JobOutcome> =>
+  executePrepared(ctx, deps, answer, session, await prepareChat(ctx, deps, answer, session));
+
+const executePrepared = async (
+  ctx: RunContext,
+  deps: PipelineDeps,
+  answer: Answer,
+  session: AgentSession,
+  prepared: { spec: RunSpec } | { outcome: JobOutcome },
+): Promise<JobOutcome> => {
   if ("outcome" in prepared) return prepared.outcome;
   const live: Answer = { ...answer, panel: linearSessionFor(deps, ctx.issueId, { workspacePath: prepared.spec.worktreePath }) };
   let executed: { report: RunReport; work: WorkReport };
@@ -357,6 +396,121 @@ const converse = async (ctx: RunContext, deps: PipelineDeps, answer: Answer, ses
     return prepareFailed(deps, err);
   }
   return finishChat(ctx, deps, live, session, prepared.spec, executed);
+};
+
+/** The ticket an MR chat's branch or title names, read for context only; null when there is none or it cannot be read. */
+const ticketContext = async (deps: PipelineDeps, key: string): Promise<{ identifier: string; title: string; description: string } | null> => {
+  try {
+    const { id } = await deps.tracker.resolveIssueId(key);
+    const ticket = await deps.tracker.fetchTicket(id);
+    return { identifier: ticket.identifier, title: ticket.title, description: ticket.description };
+  } catch (err) {
+    logger.info({ key, err: errorMessage(err) }, "chat: the MR's ticket could not be read; going on without it");
+    return null;
+  }
+};
+
+/**
+ * An MR chat's prepare half: the MR's own branch at its head, in the worktree its chats share, with a push target pinned
+ * to that branch (fast-forward from this head only) and the prompt for a person's merge request.
+ */
+const prepareMrChat = async (
+  ctx: RunContext,
+  deps: PipelineDeps,
+  answer: Answer,
+  session: AgentSession,
+  mr: MergeRequestInfo,
+  resumeSessionId: string | null,
+): Promise<{ spec: RunSpec } | { outcome: JobOutcome }> => {
+  if (ctx.resume !== undefined) return { spec: ctx.resume };
+  const port = jobPort(deps);
+  const paths = jobPaths(ctx, deps, { worktreeName: session.worktreeName });
+  const worktreePath = join(paths.workRoot, paths.worktreeName);
+  const subjectKey = ticketKeyOf(mr, deps.config.tracker.teams);
+  const checksBase = mr.diffBaseSha ?? mr.sha;
+  const push: PushTarget | undefined = settingsOf(deps) === null ? undefined : {
+    jobId: ctx.jobId, worktreePath, identifier: ctx.identifier, issueId: ctx.issueId, title: mr.title, mode: "mrBranch",
+    branch: mr.sourceBranch, baseSha: mr.sha, loopId: null, port, subjectKey, checksBaseSha: mr.diffBaseSha,
+  };
+  const checks = push === undefined || deps.config.implement === undefined ? [] : stewardChecks(deps.config.implement.checks, checksBase);
+  let prompt: string;
+  try {
+    const { author, message } = requestOf(answer.trigger);
+    prompt = renderChatPrompt(await readFile(chatPromptPath, "utf8"), {
+      identifier: ctx.identifier,
+      author,
+      message,
+      mrUrl: mr.webUrl,
+      workspacePath: worktreePath,
+      headSha: mr.sha,
+      stewardPort: port,
+      artifactsDir: paths.artifactsDir,
+      canPush: push !== undefined,
+      branch: mr.sourceBranch,
+      checks: checks.map((command) => `- \`${command}\``).join("\n"),
+      hasChecks: checks.length > 0,
+      decisions: [],
+      subjectPrefix: subjectKey ?? "",
+      mr: {
+        title: mr.title,
+        description: mr.description,
+        sourceBranch: mr.sourceBranch,
+        targetBranch: mr.targetBranch,
+        ticket: subjectKey === null ? null : await ticketContext(deps, subjectKey),
+        resumed: resumeSessionId !== null,
+      },
+    }, await readRepoPartial(deps.configPath));
+  } catch (err) {
+    return { outcome: prepareFailed(deps, err) };
+  }
+  return {
+    spec: {
+      version: 1,
+      runId: runIdOf(ctx),
+      jobId: ctx.jobId,
+      kind: "chat",
+      identifier: ctx.identifier,
+      issueId: ctx.issueId,
+      checkout: { ref: mr.sourceBranch, sha: mr.sha },
+      baseSha: checksBase,
+      worktreePath,
+      artifactsDir: paths.artifactsDir,
+      transcriptPath: paths.transcriptPath,
+      prompt,
+      personCommits: null,
+      output: "chat",
+      resumeSessionId,
+      limits: { timeoutMinutes: deps.config.brain.timeoutMinutes, maxTurns: deps.config.brain.maxTurns, setupTimeoutMinutes: deps.config.workspace.setupTimeoutMinutes },
+      push: push ?? null,
+      setup: deps.config.workspace.setup,
+      checks,
+      interactive: false,
+    },
+  };
+};
+
+/**
+ * `/agent` on a merge request the steward did not open: refuse with a reply when the MR may not be worked on, else run
+ * the agent on the MR's own branch, resuming the session an earlier `/agent` on the same MR left.
+ */
+const executeMrChat = async (ctx: RunContext, deps: PipelineDeps, answer: Answer, trigger: Extract<TriggerEvent, { kind: "chat" }>, gitlab: GitLabMrApi): Promise<JobOutcome> => {
+  let mr: MergeRequestInfo;
+  let protectedSource: boolean;
+  try {
+    mr = await gitlab.getMergeRequest(trigger.projectId, trigger.mrIid);
+    const listed = deps.config.implement?.protectedBranches.includes(mr.sourceBranch) ?? false;
+    protectedSource = listed || (mr.state === "opened" && (await gitlab.isProtectedBranch(trigger.projectId, mr.sourceBranch)));
+  } catch (err) {
+    return { status: "failed", error: `chat: the merge request could not be read: ${errorMessage(err)}`, retryable: true };
+  }
+  const refusal = mrChatRefusal(mr, { baseBranch: deps.config.workspace.baseBranch, protectedSource });
+  if (refusal !== null) return decide(ctx, deps, answer, { reply: refusal, warning: null });
+  const worktreeName = mrWorktreeName(trigger.mrIid);
+  const resumeSessionId = deps.stores.jobs.latestChatSession(ctx.issueId)?.sessionId ?? null;
+  // Recorded before the run, so the next chat finds this one's session in the same worktree and retention keeps it.
+  deps.stores.jobs.recordWorkspace(ctx.jobId, worktreeName, mr.sha);
+  const session: AgentSession = { sessionId: resumeSessionId ?? "", worktreeName, headSha: mr.sha, branch: mr.sourceBranch, loopId: null, jobId: ctx.jobId };
+  return executePrepared(ctx, deps, answer, session, await prepareMrChat(ctx, deps, answer, session, mr, resumeSessionId));
 };
 
 /** A Linear chat on a ticket with no brain session to resume. */
@@ -371,6 +525,7 @@ const executeChat = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutc
   const stored = deps.stores.jobs.get(ctx.jobId)?.chatResult ?? null;
   if (stored !== null) return postReply(deps, answer, stored);
   if (deps.config.brain.kind !== "claude-code") return fail('chat requires brain.kind "claude-code"');
+  if (trigger.kind === "chat" && gitlab !== undefined && mrChatOf(ctx.issueId) !== null) return executeMrChat(ctx, deps, answer, trigger, gitlab);
   const session = latestSession(deps.stores, ctx.issueId);
   if (session === null) {
     const reply = trigger.kind === "chat" ? NO_SESSION_REPLY : NO_LINEAR_SESSION_REPLY;

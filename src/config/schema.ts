@@ -114,6 +114,11 @@ export const DEFAULT_SESSION_RETENTION_DAYS = 180;
 const ChatSchema = z.object({
   prefix: z.string().min(1).default("/agent"),
   sessionRetentionDays: z.number().int().positive().default(DEFAULT_SESSION_RETENTION_DAYS),
+  /**
+   * `/agent` on any open MR of the project, not only the steward's: the agent works on the MR's own branch and may push
+   * to it (fast-forward only). Off by default; the `chat.anyMergeRequest` setting can switch it off at runtime, never on.
+   */
+  anyMergeRequest: z.boolean().default(false),
 });
 
 /** Where the steward's own secrets come from: the config dir's `.env`, or AWS Secrets Manager by the default credential chain. */

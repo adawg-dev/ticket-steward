@@ -9,10 +9,11 @@ import type { RunChannels } from "../run/channel.js";
 import { DEFAULT_SETTINGS, type Settings } from "../settings/schema.js";
 import { ACTIVE_LOOP_STATES, loopSubject, transaction, type Loop, type LoopState, type Stores } from "../store/index.js";
 import type { TriggerEvent } from "../tracker/types.js";
+import { mrChatsEnabled, mrIdentifier, mrIssueId } from "./mr.js";
 import { CHAT_MARKER, NO_SESSION_REPLY } from "./result.js";
 import { latestSession } from "./session.js";
 
-export type ChatAction = "chat" | "chat_revive" | "chat_denied" | "chat_ignored" | "chat_duplicate" | "chat_no_session" | "chat_failed";
+export type ChatAction = "chat" | "chat_mr" | "chat_revive" | "chat_denied" | "chat_ignored" | "chat_duplicate" | "chat_no_session" | "chat_failed";
 
 /** With `linear` and `tracker`, a note that revives an unassigned loop sets the steward back as the issue's delegate. */
 export interface ChatIntakeDeps extends DelegateDeps {
@@ -136,6 +137,19 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
   const parked = ticket !== null && isUnassigned(stores, ticket.issueId, loop);
   if (parked && deps.settings?.get()["linear.reviveByMention"] === false) return { action: "chat_ignored", loopId: loop?.id ?? null };
   if (ticket === null || latestSession(stores, ticket.issueId) === null) {
+    // No ticket session to resume: an MR chat on the MR's own branch, when the config allows it and the setting has not
+    // switched it off. Whether the MR may be worked on (open, not a fork, not a protected branch) is checked by the job.
+    if (mrChatsEnabled(config, deps.settings?.get() ?? DEFAULT_SETTINGS)) {
+      const mrChat: TriggerEvent = {
+        kind: "chat", issueId: mrIssueId(event.projectId, mrIid), identifier: mrIdentifier(mrIid), teamKey: "", loopId: null,
+        projectId: event.projectId, mrIid, discussionId: note.discussionId, noteId: note.id, author: note.authorUsername, message,
+      };
+      return transaction(stores.db, (): { action: ChatAction; loopId: number | null } => {
+        if (!stores.deliveries.markSeen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: null };
+        stores.jobs.enqueue(mrChat);
+        return { action: "chat_mr", loopId: null };
+      });
+    }
     if (!stores.deliveries.markSeen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: null };
     try {
       await replyNoSession(gitlab, event, mrIid, note);

@@ -109,7 +109,8 @@ export const storeLedger = (deps: LedgerDeps): PushLedger => {
       return startOf(deps, target);
     },
     ticket: async (target) => {
-      if (deps.tracker === null) return { title: target.title ?? target.identifier, closed: null };
+      // An MR chat has no Linear ticket; its lease on the MR head refuses a push to a branch deleted after a merge.
+      if (deps.tracker === null || target.mode === "mrBranch") return { title: target.title ?? target.identifier, closed: null };
       const ticket = await deps.tracker.fetchTicket(target.issueId);
       return { title: ticket.title, closed: closedReason(target.identifier, ticket.state) };
     },

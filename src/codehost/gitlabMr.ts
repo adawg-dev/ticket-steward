@@ -5,9 +5,14 @@ import type { StewardConfig } from "../config/schema.js";
 /** A numeric project id or a "group/project" path (URL-encoded by the client). */
 export type ProjectRef = number | string;
 export interface PipelineRef { id: number; sha: string; status: string }
+/**
+ * `sourceProjectId` differs from `projectId` on a fork's MR (null when GitLab omits it); `diffBaseSha` is the merge base
+ * the MR's diff is taken against (`diff_refs.base_sha`), null when GitLab has not computed it yet.
+ */
 export interface MergeRequestInfo {
   projectId: number; iid: number; state: string; sha: string; title: string; description: string;
   webUrl: string; sourceBranch: string; targetBranch: string; updatedAt: string; headPipeline: PipelineRef | null;
+  sourceProjectId: number | null; draft: boolean; diffBaseSha: string | null;
 }
 export interface NotePosition { newPath: string | null; oldPath: string | null; newLine: number | null; oldLine: number | null }
 /** `authorId` is the author's GitLab user id; `authorBot` is GitLab's `bot` flag on the author, false when the API omits it. */
@@ -25,6 +30,8 @@ export interface GitLabMrApi {
   tokenScopes(): Promise<string[]>;
   userExists(username: string): Promise<boolean>;
   getMergeRequest(project: ProjectRef, iid: number): Promise<MergeRequestInfo>;
+  /** The branch is protected on the project (exact name or a wildcard rule that matches it). */
+  isProtectedBranch(project: ProjectRef, branch: string): Promise<boolean>;
   findOpenMergeRequest(project: ProjectRef, sourceBranch: string): Promise<MergeRequestInfo | null>;
   listDiscussions(project: ProjectRef, iid: number): Promise<MrDiscussion[]>;
   createNote(project: ProjectRef, iid: number, body: string): Promise<void>;
@@ -71,6 +78,9 @@ const MergeRequestSchema = z.object({
   target_branch: z.string(),
   updated_at: z.string(),
   head_pipeline: z.object({ id: z.number(), sha: z.string(), status: z.string() }).nullish(),
+  source_project_id: z.number().nullish(),
+  draft: z.boolean().nullish(),
+  diff_refs: z.object({ base_sha: z.string().nullish() }).nullish(),
 });
 const NoteSchema = z.object({
   id: z.number(),
@@ -126,6 +136,9 @@ const toMergeRequest = (mr: z.infer<typeof MergeRequestSchema>): MergeRequestInf
   targetBranch: mr.target_branch,
   updatedAt: mr.updated_at,
   headPipeline: mr.head_pipeline ?? null,
+  sourceProjectId: mr.source_project_id ?? null,
+  draft: mr.draft ?? false,
+  diffBaseSha: mr.diff_refs?.base_sha ?? null,
 });
 
 export class GitLabMrClient implements GitLabMrApi {
@@ -199,6 +212,16 @@ export class GitLabMrClient implements GitLabMrApi {
 
   async replyToDiscussion(project: ProjectRef, iid: number, discussionId: string, body: string): Promise<void> {
     await this.request("POST", `${this.mrPath(project, iid)}/discussions/${discussionId}/notes`, { body });
+  }
+
+  async isProtectedBranch(project: ProjectRef, branch: string): Promise<boolean> {
+    try {
+      await this.request("GET", `${this.projectPath(project)}/protected_branches/${encodeURIComponent(branch)}`);
+      return true;
+    } catch (err) {
+      if (err instanceof GitLabApiError && err.status === 404) return false;
+      throw err;
+    }
   }
 
   async memberAccessLevel(project: ProjectRef, userId: number): Promise<number | null> {

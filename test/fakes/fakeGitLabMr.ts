@@ -14,6 +14,9 @@ export const fakeMergeRequest = (overrides: Partial<MergeRequestInfo> = {}): Mer
   targetBranch: "main",
   updatedAt: "2026-10-27T10:00:00Z",
   headPipeline: null,
+  sourceProjectId: 42,
+  draft: false,
+  diffBaseSha: null,
   ...overrides,
 });
 
@@ -34,6 +37,8 @@ export class FakeGitLabMr implements GitLabMrApi {
   readonly pipelineQueries: Array<{ ref: string; sinceIso: string }> = [];
   /** Job traces by job id; jobTraceTail returns the last lines of one. */
   traces = new Map<number, string>();
+  /** Branches isProtectedBranch answers true for. */
+  protectedBranches = new Set<string>(["main"]);
   /** Usernames userExists answers true for. */
   users = new Set<string>();
   scopes = ["api"];
@@ -108,6 +113,10 @@ export class FakeGitLabMr implements GitLabMrApi {
 
   async getMergeRequest(): Promise<MergeRequestInfo> {
     return structuredClone(this.mr);
+  }
+
+  async isProtectedBranch(_project: number | string, branch: string): Promise<boolean> {
+    return this.protectedBranches.has(branch);
   }
 
   async findOpenMergeRequest(): Promise<MergeRequestInfo | null> {

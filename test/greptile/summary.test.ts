@@ -15,7 +15,7 @@ This MR adds a retry loop.
 
 const mr = (description: string): MergeRequestInfo => ({
   projectId: 1, iid: 2, state: "opened", sha: SHA, title: "t", description, webUrl: "u",
-  sourceBranch: "b", targetBranch: "main", updatedAt: "2026-01-01T00:00:00Z", headPipeline: null,
+  sourceBranch: "b", targetBranch: "main", updatedAt: "2026-01-01T00:00:00Z", headPipeline: null, sourceProjectId: 1, draft: false, diffBaseSha: null,
 });
 const note = (over: Partial<MrNote>): MrNote => ({
   id: 1, body: "", author: "greptile-bot", authorId: 9, authorBot: false, system: false, resolvable: false, resolved: false,

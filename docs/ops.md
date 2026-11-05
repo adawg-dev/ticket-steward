@@ -527,10 +527,31 @@ chat: {
   the steward never pushes it.
 - On an unassigned loop, an `/agent` note revives it (see above) before its chat runs; any other note is ignored.
   `/agent restart` is no longer a keyword: it is a chat like any other.
-- The webhook answers `chat`, `chat_revive`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
+- The webhook answers `chat`, `chat_mr`, `chat_revive`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
   `chat_failed` (the access check could not reach GitLab) for an `/agent` note. A bare `/agent` with no message is
   `chat_ignored`.
 - An `/agent` note does not wake a loop waiting for review; the loop's next poll (or any other note) does.
+
+**On any merge request.** With `chat: { anyMergeRequest: true }`, an `/agent` note on an MR the steward did not open
+(no ticket session behind its branch) is an **MR chat** instead of the "No agent session" reply. The webhook answers
+`chat_mr`. Same filters as above: the configured project, not a fork, a Developer or higher, each note once.
+
+- The MR stands in for a ticket: the job's issue id is `mr:<projectId>!<iid>` and it shows as `!<iid>`, so two notes
+  on one MR never run at once. Its chats share the worktree `work/mr-<iid>`, and a later `/agent` on the same MR
+  resumes the session the last one left. Linear is never touched: no panel, no assignment, no state change.
+- The job reads the MR first and refuses, with a one-line reply and no run, an MR that is not open (drafts are
+  fine), a fork's MR, and a source branch that is `workspace.baseBranch`, in `implement.protectedBranches` or protected
+  on GitLab.
+- The agent works on the MR's head and may push to **its source branch only**: fast-forward from the head the run
+  started on, with every push rule (committed work only, no merges, secret guard, checks against the MR's diff base).
+  Commit subjects need the ticket key only when the branch or title names a ticket of `tracker.teams`; that ticket is
+  shown to the agent for context. If the person pushes while the agent works, the push is refused and the work is
+  listed as unpushed; the steward never force-pushes or rebases a person's commits.
+- Commits are authored as `implement.commitAuthor`. To undo one, revert it, or reset the branch to the head the reply
+  names.
+- No review loop follows: the steward does not wait for Greptile or the pipeline on these MRs.
+- `steward settings set chat.anyMergeRequest false` switches MR chats off without a restart; the setting cannot switch
+  them on when the config does not allow them.
 
 **In the terminal.** `steward chat <KEY>` (in the stack: `docker compose exec steward steward chat API-123`) opens the
 ticket's latest agent session in the Claude Code terminal UI, in its worktree (recreated if retention removed it), with

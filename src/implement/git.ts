@@ -224,9 +224,12 @@ export const pushCommit = async (input: {
   identifier: string;
   branchTypes: string[];
   mode: PushMode;
+  /** An MR chat's fast-forward onto a person's branch: the steward's own branch-name pattern does not apply. */
+  anyBranch?: boolean;
 }): Promise<void> => {
   const ref = `refs/heads/${input.branch}`;
-  if (!branchRefPattern(input.branchTypes, input.identifier).test(ref)) throw new Error(`refusing to push to ${ref}: not a ${input.branchTypes.join("|")}/${input.identifier}-<slug> branch`);
+  if (input.anyBranch === true && input.mode.kind === "create") throw new Error(`refusing to create ${ref}: an MR chat only fast-forwards its merge request's branch`);
+  if (input.anyBranch !== true && !branchRefPattern(input.branchTypes, input.identifier).test(ref)) throw new Error(`refusing to push to ${ref}: not a ${input.branchTypes.join("|")}/${input.identifier}-<slug> branch`);
   await rm(input.scratchDir, { recursive: true, force: true });
   await gitOrThrow(["init", "--bare", "--quiet", input.scratchDir]);
   await mkdir(join(input.scratchDir, "objects", "info"), { recursive: true });

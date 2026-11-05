@@ -206,6 +206,7 @@ export class JobStore {
   private readonly storeWorkspace;
   private readonly storeRun;
   private readonly selectLatestSession;
+  private readonly selectLatestChatSession;
   private readonly selectImplementForBranch;
   private readonly selectLatestForTicket;
   private readonly selectLatestOfKind;
@@ -288,6 +289,10 @@ export class JobStore {
     this.storeRun = db.prepare<[string, number]>("UPDATE jobs SET run_id = ? WHERE id = ?");
     this.selectLatestSession = db.prepare<[string], JobRow>(
       `SELECT * FROM jobs WHERE issue_id = ? AND kind = 'implement' AND session_id IS NOT NULL AND worktree_name IS NOT NULL
+       ORDER BY id DESC LIMIT 1`,
+    );
+    this.selectLatestChatSession = db.prepare<[string], JobRow>(
+      `SELECT * FROM jobs WHERE issue_id = ? AND kind = 'chat' AND session_id IS NOT NULL AND worktree_name IS NOT NULL
        ORDER BY id DESC LIMIT 1`,
     );
     this.selectImplementForBranch = db.prepare<[string], JobRow>("SELECT * FROM jobs WHERE kind = 'implement' AND branch = ? ORDER BY id DESC LIMIT 1");
@@ -427,6 +432,12 @@ export class JobStore {
   /** The ticket's newest implement job that left a brain session in a recorded worktree. */
   latestImplementSession(issueId: string): Job | null {
     const row = this.selectLatestSession.get(issueId);
+    return row === undefined ? null : toJob(row);
+  }
+
+  /** The newest chat job of `issueId` that left a brain session in a recorded worktree: an MR chat's to resume. */
+  latestChatSession(issueId: string): Job | null {
+    const row = this.selectLatestChatSession.get(issueId);
     return row === undefined ? null : toJob(row);
   }
 

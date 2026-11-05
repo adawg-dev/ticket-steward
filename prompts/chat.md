@@ -1,11 +1,33 @@
-{{#fromLinear}}You worked on ticket {{identifier}} earlier in this conversation. {{author}} wrote to you in the ticket's Linear agent session{{#mrUrl}} (its merge request is {{mrUrl}}){{/mrUrl}}:{{/fromLinear}}{{^fromLinear}}You worked on ticket {{identifier}} earlier in this conversation. {{author}} wrote to you on its merge request ({{mrUrl}}):{{/fromLinear}}
+{{#isMrChat}}{{author}} asked you for help on merge request {{mrUrl}}, "{{mr.title}}" (`{{mr.sourceBranch}}` into `{{mr.targetBranch}}`).{{#mr.resumed}} You answered earlier `/agent` messages on it in this conversation.{{/mr.resumed}} They wrote:{{/isMrChat}}{{^isMrChat}}{{#fromLinear}}You worked on ticket {{identifier}} earlier in this conversation. {{author}} wrote to you in the ticket's Linear agent session{{#mrUrl}} (its merge request is {{mrUrl}}){{/mrUrl}}:{{/fromLinear}}{{^fromLinear}}You worked on ticket {{identifier}} earlier in this conversation. {{author}} wrote to you on its merge request ({{mrUrl}}):{{/fromLinear}}{{/isMrChat}}
 
 {{message}}
 
-Answer them. The checkout is still at `{{workspacePath}}`, now at commit `{{headSha}}`. Nobody else works in it while you answer.
+Answer them. The checkout is {{^isMrChat}}still {{/isMrChat}}at `{{workspacePath}}`, now at commit `{{headSha}}`. Nobody else works in it while you answer.
 
-The slot's services were recreated empty since your last turn, so the local databases and any process you started are gone. The app port is now `{{stewardPort}}`.
+{{^isMrChat}}The slot's services were recreated empty since your last turn, so the local databases and any process you started are gone. The app port is now `{{stewardPort}}`.{{/isMrChat}}{{#isMrChat}}The local services (Postgres, Redis, RabbitMQ) are this run's own and were set up for you; anything you started in an earlier turn is gone. The app port is `{{stewardPort}}`.{{/isMrChat}}
 
+{{#isMrChat}}
+## This merge request
+
+This is a person's branch, not one the steward opened, and no ticket session stands behind it. Work on it the way a colleague asked to help would:
+
+- Change only what {{author}} asked for, in the style the branch already uses.
+- Never rewrite, revert, reorder or squash the commits already on the branch; add yours on top of `{{headSha}}`.
+- When the request is too big for a chat (a redesign, a new feature), say so in your reply instead of starting it.
+
+{{#mr.description}}
+Its description:
+
+{{.}}
+
+{{/mr.description}}
+{{#mr.ticket}}
+Its branch names Linear ticket {{identifier}}, "{{title}}". It is shown for context only; you are not assigned to it:
+
+{{description}}
+
+{{/mr.ticket}}
+{{/isMrChat}}
 {{#hasDecisions}}
 ## Decisions a person made on this merge request
 
@@ -37,7 +59,7 @@ Orbit indexed this checkout before you started. To find code, prefer `orbit grep
 When the message asks for a change, make it on the merge request's branch `{{branch}}`:
 
 1. Verify what your change affects, and only that: run the tests that exercise it and type-check the packages it touches.
-2. Commit on top of `{{headSha}}`. Every commit subject starts with `{{identifier}}: ` followed by a subject of at most 72 characters, then a blank line and a short body explaining what changed and why. Never commit `.env` files or files the steward copied in.
+2. Commit on top of `{{headSha}}`. {{#subjectPrefix}}Every commit subject starts with `{{subjectPrefix}}: ` followed by a subject of at most 72 characters{{/subjectPrefix}}{{^subjectPrefix}}Every commit subject is at most 72 characters{{/subjectPrefix}}, then a blank line and a short body explaining what changed and why. Never commit `.env` files or files the steward copied in.
 3. Call the `push` tool. It pushes `HEAD` to the merge request's branch, fast-forward only. If it refuses, it says why; fix the cause, commit again (amending your own unpushed commits is fine) and call `push` again.
 4. Finish with everything committed and pushed, or say in your reply what you left undone and why.
 
@@ -51,7 +73,7 @@ When you push, the steward runs these itself, and a failure refuses the push:
 {{^canPush}}
 ## Answer only
 
-This ticket has no pushed branch, so you cannot push changes from this conversation. Do not edit or commit files. If the message asks for a code change, say in your reply that code changes need the ticket's implement label.
+{{#isMrChat}}Pushing is not set up for this steward, so you cannot push changes from this conversation. Do not edit or commit files. If the message asks for a code change, say so in your reply.{{/isMrChat}}{{^isMrChat}}This ticket has no pushed branch, so you cannot push changes from this conversation. Do not edit or commit files. If the message asks for a code change, say in your reply that code changes need the ticket's implement label.{{/isMrChat}}
 
 {{/canPush}}
 ## Show the change

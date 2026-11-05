@@ -20,6 +20,7 @@ import type { TicketBundle, TriggerEvent } from "../../src/tracker/types.js";
 import { FakeBrain, type FakeBrainOptions } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr, fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
+import type { MergeRequestInfo } from "../../src/codehost/gitlabMr.js";
 import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { fakeSlotRunner } from "../fakes/fakeSlotRunner.js";
@@ -76,7 +77,7 @@ const makeConfig = (): StewardConfig => ({
     maxTurns: 7,
     protectedBranches: ["main"],
   },
-  chat: { prefix: "/agent", sessionRetentionDays: 180 },
+  chat: { prefix: "/agent", sessionRetentionDays: 180, anyMergeRequest: false },
 });
 
 const pushTargetOf = (input: BrainInput): PushTarget | null => {
@@ -193,6 +194,114 @@ beforeEach(async () => {
 afterEach(async () => {
   stores.db.close();
   await repo.cleanup();
+});
+
+const PERSON_BRANCH = "adam/tidy-adapter";
+
+/** A person's MR on PERSON_BRANCH (or `branch`) at their own commit, as the fake GitLab answers it. */
+const personMr = async (over: Partial<MergeRequestInfo> = {}, branch = PERSON_BRANCH): Promise<string> => {
+  await git(repo.repo, ["checkout", "-q", "-b", branch, "main"]);
+  const head = await commitFile(repo.repo, "src/person.ts", "export const person = 1;\n");
+  await git(repo.repo, ["checkout", "-q", "main"]);
+  await repo.mirror.fetch();
+  gitlab.mr = fakeMergeRequest({ sha: head, sourceBranch: branch, title: "Tidy the adapter", description: "Cleans up the adapter.", diffBaseSha: baseSha, ...over });
+  return head;
+};
+
+const claimMr = (message = "fix the flaky adapter test"): RunContext => {
+  const trigger: TriggerEvent = {
+    kind: "chat", issueId: "mr:42!7", identifier: "!7", teamKey: "", loopId: null, projectId: 42, mrIid: 7,
+    discussionId: DISCUSSION, noteId: 777, author: "ada", message,
+  };
+  const jobId = stores.jobs.enqueue(trigger);
+  stores.jobs.claimById(jobId);
+  const attempt = stores.attempts.start(jobId);
+  return { jobId, attempt: attempt.number, issueId: "mr:42!7", identifier: "!7", teamKey: "", trigger, dryRun: false };
+};
+
+describe("runChat on a merge request the steward did not open", () => {
+  it("works in the MR's own worktree at its head, may push to its branch, and answers in the note's discussion", async () => {
+    const head = await personMr();
+    const brain = new FakeBrain({ result: { reply: "Fixed the flaky test." }, sessionId: "mr-session-1" });
+    const ctx = claimMr();
+
+    expect(await runChat(ctx, makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    const input = brain.lastInput();
+    expect(input.resumeSessionId).toBeUndefined();
+    expect(input.workspacePath).toBe(join(repo.dataDir, "work", "mr-7"));
+    expect(await git(input.workspacePath, ["rev-parse", "HEAD"])).toBe(head);
+    expect(pushTargetOf(input)).toMatchObject({
+      jobId: ctx.jobId, mode: "mrBranch", branch: PERSON_BRANCH, baseSha: head, checksBaseSha: baseSha, subjectKey: null, loopId: null, issueId: "mr:42!7", identifier: "!7",
+    });
+    expect(input.prompt).toContain("fix the flaky adapter test");
+    expect(input.prompt).toContain("Tidy the adapter");
+    expect(input.prompt).toContain("Cleans up the adapter.");
+    expect(input.prompt).toContain(`\`${PERSON_BRANCH}\``);
+    expect(input.prompt).toContain("a person's branch");
+    expect(input.prompt).not.toContain("You worked on ticket");
+    expect(gitlab.replies).toEqual([{ discussionId: DISCUSSION, body: `Fixed the flaky test.\n\n${CHAT_MARKER}` }]);
+    expect(stores.jobs.get(ctx.jobId)).toMatchObject({ sessionId: "mr-session-1", worktreeName: "mr-7" });
+  });
+
+  it("resumes the MR's session on the next `/agent`", async () => {
+    await personMr();
+    expect(await runChat(claimMr(), makeDeps(new FakeBrain({ result: { reply: "One." }, sessionId: "mr-session-1" })))).toEqual({ status: "succeeded" });
+    const second = new FakeBrain({ result: { reply: "Two." }, sessionId: "mr-session-2" });
+
+    expect(await runChat(claimMr("and the other one"), makeDeps(second))).toEqual({ status: "succeeded" });
+
+    expect(second.lastInput().resumeSessionId).toBe("mr-session-1");
+    expect(second.lastInput().workspacePath).toBe(join(repo.dataDir, "work", "mr-7"));
+  });
+
+  it("pushes the agent's commit onto the person's branch", async () => {
+    const head = await personMr();
+    const brain = new AgentBrain({ result: { reply: "Pushed the fix." } }, commitAndPush);
+
+    expect(await runChat(claimMr(), makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    expect(brain.pushes).toMatchObject([{ ok: true, branch: PERSON_BRANCH, commits: 1 }]);
+    const pushed = await git(repo.repo, ["rev-parse", PERSON_BRANCH]);
+    expect(await git(repo.repo, ["rev-parse", `${pushed}^`])).toBe(head);
+    // The steward says how to undo it, whatever the agent wrote.
+    expect(gitlab.replies[0]?.body).toContain(`Pushed to \`${PERSON_BRANCH}\`: \`${head.slice(0, 8)}\` → \`${pushed.slice(0, 8)}\`. To undo, revert those commits or reset the branch to \`${head.slice(0, 8)}\`.`);
+  });
+
+  it("asks for the ticket's key on commits and shows the ticket when the branch names one", async () => {
+    await personMr({}, "fix/api-1-person-fix");
+    const brain = new FakeBrain({ result: { reply: "Done." } });
+
+    expect(await runChat(claimMr(), makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    expect(pushTargetOf(brain.lastInput())).toMatchObject({ subjectKey: "API-1" });
+    expect(brain.lastInput().prompt).toContain("starts with `API-1: `");
+    expect(brain.lastInput().prompt).toContain("Adapter drops the last chunk");
+  });
+
+  it.each([
+    ["merged", { state: "merged" }, /merged/],
+    ["from a fork", { sourceProjectId: 99 }, /fork/],
+  ] as const)("refuses an MR that is %s with a reply and no run", async (_name, over, reason) => {
+    await personMr(over);
+    const brain = new FakeBrain({ result: { reply: "never" } });
+
+    expect(await runChat(claimMr(), makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    expect(brain.runs).toBe(0);
+    expect(gitlab.replies[0]?.body).toMatch(reason);
+  });
+
+  it("refuses a protected branch with a reply and no run", async () => {
+    await personMr();
+    gitlab.protectedBranches.add(PERSON_BRANCH);
+    const brain = new FakeBrain({ result: { reply: "never" } });
+
+    expect(await runChat(claimMr(), makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    expect(brain.runs).toBe(0);
+    expect(gitlab.replies[0]?.body).toMatch(/protected/);
+  });
 });
 
 describe("runChat", () => {

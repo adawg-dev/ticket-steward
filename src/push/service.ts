@@ -63,7 +63,11 @@ const unprefixed = async (worktreePath: string, base: string, head: string, iden
 };
 
 /** Pushes from a scratch repo in the job dir, never from the worktree or mirror, whose config the agent can change. */
-const pushFromBundle = async (deps: PushDeps, jobDir: string, input: { remote: RemoteCredentials; sha: string; base: string; branch: string; identifier: string; branchTypes: string[]; mode: PushMode }): Promise<void> => {
+const pushFromBundle = async (
+  deps: PushDeps,
+  jobDir: string,
+  input: { remote: RemoteCredentials; sha: string; base: string; branch: string; identifier: string; branchTypes: string[]; mode: PushMode; anyBranch: boolean },
+): Promise<void> => {
   const scratchDir = join(jobDir, PUSH_REPO);
   try {
     await pushCommit({
@@ -77,6 +81,7 @@ const pushFromBundle = async (deps: PushDeps, jobDir: string, input: { remote: R
       identifier: input.identifier,
       branchTypes: input.branchTypes,
       mode: input.mode,
+      anyBranch: input.anyBranch,
     });
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
@@ -132,9 +137,10 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   const problem = await linearRangeProblem(worktreePath, start.base, sha);
   if (problem !== null) return refuse(`HEAD must be new commits on top of ${short(start.base)}`, problem);
 
-  // 3. Every subject names the ticket.
-  const offending = await unprefixed(worktreePath, start.base, sha, target.identifier);
-  if (offending.length > 0) return refuse(`every commit subject must start with "${target.identifier}: "; amend or reword these commits`, offending.join("\n"));
+  // 3. Every subject names the ticket (an MR chat's only when its branch or title names one).
+  const subjectKey = target.mode === "mrBranch" ? (target.subjectKey ?? null) : target.identifier;
+  const offending = subjectKey === null ? [] : await unprefixed(worktreePath, start.base, sha, subjectKey);
+  if (subjectKey !== null && offending.length > 0) return refuse(`every commit subject must start with "${subjectKey}: "; amend or reword these commits`, offending.join("\n"));
 
   // 4. Nothing the steward copied in and no secret value, in the change or the messages.
   const guarded = await guardRange({ worktreePath, baseSha: start.base, headSha: sha, stewardFiles, secretValues: secrets });
@@ -142,7 +148,7 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
 
   // 5. The steward's checks, against the original base so a filtered check covers the whole branch.
   const checks = deps.checks ?? localCheckRunner({ worktreePath, port: target.port, timeoutMs: settings.checksTimeoutMinutes * MINUTE_MS, tailBytes: CHECK_TAIL_BYTES });
-  const checked = await checks.run(stewardChecks(settings.checks, target.baseSha));
+  const checked = await checks.run(stewardChecks(settings.checks, target.checksBaseSha ?? target.baseSha));
   if (!checked.ok) return refuse("the steward's checks failed", deps.redactor.redact(checked.tail));
 
   // 6. The run can last an hour; never push for a ticket closed meanwhile.
@@ -165,13 +171,18 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
     branch = start.branch;
     mode = { kind: "fastForward", previousHead: start.base };
   }
+  // A person's branch: only the one the run was given, and never a protected one, whatever the branch is called.
+  if (target.mode === "mrBranch") {
+    if (branch !== target.branch) return refuse(`refusing to push to ${branch}: this run may push only to ${target.branch ?? "its merge request's branch"}`);
+    if (settings.protectedBranches.includes(branch)) return refuse(`refusing to push to ${branch}: it is a protected branch`);
+  }
 
   // 8. Intent first, so a push that lands before its record is recognized as the steward's.
   const { id: pushId } = await deps.ledger.record(target, { branch, sha, previousSha: start.kind === "create" ? null : start.base, note: input.note ?? null });
   try {
     await mkdir(jobDir, { recursive: true, mode: 0o700 });
     await saveBundle(worktreePath, start.base, join(jobDir, PUSH_BUNDLE));
-    await pushFromBundle(deps, jobDir, { remote, sha, base: start.base, branch, identifier: target.identifier, branchTypes: settings.branchTypes, mode });
+    await pushFromBundle(deps, jobDir, { remote, sha, base: start.base, branch, identifier: target.identifier, branchTypes: settings.branchTypes, mode, anyBranch: target.mode === "mrBranch" });
   } catch (err) {
     await deps.ledger.revert(target, pushId);
     if (err instanceof BranchExistsError) return refuse(`a branch for ${target.identifier} already exists`, err.ref.replace(/^refs\/heads\//, ""));

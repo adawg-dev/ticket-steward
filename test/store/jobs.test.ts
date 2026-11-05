@@ -534,6 +534,21 @@ describe("loop jobs", () => {
       expect(stores.jobs.get(id)?.unreadable).toEqual(["chat_result"]);
     });
 
+    it("finds an MR's newest chat that left a session in a recorded worktree, and nothing for other MRs", () => {
+      const mr = "mr:42!7";
+      const first = stores.jobs.enqueue(chatEvent(null, mr));
+      stores.jobs.recordWorkspace(first, "mr-7", "a".repeat(40));
+      stores.jobs.recordSession(first, "session-1");
+      const second = stores.jobs.enqueue(chatEvent(null, mr));
+      stores.jobs.recordWorkspace(second, "mr-7", "b".repeat(40));
+      stores.jobs.recordSession(second, "session-2");
+      // A chat that never reached the brain leaves no session; it is passed over.
+      stores.jobs.enqueue(chatEvent(null, mr));
+
+      expect(stores.jobs.latestChatSession(mr)).toMatchObject({ id: second, sessionId: "session-2", worktreeName: "mr-7" });
+      expect(stores.jobs.latestChatSession("mr:42!8")).toBeNull();
+    });
+
     it("is never woken: a wake is for the loop's await, and reports nothing to wake without one", () => {
       const chat = stores.jobs.enqueue(chatEvent(3));
       stores.jobs.claimById(chat);
