@@ -110,6 +110,18 @@ describe("evaluateRound", () => {
     expect(evaluateRound(baseInput({ mr: withPipeline("running"), workList: work, greptile: summary({ score: 3 }), loop: loop({ botRounds: 5 }) })))
       .toMatchObject({ kind: "wait", waitingFor: "pipeline" });
   });
+  it("7: the last bot round under the cap waits for the pipeline, so it carries the CI failures", () => {
+    const work = [item()];
+    const cap = DEFAULT_SETTINGS["greptile.maxRounds"];
+    expect(evaluateRound(baseInput({ mr: withPipeline("running"), workList: work, greptile: summary({ score: 3 }), loop: loop({ botRounds: cap - 1 }) })))
+      .toMatchObject({ kind: "wait", waitingFor: "pipeline" });
+    expect(evaluateRound(baseInput({ mr: withPipeline("running"), workList: work, greptile: summary({ score: 3 }), loop: loop({ botRounds: cap - 2 }) })))
+      .toEqual({ kind: "fix", workList: work, startedBy: "bot", pipelineFailed: false });
+  });
+  it("7: an unreviewed head waits for its review, not an early fix", () => {
+    expect(evaluateRound(baseInput({ mr: withPipeline("running"), workList: [item()], greptile: summary({ score: 3, lastReviewedSha: "d".repeat(7) }) })))
+      .toMatchObject({ kind: "wait", waitingFor: "review" });
+  });
   it("7: a pipeline for an older sha counts as no pipeline", () => {
     expect(evaluateRound(baseInput({ mr: withPipeline("success", "d".repeat(40)) }))).toMatchObject({ kind: "wait", waitingFor: "pipeline" });
   });
