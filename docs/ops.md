@@ -643,6 +643,66 @@ has `probability` and a choice `value`. A response missing an asked question's a
 `invalid response` error, never as a prediction. Check the paths against a real row
 (`SELECT answers FROM decisions LIMIT 1`) the first time.
 
+### 1.7e Process levels
+
+An implement run has one of three levels. The level sets how much process surrounds the code:
+
+| level | what the run does |
+|---|---|
+| `small` (default) | implements the ticket, then runs the `steward-simplify` skill on the whole diff before the final checks |
+| `standard` | writes a plan with `steward-plan`, simplifies it, then implements task by task, simplifying and committing each |
+| `design` | drafts a design with `egm-draft`, has a fresh read-only `goldfish` subagent review it (`steward-goldfish`), then plans and implements as `standard`; a goldfish reviews the final diff before the push |
+
+- **Choosing.** The highest of: the `implement.defaultLevel` setting, `design` when the ticket carries the label in
+  `implement.designLabel` (any case), and the level carried from an earlier run of the ticket.
+- **Stepping up.** The prompt tells the agent to move up a level, and do that level's missing steps, when the change
+  touches migrations, auth/RBAC, multi-tenancy or billing, spans more packages than planned, or the ticket has more than
+  one reasonable reading. A step-up to `design` has no goldfish reviewer; the agent says so in `reviewNotes`. The
+  result reports `level: { started, finished, reason }`.
+- **Design reviews.** At most two. If blocking findings remain after the second, or one needs a product decision, the
+  run ends `needs_info` with the open findings and the design; the answer resumes the same session at the design step.
+- **Artifacts.** `design.md` and `plan.md` live only in the run's artifacts dir and are never committed. The design is
+  shown in the Linear agent session.
+
+Settings and config:
+
+```bash
+steward settings set implement.defaultLevel standard   # small (default) | standard, no deploy
+```
+
+```ts
+implement: {
+  // ...
+  designLabel: "design",                                  // a Linear label that forces the design level; unset = off
+  designLimits: { timeoutMinutes: 120, maxTurns: 250 },   // limits of a design run; the implement limits when absent
+},
+```
+
+Brain: with `claude-code`, implement runs get the SDK's `skills: "all"`; design runs also get the `Agent` tool with a
+read-only `goldfish` subagent. The `openai-agents` brain ignores both.
+
+Deploy the skills and the updated prompt (keep `.bak-<date>` copies of what you replace):
+
+```bash
+# run from your checkout
+(cd examples/kickoff/skills && sudo cp -r steward-simplify steward-plan steward-goldfish egm-draft EGM-NOTICE.md /etc/ticket-steward/skills/)
+sudo cp prompts/implement.md /etc/ticket-steward/prompts/implement.md
+```
+
+(`/etc/ticket-steward/skills` is the configured `workspace.skillsDir`.)
+
+Rollout: leave `designLabel` unset and the default at `small`, watch a few real tickets, then set `designLabel` and
+label tickets that needed design discussion. Live checks still to do:
+
+- the session's init message lists the skills, which shows whether a built-in `simplify` exists headless (if it does
+  and behaves the same, drop `steward-simplify`);
+- `steward-simplify` ran on the final diff of a `small` ticket;
+- no `plan.md` or `design.md` in the pushed commits (`git show --stat`);
+- `goldfish` calls appear in a design transcript and reached the model through the keyproxy;
+- the policy hook logged or denied the subagent's tool calls (if it does not fire: the subagent is read-only and the
+  overlay holds only `STEWARD_PH_` placeholders);
+- `egm-draft` works headless.
+
 ### 1.8 Doctor, then start the service
 
 ```bash
