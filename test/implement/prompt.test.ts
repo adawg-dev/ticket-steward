@@ -137,6 +137,7 @@ describe("implement prompt", () => {
       for (const prompt of [small, standard, design]) {
         expect(prompt).toContain("`mrTitle`");
         expect(prompt).toContain("`mrDescription`");
+        expect(prompt).not.toContain("summary note on the merge request");
       }
     });
 

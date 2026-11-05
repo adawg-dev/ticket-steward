@@ -56,7 +56,7 @@ describe("validateImplementResult", () => {
 });
 
 describe("merge request title and description", () => {
-  const mr = { mrTitle: "fix(user-app): add missing space in optimizer scan card prompt (USRAPP-182)", mrDescription: "## What\n\nAdds the space." };
+  const mr = { mrTitle: "fix(user-app): add missing space in scan card prompt (USRAPP-182)", mrDescription: "## What\n\nAdds the space." };
 
   it("accepts a result with both fields and keeps them", () => {
     expect(validateImplementResult({ ...implemented, ...mr })).toEqual({ ok: true, result: { ...implemented, ...mr } });
