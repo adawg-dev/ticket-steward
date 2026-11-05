@@ -34,14 +34,14 @@ Carry on from where you stopped and implement the ticket with this answer. If it
 ## How to work
 
 {{#small}}
-This ticket is at the `small` level. Implement it, then run the `steward-simplify` skill on `git diff {{sha}}...HEAD` before your final checks.
+This ticket is at the `small` level. Implement it, then run the `steward-simplify` skill on `git diff {{sha}}` (your whole change, committed or not) before your final checks.
 {{/small}}
 {{#standard}}
 This ticket is at the `standard` level:
 
 1. Write a plan with the `steward-plan` skill to `{{artifactsDir}}/plan.md`.
 2. Run the `steward-simplify` skill on the plan.
-3. For each task in the plan: implement it, run its checks, run `steward-simplify` on the task's diff, then commit.
+3. For each task in the plan: implement it, run its checks, run `steward-simplify` on the task's uncommitted diff (`git diff HEAD`), then commit.
 {{/standard}}
 {{#design}}
 This ticket is at the `design` level: design it, have the design reviewed, and only then plan and write code.
@@ -54,15 +54,11 @@ Here is the design so far, from before you asked your questions:
 Save it to `{{artifactsDir}}/design.md`, apply the answers to it, and continue at step 2.
 
 {{/hasDesign}}
-1. Draft `{{artifactsDir}}/design.md` with the `egm-draft` skill. It is written for a person at the keyboard, and there is none here:
-   - Answer every question and approval gate it raises yourself, from the ticket{{#hasBrief}}, the agent brief{{/hasBrief}} and the code. Never stop to wait for a person.
-   - Where it asks the author to choose between options, choose the one that fits the ticket and the code best, and record the others and why you rejected them under its alternatives.
-   - Write only `{{artifactsDir}}/design.md`: no `design_draft.md`, nothing under `docs/designs/`, no sitemap. Skip its save-location step and its hand-off to `egm-review`.
-   - Its design-only rule ends when you approve the design.
+1. Draft `{{artifactsDir}}/design.md` with the `egm-draft` skill, as "Using `egm-draft`" below says.
 2. Review the design with the `steward-goldfish` skill in design mode, through the `goldfish` subagent (Agent tool, subagent_type `goldfish`).
 3. Fix each finding in `design.md` or note why it does not hold. When the review has no `blocking` finding, approve the design yourself. Otherwise revise it and review it once more. If `blocking` findings are still open after the second review, or one needs a product decision, stop without writing code: return `outcome: "needs_info"` with each open blocker as a question and `design` filled in.
 4. With the design approved, write a plan from it with the `steward-plan` skill to `{{artifactsDir}}/plan.md` and run the `steward-simplify` skill on the plan.
-5. For each task in the plan: implement it, run its checks, run `steward-simplify` on the task's diff, then commit.
+5. For each task in the plan: implement it, run its checks, run `steward-simplify` on the task's uncommitted diff (`git diff HEAD`), then commit.
 6. Before you push, review again with `steward-goldfish` in diff mode (the design, the ticket and `git diff {{sha}}...HEAD`, through a new `goldfish` subagent). Fix what it finds, or say in `reviewNotes` why you did not.
 {{/design}}
 {{^design}}
@@ -78,8 +74,17 @@ Step up a level when, at any point:
 On a trigger, step up to `standard`: write a plan for the rest of the work with the `steward-plan` skill to `{{artifactsDir}}/plan.md`, run `steward-simplify` on it, and follow it task by task. Never step down.
 {{/small}}
 {{#standard}}
-On a trigger, step up to `design`: draft `{{artifactsDir}}/design.md` for the rest of the work with the `egm-draft` skill, answering its questions and gates yourself from the ticket and the code and writing no other file, then update the plan from it. This run has no goldfish reviewer, so say in `reviewNotes` that the design was not reviewed. Never step down.
+On a trigger, step up to `design`: draft `{{artifactsDir}}/design.md` for the rest of the work with the `egm-draft` skill, as "Using `egm-draft`" below says, approve it yourself, then update the plan from it. This run has no goldfish reviewer, so say in `reviewNotes` that the design was not reviewed. Never step down.
 {{/standard}}
+{{^small}}
+
+Using `egm-draft`: it is written for a person at the keyboard, and there is none here.
+
+- Answer every question and approval gate it raises yourself, from the ticket{{#hasBrief}}, the agent brief{{/hasBrief}} and the code. Never stop to wait for a person.
+- Where it asks the author to choose between options, choose the one that fits the ticket and the code best, and record the others and why you rejected them under its alternatives.
+- Write only `{{artifactsDir}}/design.md`: no `design_draft.md`, nothing under `docs/designs/`, no sitemap. Skip its save-location step and its hand-off to `egm-review`.
+- Its design-only rule (no production code) ends when you approve the design, and never applies to code you already wrote.
+{{/small}}
 
 ## Codebase graph
 

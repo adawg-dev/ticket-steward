@@ -77,7 +77,8 @@ describe("implement prompt", () => {
     const design = renderImplementPrompt(template, { ...vars, small: false, design: true });
 
     it("gives a small run one simplify pass over its diff and no plan or design", () => {
-      expect(small).toContain(`run the \`steward-simplify\` skill on \`git diff ${"a".repeat(40)}...HEAD\``);
+      expect(small).toContain(`run the \`steward-simplify\` skill on \`git diff ${"a".repeat(40)}\` (your whole change, committed or not)`);
+      expect(small).not.toContain("Using `egm-draft`");
       expect(small).not.toContain("For each task in the plan");
       expect(small).not.toContain("egm-draft");
       expect(small).toMatchSnapshot();
@@ -88,6 +89,7 @@ describe("implement prompt", () => {
       expect(standard).toContain("/jobs/1/artifacts/plan.md");
       expect(standard).toContain("For each task in the plan");
       expect(standard).not.toContain("subagent_type");
+      expect(standard).toContain("on the task's uncommitted diff (`git diff HEAD`), then commit");
       expect(standard).toMatchSnapshot();
     });
 
@@ -104,6 +106,11 @@ describe("implement prompt", () => {
       expect(small).toContain("migrations, auth/RBAC, multi-tenancy or billing/credits");
       expect(small).toContain("step up to `standard`");
       expect(standard).toContain("step up to `design`");
+      for (const prompt of [standard, design]) {
+        expect(prompt).toContain("Its design-only rule (no production code) ends when you approve the design, and never applies to code you already wrote.");
+        expect(prompt).toContain("Skip its save-location step and its hand-off to `egm-review`.");
+        expect(prompt).toContain("choose the one that fits the ticket and the code best");
+      }
       expect(design).not.toContain("Step up a level");
     });
 
