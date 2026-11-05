@@ -455,7 +455,9 @@ head that is not its push is a person's, and the loop hands back instead.
 
 **Agent text is made inert on GitLab.** Everything the steward posts (MR title and description, notes, thread and chat
 replies) has GitLab quick actions (`/merge`, `/approve` at a line's start) and `@`-mentions neutralised with invisible
-characters, outside fenced code blocks; only its own `@greptileai review` request is posted as is.
+characters on every line, fenced code included (so a fence GitLab reads differently is no way around it), except an
+`@` inside an http(s) URL; only its own `@greptileai review` request is posted as is. A copied `/path` at a line's start
+inside a code block carries an invisible character.
 
 **CI triage.** A red head pipeline is triaged before it counts as a round (`ci.triage`, on by default). A job that
 failed for an infrastructure reason (runner system failure, stuck or timed out, API or scheduler failure, no matching

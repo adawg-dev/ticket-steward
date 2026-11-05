@@ -12,9 +12,22 @@ describe("neutralizeGitLab", () => {
     expect(neutralizeGitLab("  /approve")).toBe(`  ${ZWSP}/approve`);
   });
 
-  it("leaves a quick action inside a fenced block as it is", () => {
+  it("breaks quick actions and mentions inside and after fenced blocks too", () => {
     const text = "Run:\n```\n/merge\n@ada\n```\n/close";
-    expect(neutralizeGitLab(text)).toBe(`Run:\n\`\`\`\n/merge\n@ada\n\`\`\`\n${ZWSP}/close`);
+    expect(neutralizeGitLab(text)).toBe(`Run:\n\`\`\`\n${ZWSP}/merge\n@${WJ}ada\n\`\`\`\n${ZWSP}/close`);
+  });
+
+  it("is not bypassed by an unclosed fence, a tilde fence or an indented fence", () => {
+    expect(neutralizeGitLab("Note:\n```\n/merge\n@ada")).toBe(`Note:\n\`\`\`\n${ZWSP}/merge\n@${WJ}ada`);
+    expect(neutralizeGitLab("~~~\n/merge\n~~~")).toBe(`~~~\n${ZWSP}/merge\n~~~`);
+    expect(neutralizeGitLab("    ```\n/merge\n@ada\n    ```")).toBe(`    \`\`\`\n${ZWSP}/merge\n@${WJ}ada\n    \`\`\``);
+  });
+
+  it("breaks a mention after a slash unless it sits in an http(s) URL", () => {
+    expect(neutralizeGitLab("a/@ada and /@sam")).toBe(`a/@${WJ}ada and /@${WJ}sam`);
+    expect(neutralizeGitLab("x://@ada")).toBe(`x://@${WJ}ada`);
+    const link = "[x](https://medium.com/@ada) and <https://h.example/u/@sam>";
+    expect(neutralizeGitLab(link)).toBe(link);
   });
 
   it("leaves a path mid-line and a slash not followed by a letter as they are", () => {
