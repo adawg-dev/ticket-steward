@@ -26,6 +26,7 @@ import { SlotClient } from "../workspace/slots.js";
 import { connectAdmin, type AdminClient } from "./client.js";
 import type { CliContext } from "./context.js";
 import { binPath, mirrorPath } from "./paths.js";
+import { decisionsClientOf } from "../decisions/intake.js";
 
 export interface Runtime {
   loaded: LoadedConfig;
@@ -118,6 +119,8 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
     orbitRemote({ exec: ctx.factories?.orbitExec ?? execOrbit, dataDir: config.dataDir, worktreePath: config.dataDir, codehost: config.codehost, secrets }),
   );
   const channels = new RunChannels();
+  const redactor = await buildRedactor(loaded);
+  const decisions = decisionsClientOf(config, secrets, redactor);
   const deps: PipelineDeps = {
     config,
     secrets,
@@ -129,9 +132,10 @@ export const buildRuntime = async (loaded: LoadedConfig, ctx: CliContext, opts: 
     ...(gitlab === undefined ? {} : { gitlab, orbit }),
     mirror: openMirror(loaded),
     stores,
-    redactor: await buildRedactor(loaded),
+    redactor,
     now: () => new Date(),
     channels,
+    ...(decisions === undefined ? {} : { decisions }),
     ...(injectedBrain === undefined ? {} : brainRunner(injectedBrain)),
   };
   const kubernetes = kubernetesRuntime(config);

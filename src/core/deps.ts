@@ -4,6 +4,7 @@ import type { GitLabMrApi } from "../codehost/gitlabMr.js";
 import type { CodeHost } from "../codehost/types.js";
 import type { OrbitQuery } from "../orbit/query.js";
 import type { Secrets } from "../config/load.js";
+import type { DecisionsClient } from "../decisions/client.js";
 import type { StewardConfig } from "../config/schema.js";
 import type { Settings } from "../settings/schema.js";
 import type { Stores } from "../store/index.js";
@@ -47,4 +48,6 @@ export interface PipelineDeps {
   settings?: { get(): Settings };
   /** The dispatcher's remote Orbit query for CI triage, probed on first use; absent or null, triage goes on without it. */
   orbit?: () => Promise<OrbitQuery | null>;
+  /** Concentrate decisions in shadow mode (`decisions` configured, a key present); absent, nothing is asked. */
+  decisions?: DecisionsClient;
 }

@@ -254,6 +254,13 @@ export const StewardConfigSchema = z.object({
   secrets: SecretsConfigSchema.optional(),
   /** Unset is `{ kind: "local" }`. */
   runtime: RuntimeSchema.optional(),
+  /** Concentrate's `/v1/decisions` in shadow mode: asked and recorded, never acted on. Unset asks nothing. */
+  decisions: z
+    .object({
+      baseUrl: z.string().min(1).default("https://api.concentrate.ai/v1"),
+      models: z.array(z.string().min(1)).min(1).default(["jev-latest", "clef", "mercury-decide"]),
+    })
+    .optional(),
 }).superRefine((config, ctx) => {
   for (const key of ["reviewLoop", "greptile"] as const) {
     if (config[key] === undefined) continue;

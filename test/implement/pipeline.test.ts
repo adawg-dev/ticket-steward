@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BrainInput, BrainRun } from "../../src/brain/types.js";
+import type { DecisionsClient, ModelAnswer } from "../../src/decisions/client.js";
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
@@ -495,6 +496,74 @@ describe("runImplement", () => {
     expect(again.calls).toHaveLength(0);
     expect(await git(repo.repo, ["rev-parse", `refs/heads/${BRANCH}`])).toBe(pushed);
     expect(stores.jobs.get(ctx.jobId)?.implementResult?.handback?.detail).toBe(BRANCH);
+  });
+
+  describe("decisions in shadow mode", () => {
+    const shadowClient = (fail = false) => {
+      const asked: string[] = [];
+      const client: DecisionsClient = {
+        models: ["jev-latest", "clef"],
+        ask: async (input, _questions, models = ["jev-latest", "clef"]) => {
+          asked.push(input);
+          if (fail) throw new Error("decisions down");
+          return models.map((requested): ModelAnswer => ({ model: requested, requested, answers: [], latencyMs: 1, cost: null, error: null }));
+        },
+      };
+      return { asked, client };
+    };
+    const outcomes = (jobId: number): Array<string | null> =>
+      stores.db.prepare<[number], { outcome: string | null }>("SELECT outcome FROM decisions WHERE job_id = ? AND point = 'intake' ORDER BY id").all(jobId).map((r) => r.outcome);
+
+    it("asks intake once on a fresh implement, about the ticket as the agent sees it", async () => {
+      const { asked, client } = shadowClient();
+      const brain = agentBrain(implemented);
+      const ctx = claim();
+      await runImplement(ctx, { ...depsFor(brain), decisions: client });
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain(issue.title);
+    });
+
+    it("records the implement outcome on the intake rows", async () => {
+      const done = shadowClient();
+      const ctx = claim();
+      await runImplement(ctx, { ...depsFor(agentBrain(implemented)), decisions: done.client });
+      expect(outcomes(ctx.jobId)).toEqual(["implemented", "implemented"]);
+
+      stores.jobs.finish(ctx.jobId, { status: "succeeded" });
+      const asking = shadowClient();
+      const second = claim({ ...trigger, issueId: "issue-2", identifier: "API-2" });
+      tracker.addIssue({ ...issue, id: "issue-2", identifier: "API-2" });
+      await runImplement(second, { ...depsFor(agentBrain({ ...implemented, outcome: "needs_info", questions: ["Which stream?"] }, async () => undefined)), decisions: asking.client });
+      expect(outcomes(second.jobId)).toEqual(["needs_info", "needs_info"]);
+    });
+
+    it("does not ask on a dry run", async () => {
+      const { asked, client } = shadowClient();
+      const ctx = { ...claim(), dryRun: true };
+      await runImplement(ctx, { ...depsFor(agentBrain(implemented, async () => undefined)), decisions: client });
+      expect(asked).toEqual([]);
+    });
+
+    it("does not ask again when a person answers the agent's questions", async () => {
+      const asking = shadowClient();
+      const asked = claim();
+      await runImplement(asked, { ...depsFor(agentBrain({ ...implemented, outcome: "needs_info", questions: ["Which stream?"] }, async () => undefined)), decisions: asking.client });
+      stores.jobs.finish(asked.jobId, { status: "succeeded" });
+      const answering = shadowClient();
+      const answered = claim({ ...trigger, message: "The S3 one.", author: "Ada" });
+      await runImplement(answered, { ...depsFor(agentBrain(implemented)), decisions: answering.client });
+      expect(asking.asked).toHaveLength(1);
+      expect(answering.asked).toEqual([]);
+    });
+
+    it("a client that always fails leaves the outcome and the stored result as without one", async () => {
+      const { client } = shadowClient(true);
+      const ctx = claim();
+      const outcome = await runImplement(ctx, { ...depsFor(agentBrain(implemented)), decisions: client });
+      expect(outcome).toEqual({ status: "succeeded" });
+      expect(stores.jobs.get(ctx.jobId)?.implementResult?.result).toEqual(implemented);
+      expect(outcomes(ctx.jobId)).toEqual([]);
+    });
   });
 
   it("includes the hand-back detail in a dry run", async () => {

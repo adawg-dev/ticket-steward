@@ -5,6 +5,7 @@ import { INTERRUPTED_ERROR } from "../brain/types.js";
 import { attachedMedia } from "../codehost/media.js";
 import { reviewConfigOf, type ImplementConfig } from "../config/schema.js";
 import { renderTicketMarkdown } from "../core/context.js";
+import { askIntake, recordIntakeOutcome } from "../decisions/intake.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { closedReason } from "../core/intake.js";
 import { readRepoPartial } from "../core/prompt.js";
@@ -219,6 +220,8 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
     bundle = await deps.tracker.fetchTicket(ctx.issueId);
     const closed = closedReason(ctx.identifier, bundle.state);
     if (closed !== null) return { outcome: { status: "failed", error: closed, retryable: false } };
+    // Shadow only: recorded for evaluation, never read back here. A fresh implement only: a run with a reply answers questions asked earlier.
+    if (!ctx.dryRun && replyOf(ctx) === null) await askIntake(deps, { jobId: ctx.jobId, issueId: ctx.issueId }, renderTicketMarkdown(bundle));
     await deps.mirror.fetch();
     baseSha = await deps.mirror.resolveSha(deps.config.workspace.baseBranch);
     const site = await lsRemoteSite(paths, remote);
@@ -303,6 +306,7 @@ export const finishImplement = async (ctx: RunContext, deps: PipelineDeps, spec:
   const validated = validateImplementResult(report.output);
   if (!validated.ok) return finish(ctx, deps, { result: null, handback: handback("readyForHuman", "the agent's result was invalid", validated.error) });
   const result = validated.result;
+  if (!ctx.dryRun) recordIntakeOutcome(deps, ctx.jobId, result.outcome);
   if (result.outcome === "needs_info") return finish(ctx, deps, { result, handback: handback("needsInfo", "the ticket needs more information") });
   if (result.outcome === "failed") return finish(ctx, deps, { result, handback: handback("readyForHuman", "the agent could not finish") });
 

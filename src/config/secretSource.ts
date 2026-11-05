@@ -23,6 +23,8 @@ export const SecretsSchema = z.object({
   CLAUDE_CODE_OAUTH_TOKEN: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().optional(),
+  /** Concentrate's `/v1/decisions`; unset, the gateway key (ANTHROPIC_AUTH_TOKEN, then ANTHROPIC_API_KEY) is used. */
+  CONCENTRATE_API_KEY: z.string().optional(),
 });
 export type Secrets = z.infer<typeof SecretsSchema>;
 export type SecretName = keyof Secrets;

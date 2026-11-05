@@ -31,6 +31,8 @@ const SettingFields = {
   "ci.lookbackDays": z.number().int().positive(),
   /** Off: no `/agent` chats on MRs the steward did not open, whatever the config allows; on does nothing the config does not allow. */
   "chat.anyMergeRequest": z.boolean(),
+  /** Ask the configured decisions models in shadow mode (answers recorded, never acted on); needs a `decisions` block. */
+  "decisions.enabled": z.boolean(),
 };
 
 /** Every setting, each required: what is in effect. Unknown keys are refused. */
@@ -60,6 +62,7 @@ export const DEFAULT_SETTINGS: Settings = {
   "ci.retryLimit": 1,
   "ci.lookbackDays": 14,
   "chat.anyMergeRequest": true,
+  "decisions.enabled": true,
 };
 
 export const SETTING_KEYS: readonly SettingKey[] = SettingsSchema.keyof().options;

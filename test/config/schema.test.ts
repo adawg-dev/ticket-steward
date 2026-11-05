@@ -36,6 +36,15 @@ describe("StewardConfigSchema", () => {
     expect(parsed.tracker.teams).toEqual([]);
   });
 
+  it("leaves decisions off unless configured, and fills an empty block with Concentrate and three models", () => {
+    expect(StewardConfigSchema.parse(minimalInput).decisions).toBeUndefined();
+    expect(StewardConfigSchema.parse({ ...minimalInput, decisions: {} }).decisions).toEqual({
+      baseUrl: "https://api.concentrate.ai/v1",
+      models: ["jev-latest", "clef", "mercury-decide"],
+    });
+    expect(() => StewardConfigSchema.parse({ ...minimalInput, decisions: { models: [] } })).toThrow();
+  });
+
   it("rejects the removed enrich keys", () => {
     const { tracker } = minimalInput;
     const removed: Array<[string, unknown]> = [

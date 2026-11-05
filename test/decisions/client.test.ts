@@ -38,6 +38,15 @@ describe("decisions client", () => {
     expect(calls[0]?.body).toMatchObject({ input: "the ticket", questions: QUESTIONS });
   });
 
+  it("names its models and asks only the subset it is given", async () => {
+    const { calls, fetchImpl } = stubFetch(async (model) => ok(model));
+    const decisions = client(fetchImpl, ["jev-latest", "clef", "mercury-decide"]);
+    expect(decisions.models).toEqual(["jev-latest", "clef", "mercury-decide"]);
+    const answers = await decisions.ask("t", QUESTIONS, ["clef"]);
+    expect(answers.map((a) => a.requested)).toEqual(["clef"]);
+    expect(calls.map((c) => c.body.model)).toEqual(["clef"]);
+  });
+
   it("redacts and truncates the input", async () => {
     const { calls, fetchImpl } = stubFetch(async (model) => ok(model));
     const redact = (t: string): string => t.replaceAll("SECRET123456", "***");

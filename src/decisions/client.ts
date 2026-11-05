@@ -24,11 +24,14 @@ export interface ModelAnswer {
 }
 
 export interface DecisionsClient {
-  /** One answer per configured model, in model order; never rejects. */
-  ask(input: string, questions: Question[]): Promise<ModelAnswer[]>;
+  /** The configured models, in order. */
+  readonly models: string[];
+  /** One answer per model asked (all configured, or the given subset), in that order; never rejects. */
+  ask(input: string, questions: Question[], models?: string[]): Promise<ModelAnswer[]>;
 }
 
-const MAX_INPUT_CHARS = 100_000;
+/** What is sent of an input: the rest is cut off. */
+export const MAX_INPUT_CHARS = 100_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 const ResponseSchema = z.object({
@@ -95,9 +98,10 @@ export const createDecisionsClient = (opts: {
   };
 
   return {
-    ask: async (input, questions) => {
+    models: opts.models,
+    ask: async (input, questions, models = opts.models) => {
       const sent = opts.redact(input).slice(0, MAX_INPUT_CHARS);
-      return Promise.all(opts.models.map((model) => askOne(model, sent, questions)));
+      return Promise.all(models.map((model) => askOne(model, sent, questions)));
     },
   };
 };
