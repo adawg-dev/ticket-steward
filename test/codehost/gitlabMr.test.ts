@@ -225,6 +225,27 @@ describe("GitLabMrClient", () => {
     }]);
   });
 
+  it("neutralises quick actions and mentions in what it posts: an opened MR, a note and a reply", async () => {
+    const { calls, fetchImpl } = recorder([reply(201, { ...mrBody }), reply(201, {}), reply(201, {})]);
+    const c = client(fetchImpl);
+
+    await c.createMergeRequest(42, { sourceBranch: "api-1-fix", targetBranch: "dev", title: "/draft @ada", description: "Flushes.\n/merge\ncc @ada" });
+    await c.createNote(42, 7, "/approve\nthanks @ada");
+    await c.replyToDiscussion(42, 7, "d1", "/close @ada");
+
+    expect(calls.map((x) => x.body)).toEqual([
+      expect.objectContaining({ title: "\u200B/draft @\u2060ada", description: "Flushes.\n\u200B/merge\ncc @\u2060ada" }),
+      { body: "\u200B/approve\nthanks @\u2060ada" },
+      { body: "\u200B/close @\u2060ada" },
+    ]);
+  });
+
+  it("posts a raw note as it is, for the steward's own review request", async () => {
+    const { calls, fetchImpl } = recorder([reply(201, {})]);
+    await client(fetchImpl).createNote(42, 7, "@greptileai review", { raw: true });
+    expect(calls[0]?.body).toEqual({ body: "@greptileai review" });
+  });
+
   it("retries a job", async () => {
     const { calls, fetchImpl } = recorder([reply(201, { id: 6 })]);
     await client(fetchImpl).retryJob(42, 5);
