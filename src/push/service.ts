@@ -158,7 +158,7 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   if (subjectKey !== null && offending.length > 0) return refuse(`every commit subject must start with "${subjectKey}: "; amend or reword these commits`, offending.join("\n"));
 
   // 4. Nothing the steward copied in and no secret value, in the change or the messages.
-  const guarded = await guardRange({ worktreePath, baseSha: start.base, headSha: sha, stewardFiles, secretValues: secrets });
+  const guarded = await guardRange({ worktreePath, baseSha: start.base, headSha: sha, stewardFiles, secretValues: secrets, mergeable });
   if (!guarded.ok) return refuse(guarded.reason, guarded.detail);
 
   // 5. The steward's checks, against the original base so a filtered check covers the whole branch.

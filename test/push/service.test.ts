@@ -355,6 +355,27 @@ describe("pushFromWorktree onto a merge request's own branch (an MR chat)", () =
     expect(await remoteHead(PERSON_BRANCH)).toBe(merged);
   });
 
+  it("does not count a secret-looking line the base branch already has as the agent's", async () => {
+    const { target } = await personBranch();
+    // dev hardcodes a value the steward also holds as a secret (a public id that is in the overlay too).
+    await commitFile(repo.repo, "src/homepage.ts", `export const portal = "${PUSH_TOKEN}";\n`);
+    await repo.mirror.fetch();
+    await git(worktree.path, ["merge", "--quiet", "--no-edit", "main"]);
+    const merged = await git(worktree.path, ["rev-parse", "HEAD"]);
+
+    expect(await push(target, null)).toMatchObject({ ok: true, sha: merged });
+  });
+
+  it("still refuses a secret the agent adds next to the merge", async () => {
+    const { target } = await personBranch();
+    await commitFile(repo.repo, "src/main-only.ts", "export const m = 1;\n");
+    await repo.mirror.fetch();
+    await git(worktree.path, ["merge", "--quiet", "--no-edit", "main"]);
+    await agentCommit("Wire the token", `export const token = "${PUSH_TOKEN}";\n`, "src/token.ts");
+
+    expect(await push(target, null)).toMatchObject({ ok: false, reason: "the change contains a secret value" });
+  });
+
   it("refuses a merge of a branch that is not the base branch", async () => {
     const { target } = await personBranch();
     await git(repo.repo, ["checkout", "-q", "-b", "someone-else", "main"]);

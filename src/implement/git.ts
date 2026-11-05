@@ -54,7 +54,27 @@ const scanDiff = async (cwd: string, args: string[], env: Record<string, string>
  * The path guard and secret scan over `git diff <base> <sha>`.
  * Refuses an empty change, steward-copied files (overlay, skills) and added lines carrying a secret value.
  */
-const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: Record<string, string> = {}, allowEmpty = false): Promise<GuardResult> => {
+/** The base branch's head when merging it in is allowed: the only merge a push may carry, to bring the branch up to date. */
+export interface MergeableBase {
+  sha: string;
+  name: string;
+}
+
+/** The lines of `path` as the base branch has it; empty when the base branch has no such file (or none is given). */
+const baseLines = async (cwd: string, mergeable: MergeableBase | null, path: string, env: Record<string, string>): Promise<Set<string>> => {
+  if (mergeable === null) return new Set();
+  const shown = await safeGit(["show", `${mergeable.sha}:${path}`], cwd, env);
+  return shown.exitCode === 0 ? new Set(shown.stdout.split("\n")) : new Set();
+};
+
+const guardDiff = async (
+  cwd: string,
+  range: string[],
+  input: GuardInput,
+  env: Record<string, string> = {},
+  allowEmpty = false,
+  mergeable: MergeableBase | null = null,
+): Promise<GuardResult> => {
   const paths = (await safeGitOrThrow(["diff", "--name-only", "-z", ...range], cwd, env)).split("\0").filter((path) => path !== "");
   if (paths.length === 0 && !allowEmpty) return { ok: false, reason: "the agent reported the work as implemented but changed nothing", detail: "" };
   const steward = new Set(input.stewardFiles);
@@ -66,7 +86,11 @@ const guardDiff = async (cwd: string, range: string[], input: GuardInput, env: R
     for (const path of paths) {
       const scanned = await scanDiff(cwd, ["diff", ...SECRET_DIFF_FLAGS, ...range, "--", path], { ...env, ...LITERAL_PATHSPECS }, input.maxDiffBytes ?? MAX_DIFF_BYTES);
       if (!scanned.ok) return { ok: false, reason: scanned.reason, detail: path };
-      if (addedLines(scanned.diff).some((line) => secrets.some((secret) => line.includes(secret)))) leaking.push(path);
+      const flagged = addedLines(scanned.diff).filter((line) => secrets.some((secret) => line.includes(secret)));
+      if (flagged.length === 0) continue;
+      // A line the base branch already has came in with a merge of it: it is already on the remote, not the agent's.
+      const onBase = await baseLines(cwd, mergeable, path, env);
+      if (flagged.some((line) => !onBase.has(line))) leaking.push(path);
     }
     if (leaking.length > 0) return { ok: false, reason: "the change contains a secret value", detail: leaking.join("\n") };
   }
@@ -87,8 +111,9 @@ const messageOf = (raw: string): string => {
  * and no commit message may carry a secret value. The caller has checked the range is linear on the base.
  * Replace refs are ignored, so the diffs are of the real objects that get pushed.
  */
-export const guardRange = async (input: GuardInput & { worktreePath: string; baseSha: string; headSha: string }): Promise<GuardResult> => {
-  const overall = await guardDiff(input.worktreePath, [input.baseSha, input.headSha], input, NO_REPLACE);
+export const guardRange = async (input: GuardInput & { worktreePath: string; baseSha: string; headSha: string; mergeable?: MergeableBase | null }): Promise<GuardResult> => {
+  const mergeable = input.mergeable ?? null;
+  const overall = await guardDiff(input.worktreePath, [input.baseSha, input.headSha], input, NO_REPLACE, false, mergeable);
   if (!overall.ok) return overall;
   const secrets = usableSecrets(input.secretValues);
   // The branch's own line: a merge of the base branch is checked as one change, not each base-branch commit it brings in.
@@ -98,7 +123,7 @@ export const guardRange = async (input: GuardInput & { worktreePath: string; bas
     .map((line) => line.split(" "));
   for (const [sha = "", parent = ""] of commits) {
     if (commits.length > 1) {
-      const own = await guardDiff(input.worktreePath, [parent, sha], input, NO_REPLACE, true);
+      const own = await guardDiff(input.worktreePath, [parent, sha], input, NO_REPLACE, true, mergeable);
       if (!own.ok) return { ...own, detail: own.detail === "" ? `commit ${sha.slice(0, 7)}` : `commit ${sha.slice(0, 7)}: ${own.detail}` };
     }
     // The agent wrote the messages and its commit hooks could rewrite them: they are pushed too, so they get the same scan.
@@ -112,11 +137,6 @@ export const guardRange = async (input: GuardInput & { worktreePath: string; bas
  * Why `baseSha..sha` is not a non-empty, merge-free series of commits on top of `baseSha`, or null when it is.
  * The range is what a fast-forward from `baseSha` would push.
  */
-/** The base branch's head when merging it in is allowed: the only merge a push may carry, to bring the branch up to date. */
-export interface MergeableBase {
-  sha: string;
-  name: string;
-}
 
 /**
  * Null when `sha` is new commits on top of `baseSha`, else why not. Without `mergeable` the history must be linear. With
