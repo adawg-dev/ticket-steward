@@ -23,8 +23,10 @@ import { transaction, type Job } from "../store/index.js";
 import type { TicketBundle } from "../tracker/types.js";
 import { listFiles } from "../workspace/files.js";
 import { injectToken, splitCredentials, type RemoteCredentials } from "../workspace/mirror.js";
+import { DEFAULT_SETTINGS } from "../settings/schema.js";
 import { extractAgentBrief } from "./brief.js";
 import { bundleBase, remoteTicketBranches } from "./git.js";
+import { chooseLevel, type Level } from "./level.js";
 import { renderImplementPrompt } from "./prompt.js";
 import { publishImplement } from "./publish.js";
 import { validateImplementResult, type Handback, type StoredImplement } from "./result.js";
@@ -163,13 +165,26 @@ const pushLanded = async (ctx: RunContext, deps: PipelineDeps, paths: JobPaths, 
 /** The spec's run id: the job's attempt, or the dry run's process. */
 export const runIdOf = (ctx: RunContext): string => (ctx.dryRun ? `dry-${process.pid}` : `${ctx.jobId}-${ctx.attempt}`);
 
+/** The level this run works at: the design label, the setting, or the level of the run whose questions it answers, whichever is highest. */
+export const levelFor = (ctx: RunContext, deps: PipelineDeps, bundle: TicketBundle): Level =>
+  chooseLevel({
+    labels: bundle.labels,
+    designLabel: deps.config.implement?.designLabel,
+    defaultLevel: (deps.settings?.get() ?? DEFAULT_SETTINGS)["implement.defaultLevel"],
+    carried: answeredImplement(ctx, deps)?.implementResult?.result?.level?.finished ?? null,
+  });
+
+const limitsOf = (settings: ImplementConfig, level: Level): { timeoutMinutes: number; maxTurns: number } =>
+  (level === "design" ? settings.designLimits : undefined) ?? { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns };
+
 /** The implement prompt for the ticket, cut from `baseSha` into the run's worktree. */
 const implementPrompt = async (
   ctx: RunContext,
   deps: PipelineDeps,
-  p: { settings: ImplementConfig; bundle: TicketBundle; baseSha: string; paths: JobPaths },
+  p: { settings: ImplementConfig; bundle: TicketBundle; baseSha: string; paths: JobPaths; level: Level },
 ): Promise<string> => {
-  const { settings, bundle, baseSha, paths } = p;
+  const { settings, bundle, baseSha, paths, level } = p;
+  const design = answeredImplement(ctx, deps)?.implementResult?.result?.design ?? null;
   const brief = extractAgentBrief(bundle.description);
   return renderImplementPrompt(await readFile(settings.prompt, "utf8"), {
     identifier: ctx.identifier,
@@ -187,6 +202,11 @@ const implementPrompt = async (
     hasChecks: settings.checks.length > 0,
     checks: stewardChecks(settings.checks, baseSha).map((command) => `- \`${command}\``).join("\n"),
     reply: replyOf(ctx) ?? "",
+    small: level === "small",
+    standard: level === "standard",
+    design: level === "design",
+    hasDesign: design !== null,
+    designText: design ?? "",
   }, await readRepoPartial(deps.configPath));
 };
 
@@ -199,7 +219,7 @@ export const previewImplementPrompt = async (ctx: RunContext, deps: PipelineDeps
   if (settings === undefined) throw new Error("implement is not configured (add an implement block)");
   const { baseBranch } = deps.config.workspace;
   const baseSha = deps.mirror.exists() ? await deps.mirror.resolveSha(baseBranch) : `<${baseBranch}>`;
-  return implementPrompt(ctx, deps, { settings, bundle, baseSha, paths: implementPaths(ctx, deps) });
+  return implementPrompt(ctx, deps, { settings, bundle, baseSha, paths: implementPaths(ctx, deps), level: levelFor(ctx, deps, bundle) });
 };
 
 /**
@@ -240,9 +260,10 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
   }
 
   const worktreePath = join(paths.workRoot, paths.worktreeName);
+  const level = levelFor(ctx, deps, bundle);
   let prompt: string;
   try {
-    prompt = await implementPrompt(ctx, deps, { settings, bundle, baseSha, paths });
+    prompt = await implementPrompt(ctx, deps, { settings, bundle, baseSha, paths, level });
   } catch (err) {
     return { outcome: prepareFailed(deps, err) };
   }
@@ -268,7 +289,7 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
     output: "implement",
     // An answer to the agent's questions continues the session that asked them.
     resumeSessionId: answeredImplement(ctx, deps)?.sessionId ?? null,
-    limits: { timeoutMinutes: settings.timeoutMinutes, maxTurns: settings.maxTurns, setupTimeoutMinutes: deps.config.workspace.setupTimeoutMinutes },
+    limits: { ...limitsOf(settings, level), setupTimeoutMinutes: deps.config.workspace.setupTimeoutMinutes },
     push,
     setup: deps.config.workspace.setup,
     checks: stewardChecks(settings.checks, baseSha),

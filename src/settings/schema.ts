@@ -33,6 +33,8 @@ const SettingFields = {
   "chat.anyMergeRequest": z.boolean(),
   /** Ask the configured decisions models in shadow mode (answers recorded, never acted on); needs a `decisions` block. */
   "decisions.enabled": z.boolean(),
+  /** The process level of an implement run on a ticket without the design label; design is chosen by the label or carried, never by default. */
+  "implement.defaultLevel": z.enum(["small", "standard"]),
 };
 
 /** Every setting, each required: what is in effect. Unknown keys are refused. */
@@ -63,6 +65,7 @@ export const DEFAULT_SETTINGS: Settings = {
   "ci.lookbackDays": 14,
   "chat.anyMergeRequest": true,
   "decisions.enabled": true,
+  "implement.defaultLevel": "small",
 };
 
 export const SETTING_KEYS: readonly SettingKey[] = SettingsSchema.keyof().options;

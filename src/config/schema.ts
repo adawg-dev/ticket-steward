@@ -58,6 +58,10 @@ const ImplementSchema = z.object({
   commitAuthor: z.object({ name: z.string().min(1), email: z.string().min(1) }),
   timeoutMinutes: z.number().positive().default(60),
   maxTurns: z.number().int().positive().default(150),
+  /** A ticket with this label (any case) runs at the design level. */
+  designLabel: z.string().min(1).optional(),
+  /** The limits of a design-level run; the implement limits when absent. */
+  designLimits: z.object({ timeoutMinutes: z.number().positive(), maxTurns: z.number().int().positive() }).optional(),
   /** Branches doctor expects GitLab to protect from the push token. */
   protectedBranches: z.array(z.string().min(1)).default(["main", "staging", "dev"]),
 });

@@ -19,6 +19,11 @@ const vars: ImplementPromptVars = {
   hasChecks: false,
   checks: "",
   reply: "",
+  small: true,
+  standard: false,
+  design: false,
+  hasDesign: false,
+  designText: "",
 };
 
 describe("implement prompt", () => {
@@ -58,5 +63,11 @@ describe("implement prompt", () => {
     const prompt = renderImplementPrompt(template, { ...vars, reply: "Use the S3 adapter <v2>." });
     expect(prompt).toContain("## Your questions were answered");
     expect(prompt).toContain("Use the S3 adapter <v2>.");
+  });
+
+  it("renders only the section of the run's level", () => {
+    const levels = "{{#small}}S{{/small}}{{#standard}}T{{/standard}}{{#design}}D{{/design}}";
+    expect(renderImplementPrompt(levels, vars)).toBe("S");
+    expect(renderImplementPrompt(levels, { ...vars, small: false, design: true })).toBe("D");
   });
 });

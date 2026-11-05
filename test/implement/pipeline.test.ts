@@ -8,7 +8,8 @@ import type { DecisionsClient, ModelAnswer } from "../../src/decisions/client.js
 import type { StewardConfig } from "../../src/config/schema.js";
 import type { PipelineDeps } from "../../src/core/deps.js";
 import { Redactor } from "../../src/core/redact.js";
-import type { RunContext } from "../../src/core/types.js";
+import type { JobOutcome, RunContext } from "../../src/core/types.js";
+import { DEFAULT_SETTINGS, type Settings } from "../../src/settings/schema.js";
 import type { ImplementResult } from "../../src/implement/result.js";
 import { publishImplementOnly, runImplement } from "../../src/implement/pipeline.js";
 import { storeLedger } from "../../src/push/ledger.js";
@@ -775,6 +776,46 @@ describe("runImplement in the ticket's agent session", () => {
     expect(specs[0]).toMatchObject({ resumeSessionId: "session-q", worktreePath: join(repo.dataDir, "work", `${asked.jobId}-1`) });
     expect(specs[0]?.prompt).toContain("The S3 adapter.");
     expect(stores.jobs.get(answered.jobId)?.worktreeName).toBe(`${asked.jobId}-1`);
+  });
+
+  describe("process level", () => {
+    const levelPrompt = async (): Promise<string> => {
+      const path = join(repo.root, "level-prompt.md");
+      await writeFile(path, "level={{#small}}small{{/small}}{{#standard}}standard{{/standard}}{{#design}}design{{/design}} hasDesign={{#hasDesign}}yes{{/hasDesign}} design={{designText}}");
+      return path;
+    };
+    const designed = { ...questions, level: { started: "design" as const, finished: "design" as const, reason: "needs a call" }, design: "D1 use S3" };
+
+    it("uses the design limits at design, the implement limits otherwise", async () => {
+      const config = makeConfig({ prompt: await levelPrompt(), designLabel: "Design", designLimits: { timeoutMinutes: 120, maxTurns: 400 } });
+      tracker.addIssue({ ...issue, id: "issue-2", identifier: "API-2", labels: ["design"] });
+      const specs: RunSpec[] = [];
+      const run = (event: TriggerEvent): Promise<JobOutcome> => runImplement(claim(event), { ...makeDeps(undefined, config), executor: thinking("Reading.", {}, specs) });
+      await run({ ...trigger, issueId: "issue-2", identifier: "API-2" });
+      await run(trigger);
+      expect(specs[0]?.limits).toMatchObject({ timeoutMinutes: 120, maxTurns: 400 });
+      expect(specs[0]?.prompt).toContain("level=design");
+      expect(specs[1]?.limits).toMatchObject({ timeoutMinutes: 1, maxTurns: 5 });
+    });
+
+    it("an answer to a design run's questions resumes at design with its design", async () => {
+      const config = makeConfig({ prompt: await levelPrompt() });
+      const asked = claim();
+      await runImplement(asked, { ...makeDeps(undefined, config), linear, executor: thinking("Reading.", { output: designed, sessionId: "session-q" }) });
+      stores.jobs.finish(asked.jobId, { status: "succeeded" });
+
+      const specs: RunSpec[] = [];
+      await runImplement(claim({ ...trigger, message: "The S3 adapter.", author: "Ada" }), { ...makeDeps(undefined, config), linear, executor: thinking("Implementing.", {}, specs) });
+      expect(specs[0]?.prompt).toBe("level=design hasDesign=yes design=D1 use S3");
+    });
+
+    it("the default level setting applies", async () => {
+      const config = makeConfig({ prompt: await levelPrompt() });
+      const specs: RunSpec[] = [];
+      const settings = { get: (): Settings => ({ ...DEFAULT_SETTINGS, "implement.defaultLevel": "standard" }) };
+      await runImplement(claim(), { ...makeDeps(undefined, config), settings, executor: thinking("Reading.", {}, specs) });
+      expect(specs[0]?.prompt).toContain("level=standard");
+    });
   });
 
   it("says where a stopped run got to, once, as a response", async () => {

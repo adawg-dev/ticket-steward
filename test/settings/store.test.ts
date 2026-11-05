@@ -34,6 +34,7 @@ describe("seedSettings", () => {
       "ci.lookbackDays": 14,
       "chat.anyMergeRequest": true,
       "decisions.enabled": true,
+      "implement.defaultLevel": "small",
     });
     const greptile = { maxRounds: 3 } as const satisfies Partial<NonNullable<StewardConfig["greptile"]>>;
     const config: Pick<StewardConfig, "greptile"> = {

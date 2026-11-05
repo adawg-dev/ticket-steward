@@ -20,6 +20,13 @@ export interface ImplementPromptVars {
   checks: string;
   /** A person's answer to the questions an earlier run asked (`{{#reply}}`); empty on a fresh implement. */
   reply: string;
+  /** The process level of this run: exactly one of the three is true. */
+  small: boolean;
+  standard: boolean;
+  design: boolean;
+  /** True when the run answers questions asked at the design level, with the design it had by then in `designText`. */
+  hasDesign: boolean;
+  designText: string;
 }
 
 /** Fill the implement prompt template, with the repo's own section (`readRepoPartial`) as `{{> repo}}`. */
