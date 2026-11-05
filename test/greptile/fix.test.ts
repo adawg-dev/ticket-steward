@@ -158,6 +158,8 @@ class AgentBrain extends FakeBrain {
       // The MCP server turns a thrown error into a refusal; so does this stand-in.
       const pushed = await pushFromWorktree({ deps: { ...this.deps, ledger: storeLedger(this.deps) }, target, branchType: null }).catch((err: unknown): PushResult => ({ ok: false, reason: "push failed", detail: String(err) }));
       this.pushes.push(pushed);
+      // GitLab moves the MR's head with the push.
+      if (pushed.ok) gitlab.mr = { ...gitlab.mr, sha: pushed.sha };
       return pushed;
     });
     return run;
@@ -276,6 +278,54 @@ describe("runFix", () => {
     expect(loop).toMatchObject({ round: 1, headSha: pushed, state: "awaiting_review", sessionId: "session-2", pendingPush: null, waitStartedAt: null, reviewCountAtTrigger: 3 });
     expect(loop.history).toEqual([{ round: 0, headSha, score: 3, pipeline: "success", fixed: 1, declined: 0, outcome: "changed" }]);
     expect(queuedAwaits()).toEqual([{ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "await" }]);
+  });
+
+  it("asks for no review and hands back when a person pushed over the fix before the request", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) }, async (workspace, push) => {
+      await commitAndPush(workspace, push);
+      gitlab.mr = { ...gitlab.mr, sha: "e".repeat(40) };
+    });
+
+    const outcome = await runFix(claim(id), makeDeps(brain));
+
+    expect(outcome).toEqual({ status: "succeeded", warning: "handed back: a person pushed to the branch; the loop stopped" });
+    expect(gitlab.notes.some((note) => note.includes("@greptileai"))).toBe(false);
+    expect(loopOf(id).state).toBe("handed_back");
+  });
+
+  it("retries the publish when the merge request cannot be read again before the review request", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) });
+    const read = gitlab.getMergeRequest.bind(gitlab);
+    let reads = 0;
+    gitlab.getMergeRequest = async () => {
+      reads += 1;
+      if (reads === 2) throw new Error("GitLab down");
+      return read();
+    };
+    const ctx = claim(id);
+
+    const first = await runFix(ctx, makeDeps(brain));
+
+    expect(first).toMatchObject({ status: "publish_failed", error: expect.stringContaining("GitLab down") });
+    expect(gitlab.notes).toEqual([]);
+    expect(await runFix(retry(ctx), makeDeps(brain))).toEqual({ status: "succeeded" });
+    expect(gitlab.notes.filter((note) => note.startsWith("@greptileai review"))).toHaveLength(1);
+  });
+
+  it("retries the publish while GitLab still shows the head the round started from", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) }, async (workspace, push) => {
+      await commitAndPush(workspace, push);
+      gitlab.mr = { ...gitlab.mr, sha: headSha };
+    });
+
+    const outcome = await runFix(claim(id), makeDeps(brain));
+
+    expect(outcome).toMatchObject({ status: "publish_failed" });
+    expect(gitlab.notes).toEqual([]);
+    expect(loopOf(id).state).toBe("fixing");
   });
 
   it("posts the review request once when a changed round's publish is retried", async () => {
@@ -700,6 +750,7 @@ describe("runFix", () => {
     expect((await runFix(ctx, makeDeps(brain))).status).toBe("publish_failed");
     const pushed = await git(repo.repo, ["rev-parse", BRANCH]);
     stores.loops.update(id, { headSha, pendingPush: { sha: pushed, pushed: false } });
+    gitlab.mr = { ...gitlab.mr, sha: headSha };
 
     const outcome = await runFix(retry(ctx), makeDeps(brain));
 

@@ -122,6 +122,23 @@ const greptileEnabled = (fix: Fix): boolean => {
 };
 
 /**
+ * The MR's head just before Greptile is asked to review it: `ours` at the pushed commit; `person` when someone pushed
+ * over it; `retry` when the read failed or GitLab still shows a commit this round had before its last push.
+ */
+const headNow = async (fix: Fix, mr: MergeRequestInfo): Promise<{ status: "ours" } | { status: "person" } | { status: "retry"; error: string }> => {
+  const pending = reload(fix).pendingPush;
+  let sha: string;
+  try {
+    sha = (await fix.gitlab.getMergeRequest(mr.projectId, mr.iid)).sha.toLowerCase();
+  } catch (err) {
+    return { status: "retry", error: `review request: ${errorMessage(err)}` };
+  }
+  if (pending !== null && sha === pending.sha.toLowerCase()) return { status: "ours" };
+  const earlier = [roundHead(fix), ...fix.deps.stores.pushes.forJob(fix.ctx.jobId).map((push) => push.sha)].map((known) => known.toLowerCase());
+  return earlier.includes(sha) ? { status: "retry", error: `review request: the merge request is still at ${sha.slice(0, 7)}` } : { status: "person" };
+};
+
+/**
  * A `changed` fix: the agent pushed it through the push tool. Reply and resolve, then move the loop to the pushed head.
  * Never pushes: a push the tool recorded but never marked counts only when the MR is already at its commit.
  */
@@ -145,6 +162,9 @@ const publishChanged = async (fix: Fix, stored: StoredFix, result: FixResult, mr
   // Greptile reviews on open only: the steward asks for the pushed head, and the loop waits for a review count above this round's.
   const asking = greptileEnabled(fix);
   if (asking) {
+    const head = await headNow(fix, mr);
+    if (head.status === "person") return publishHandback(deps, reload(fix), "a person pushed to the branch; the loop stopped");
+    if (head.status === "retry") return { status: "publish_failed", error: head.error };
     const requested = await requestReview(deps, reload(fix));
     if (requested.status !== "succeeded") return requested;
   }
