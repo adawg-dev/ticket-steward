@@ -191,6 +191,34 @@ describe("claude-code brain", () => {
     expect(captured?.outputFormat).toEqual({ type: "json_schema", schema: fixResultJsonSchema });
   });
 
+  it("keeps today's options when no extra tools are asked for", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run(input, onMessage);
+    const captured = queryMock.mock.calls[0]?.[0].options;
+    expect(captured?.allowedTools).toEqual(["Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "WebFetch", "mcp__codehost__*", "mcp__playwright__*", "mcp__push__*", "mcp__orbit__*"]);
+    expect(captured).not.toHaveProperty("agents");
+    expect(captured).not.toHaveProperty("skills");
+  });
+
+  it("turns skills on for Skill, without a subagent", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run({ ...input, extraTools: ["Skill"] }, onMessage);
+    const captured = queryMock.mock.calls[0]?.[0].options;
+    expect(captured?.skills).toBe("all");
+    expect(captured?.allowedTools).not.toContain("Skill");
+    expect(captured?.allowedTools).not.toContain("Agent");
+    expect(captured).not.toHaveProperty("agents");
+  });
+
+  it("adds Agent and the read-only goldfish subagent", async () => {
+    const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
+    await createClaudeCodeBrain({ queryImpl: queryMock }).run({ ...input, extraTools: ["Skill", "Agent"] }, onMessage);
+    const captured = queryMock.mock.calls[0]?.[0].options;
+    expect(captured?.skills).toBe("all");
+    expect(captured?.allowedTools).toContain("Agent");
+    expect(captured?.agents?.goldfish?.tools).toEqual(["Read", "Grep", "Glob"]);
+  });
+
   it("asks for the implement schema when the input is an implement", async () => {
     const queryMock = vi.fn<QueryImpl>().mockImplementation(yielding(resultMessage({ subtype: "success", structured_output: { summary: "done" } })));
 

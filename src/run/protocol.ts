@@ -45,6 +45,8 @@ export const RunSpecSchema = z.object({
   checks: z.array(z.string()),
   /** A person attaches to the session (`steward chat`) instead of the brain running to a structured result. */
   interactive: z.boolean(),
+  /** Extra brain tools for the run: `Skill` turns skills on, `Agent` adds the goldfish subagent. Older specs have none. */
+  tools: z.array(z.enum(["Skill", "Agent"])).default([]),
 });
 
 export type RunSpec = z.infer<typeof RunSpecSchema>;

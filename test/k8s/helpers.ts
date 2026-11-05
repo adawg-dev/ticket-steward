@@ -40,5 +40,6 @@ export const podSpecFor = (patch: Partial<RunSpec> = {}): RunSpec => ({
   setup: ["pnpm install"],
   checks: [],
   interactive: false,
+  tools: [],
   ...patch,
 });

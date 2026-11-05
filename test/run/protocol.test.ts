@@ -23,6 +23,7 @@ const spec: RunSpec = {
   setup: ["pnpm install"],
   checks: ["pnpm test"],
   interactive: false,
+  tools: [],
 };
 
 const report: RunReport = {
@@ -40,6 +41,13 @@ const report: RunReport = {
 const roundTrip = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
 
 describe("the run protocol", () => {
+  it("parses a spec without tools as none, and keeps the ones it names", () => {
+    const older = Object.fromEntries(Object.entries(spec).filter(([key]) => key !== "tools"));
+    expect(RunSpecSchema.parse(roundTrip(older)).tools).toEqual([]);
+    expect(RunSpecSchema.parse(roundTrip({ ...spec, tools: ["Agent"] })).tools).toEqual(["Agent"]);
+    expect(RunSpecSchema.safeParse({ ...spec, tools: ["Bash"] }).success).toBe(false);
+  });
+
   it("round-trips a spec, a report and a work report through JSON", () => {
     expect(RunSpecSchema.parse(roundTrip(spec))).toEqual(spec);
     expect(RunReportSchema.parse(roundTrip(report))).toEqual(report);

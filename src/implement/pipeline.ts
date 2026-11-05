@@ -294,6 +294,7 @@ export const prepareImplement = async (ctx: RunContext, deps: PipelineDeps): Pro
     setup: deps.config.workspace.setup,
     checks: stewardChecks(settings.checks, baseSha),
     interactive: false,
+    tools: level === "design" ? ["Skill", "Agent"] : ["Skill"],
   };
   return { spec };
 };

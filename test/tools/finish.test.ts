@@ -31,6 +31,7 @@ const specAt = (sha: string): RunSpec => ({
   setup: [],
   checks: [],
   interactive: false,
+  tools: [],
 });
 
 beforeEach(async () => {

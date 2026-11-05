@@ -39,6 +39,7 @@ const specFor = (patch: Partial<RunSpec> = {}): RunSpec => ({
   setup: [],
   checks: [],
   interactive: false,
+  tools: [],
   ...patch,
 });
 

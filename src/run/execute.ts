@@ -77,6 +77,7 @@ const brainInputOf = (spec: RunSpec, env: ExecuteEnv, prompt: string): BrainInpu
   ...(env.inlineSkills === undefined ? {} : { inlineSkills: env.inlineSkills }),
   denyPaths: env.denyPaths,
   output: spec.output,
+  ...(spec.tools.length === 0 ? {} : { extraTools: spec.tools }),
   ...(spec.resumeSessionId === null ? {} : { resumeSessionId: spec.resumeSessionId }),
 });
 

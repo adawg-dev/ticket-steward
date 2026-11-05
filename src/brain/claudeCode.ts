@@ -1,5 +1,5 @@
 import { randomUUID, type UUID } from "node:crypto";
-import { query, type HookCallback, type McpServerConfig, type Options, type SDKMessage, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type AgentDefinition, type HookCallback, type McpServerConfig, type Options, type SDKMessage, type SDKResultMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { chatResultJsonSchema } from "../chat/result.js";
 import { fixResultJsonSchema } from "../greptile/result.js";
 import { implementResultJsonSchema } from "../implement/result.js";
@@ -11,6 +11,12 @@ const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = {
   implement: implementResultJsonSchema,
   fix: fixResultJsonSchema,
   chat: chatResultJsonSchema,
+};
+/** A fresh reviewer for design runs: it sees only what it is told to read, so it has no stake in the design's history. */
+export const GOLDFISH_AGENT: AgentDefinition = {
+  description: "A fresh reviewer with no memory of this session. Give it the files to read and what to check; it returns findings.",
+  prompt: "You are a fresh reviewer with no memory of earlier work. Read only the files you are given, and nothing else. Return a list of findings, each marked `blocking` (the work should not proceed until it is fixed) or `note` (worth knowing, not a blocker).",
+  tools: ["Read", "Grep", "Glob"],
 };
 /** Claude Code deletes transcripts older than this; the steward's retention owns session deletion instead. */
 export const CLEANUP_PERIOD_DAYS = 3650;
@@ -194,13 +200,15 @@ export const createClaudeCodeBrain = (deps: { queryImpl?: QueryImpl } = {}): Bra
         maxTurns: input.maxTurns,
         model: input.model,
         permissionMode: "acceptEdits",
-        allowedTools: ALLOWED_TOOLS,
+        allowedTools: input.extraTools?.includes("Agent") === true ? [...ALLOWED_TOOLS, "Agent"] : ALLOWED_TOOLS,
         settingSources: ["project"],
         settings: { cleanupPeriodDays: CLEANUP_PERIOD_DAYS },
         mcpServers: mcpServers(input),
         outputFormat: { type: "json_schema", schema: OUTPUT_SCHEMAS[input.output] },
         hooks: { PreToolUse: [{ matcher: POLICY_HOOK_MATCHER, hooks: [policyHook(input)] }] },
         abortController,
+        ...(input.extraTools?.includes("Skill") === true ? { skills: "all" as const } : {}),
+        ...(input.extraTools?.includes("Agent") === true ? { agents: { goldfish: GOLDFISH_AGENT } } : {}),
         ...(input.resumeSessionId === undefined ? {} : { resume: input.resumeSessionId }),
       };
       try {

@@ -332,6 +332,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
     setup: deps.config.workspace.setup,
     checks: stewardChecks(settings.checks, loop.baseSha),
     interactive: false,
+    tools: [],
   };
   // A reattached run pod already runs this round: what it was started with is what it finishes with.
   return { spec: ctx.resume ?? spec, facts, work, people };

@@ -798,6 +798,17 @@ describe("runImplement in the ticket's agent session", () => {
       expect(specs[1]?.limits).toMatchObject({ timeoutMinutes: 1, maxTurns: 5 });
     });
 
+    it("gives the run Skill, plus Agent at design", async () => {
+      const config = makeConfig({ prompt: await levelPrompt(), designLabel: "Design" });
+      tracker.addIssue({ ...issue, id: "issue-2", identifier: "API-2", labels: ["design"] });
+      const specs: RunSpec[] = [];
+      const run = (event: TriggerEvent): Promise<JobOutcome> => runImplement(claim(event), { ...makeDeps(undefined, config), executor: thinking("Reading.", {}, specs) });
+      await run({ ...trigger, issueId: "issue-2", identifier: "API-2" });
+      await run(trigger);
+      expect(specs[0]?.tools).toEqual(["Skill", "Agent"]);
+      expect(specs[1]?.tools).toEqual(["Skill"]);
+    });
+
     it("an answer to a design run's questions resumes at design with its design", async () => {
       const config = makeConfig({ prompt: await levelPrompt() });
       const asked = claim();

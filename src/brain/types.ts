@@ -32,6 +32,8 @@ export interface BrainInput {
   model: string;
   /** openai-agents only. */
   reasoningEffort?: ReasoningEffort;
+  /** claude-code only: `Skill` turns skills on, `Agent` adds the read-only goldfish subagent. */
+  extraTools?: ("Skill" | "Agent")[];
   mcpServers: Record<string, McpServerSpec>;
   /** Skills the openai-agents brain inlines into the prompt; unset inlines every skill in the worktree. */
   inlineSkills?: string[];

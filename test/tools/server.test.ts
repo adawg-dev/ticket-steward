@@ -32,6 +32,7 @@ const spec: RunSpec = {
   setup: [],
   checks: [],
   interactive: false,
+  tools: [],
 };
 
 const orbit: OrbitRemote = { exec: () => Promise.reject(new Error("not called")), cwd: spec.worktreePath, env: {}, unavailable: "GITLAB_TOKEN is not set", secrets: [] };

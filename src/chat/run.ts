@@ -234,6 +234,7 @@ const prepareChat = async (ctx: RunContext, deps: PipelineDeps, answer: Answer, 
     setup: deps.config.workspace.setup,
     checks,
     interactive: false,
+    tools: [],
   };
   return { spec };
 };
@@ -273,6 +274,7 @@ export const interactiveChatSpec = (
     setup: config.workspace.setup,
     checks,
     interactive: true,
+    tools: [],
   };
 };
 
@@ -487,6 +489,7 @@ const prepareMrChat = async (
       setup: deps.config.workspace.setup,
       checks,
       interactive: false,
+      tools: [],
     },
   };
 };
