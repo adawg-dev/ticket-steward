@@ -38,7 +38,8 @@ const mrExists = (err: unknown): boolean =>
 
 /**
  * Opens the MR for the implement job's push, with the agent's title and description; null when the implement job handed
- * back or stored no result. When CI opened one meanwhile, that one is used; any other failure throws, so the poll retries.
+ * back or stored no result, or when the create failed (logged, and retried by the next poll). When CI opened one
+ * meanwhile, that one is used.
  */
 const openMergeRequest = async (deps: PipelineDeps, loop: Loop, project: string, ticket: TicketBundle): Promise<MergeRequestInfo | null> => {
   const gitlab = deps.gitlab;
@@ -57,10 +58,11 @@ const openMergeRequest = async (deps: PipelineDeps, loop: Loop, project: string,
       sourceBranch: loop.branch, targetBranch: deps.config.workspace.baseBranch, title: deps.redactor.redact(title), description: deps.redactor.redact(description),
     });
   } catch (err) {
-    if (!mrExists(err)) throw err;
-    const raced = await gitlab.findOpenMergeRequest(project, loop.branch);
-    if (raced === null) throw err;
-    return raced;
+    const raced = mrExists(err) ? await gitlab.findOpenMergeRequest(project, loop.branch) : null;
+    if (raced !== null) return raced;
+    // No MR yet: the poll waits as usual, the next one tries again (or finds CI's), and mrTimeoutMinutes bounds it.
+    logger.warn({ loopId: loop.id, err: errorMessage(err) }, "await: the merge request could not be opened");
+    return null;
   }
 };
 

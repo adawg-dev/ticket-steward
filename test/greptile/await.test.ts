@@ -332,16 +332,29 @@ describe("runAwaitReview", () => {
     expect(loopOf(id)).toMatchObject({ mrIid: null, state: "awaiting_mr" });
   });
 
-  it("retries the poll when the MR cannot be opened, and opens it on the next", async () => {
+  it("waits as usual when the MR cannot be opened, the wait clock started, and opens it on the next poll", async () => {
     const id = createLoop();
     gitlab.failNextCreate();
 
-    expect(await runAwaitReview(claim(id), makeDeps())).toEqual({ status: "failed", error: "GitLab down", retryable: true });
-    expect(loopOf(id)).toMatchObject({ mrIid: null, state: "awaiting_mr" });
+    expect(await runAwaitReview(claim(id), makeDeps())).toEqual({ status: "deferred", until: new Date(NOW.getTime() + 60_000) });
+    expect(loopOf(id)).toMatchObject({ mrIid: null, state: "awaiting_mr", waitStartedAt: NOW.toISOString() });
 
     expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("deferred");
     expect(gitlab.created).toHaveLength(1);
     expect(loopOf(id)).toMatchObject({ mrIid: 7, state: "awaiting_review" });
+  });
+
+  it("hands back once the MR wait runs out while the MR keeps failing to open", async () => {
+    const id = createLoop();
+    gitlab.createMergeRequest = async () => {
+      throw new Error("GitLab down");
+    };
+    await runAwaitReview(claim(id), makeDeps());
+
+    const later = { ...makeDeps(), now: () => new Date(NOW.getTime() + 61 * 60_000) };
+    expect(await runAwaitReview(claim(id), later)).toEqual({ status: "succeeded", warning: "handed back: no merge request was opened for api-1-fix" });
+
+    expect(loopOf(id)).toMatchObject({ state: "handed_back", mrIid: null });
   });
 
   it("gives the review its own wait once the MR is found, however long the MR took", async () => {
