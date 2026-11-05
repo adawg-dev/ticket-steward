@@ -420,6 +420,13 @@ round keeps only decisions whose author is a person who wrote in that round's di
 cap the loop hands back with one note ("stopped after N rounds started by bots; a person's comment starts another").
 A round with a person's comment resets the count: people always get a round.
 
+**Rounds don't wait for the pipeline.** Once Greptile's review of the head is in, a round that has work and would fix
+anyway starts at once, without waiting for the head pipeline: a person's comment is on the list, or the round is
+bot-started, Greptile's score is below `greptile.passScore` (or Greptile is off) and the bot-round cap is not reached.
+Otherwise the loop still waits for the pipeline, since a green one can pass a bot round at the pass score. Passing
+always needs a green head pipeline; a red one is still triaged and becomes work in a later round. CI logs go to the agent
+only when the pipeline had already failed at the round's start.
+
 **CI triage.** A red head pipeline is triaged before it counts as a round (`ci.triage`, on by default). A job that
 failed for an infrastructure reason (runner system failure, stuck or timed out, API or scheduler failure, no matching
 runner and similar) is retried, up to twice per job per commit. A job that looks flaky is retried once per job per
