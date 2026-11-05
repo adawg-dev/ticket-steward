@@ -2,7 +2,7 @@
 
 A Linear app that implements the tickets people delegate to it: it runs a coding agent against
 a fresh checkout of your monorepo, shows its work live in Linear's agent panel (where people can
-steer or stop it), pushes a branch (the pipeline opens the merge request), then optionally
+steer or stop it), pushes a branch and opens the merge request (or adopts the one CI opened first), then optionally
 answers every comment on the merge request, from people and review bots alike, round by round.
 
 The brain never holds tracker credentials; the steward validates a structured result and does
@@ -114,7 +114,7 @@ error; delete them from an older config.
 
 Delegating a ticket to the steward in Linear starts it; removing it stops the run and parks the work:
 
-- The agent works in a fresh checkout and pushes a new `<type>/<KEY>-<slug>` branch through the steward's push tool, which verifies every push (secret guard, checks); the pipeline opens the merge request. The ticket moves to its started state, then to the review state once the MR opens. Questions come back as an elicitation in the agent panel; a person's answer continues the same session.
+- The agent works in a fresh checkout and pushes a new `<type>/<KEY>-<slug>` branch through the steward's push tool, which verifies every push (secret guard, checks); the steward then opens the merge request (if CI's pipeline opened one first, that one is used). The ticket moves to its started state, then to the review state once the MR opens. Questions come back as an elicitation in the agent panel; a person's answer continues the same session.
 - An @mention or a prompt in the panel steers the running agent, or resumes its session when nothing runs; stop ends the run.
 
 Setup (the Linear app, `GITLAB_PUSH_TOKEN`, branch protection, the `implement` block) is in `docs/ops.md` §1.7 and §1.7a.

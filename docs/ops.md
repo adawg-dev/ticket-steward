@@ -347,12 +347,13 @@ the fields existed still parse and fall back as below.
 
 **The MR is opened by the steward.** On the loop's first poll after the implement push (§1.7b) the steward opens the
 merge request: ready (not draft), target `workspace.baseBranch`, source branch kept (`remove_source_branch=false`), no
-squash. The title is the agent's `mrTitle`, or `<KEY>: <ticket title>` when it wrote none. The description is the agent's
+squash. The title is the first line of the agent's `mrTitle`, or `<KEY>: <ticket title>` (cut to 255 characters) when
+that is empty or over GitLab's 255. The description is the agent's
 `mrDescription` (the old summary body when it wrote none), then the screenshots and videos from `media`, `Closes <KEY>`
 with the Linear link, a footer and the hidden loop marker; it replaces the "implement summary" note, which is not posted
 as well. If CI's `open_mr` job opened an MR from the branch first (or wins the race), the steward uses that one and posts
 the summary as a note, as before. A create that fails is logged as a warning and tried again on the next poll, bounded
-by `mrTimeoutMinutes`; it hands back "no MR was opened" when that runs out. The ticket moves to In Review when the MR
+by `mrTimeoutMinutes`; it hands back ("no merge request was opened for <branch>") when that runs out. The ticket moves to In Review when the MR
 opens.
 
 **The secret scan is best-effort.** It catches accidental leaks: a plain-text overlay or
@@ -438,7 +439,8 @@ A round with a person's comment resets the count: people always get a round.
 
 **Rounds don't wait for the pipeline.** Once Greptile's review of the head is in, a round that has work and would fix
 anyway starts at once, without waiting for the head pipeline: a person's comment is on the list, or the round is
-bot-started, Greptile's score is below `greptile.passScore` (or Greptile is off) and the bot-round cap is not reached.
+bot-started, Greptile's score is below `greptile.passScore` (or Greptile is off) and it is not the last bot round under
+the cap (that one waits, so it carries the CI failures).
 Otherwise the loop still waits for the pipeline, since a green one can pass a bot round at the pass score. Passing
 always needs a green head pipeline; a red one is still triaged and becomes work in a later round. CI logs go to the agent
 only when the pipeline had already failed at the round's start.
@@ -448,7 +450,12 @@ pushes should not trigger it), and there is no "Automatic reviews: On new pushes
 round that pushed, the steward posts one `@greptileai review` note on the MR (once per round and head, so a retried
 publish does not repeat it) and stores the summary's review count; the next round waits for a count above it. Only the
 steward asks: an agent reply that mentions `@greptile` is refused. A round with no push asks for nothing, and with
-Greptile off (setting or no `greptile` block) nothing is asked.
+Greptile off (setting or no `greptile` block) nothing is asked. Just before asking, the steward reads the MR again: a
+head that is not its push is a person's, and the loop hands back instead.
+
+**Agent text is made inert on GitLab.** Everything the steward posts (MR title and description, notes, thread and chat
+replies) has GitLab quick actions (`/merge`, `/approve` at a line's start) and `@`-mentions neutralised with invisible
+characters, outside fenced code blocks; only its own `@greptileai review` request is posted as is.
 
 **CI triage.** A red head pipeline is triaged before it counts as a round (`ci.triage`, on by default). A job that
 failed for an infrastructure reason (runner system failure, stuck or timed out, API or scheduler failure, no matching
