@@ -23,11 +23,16 @@ describe("neutralizeGitLab", () => {
     expect(neutralizeGitLab("    ```\n/merge\n@ada\n    ```")).toBe(`    \`\`\`\n${ZWSP}/merge\n@${WJ}ada\n    \`\`\``);
   });
 
-  it("breaks a mention after a slash unless it sits in an http(s) URL", () => {
+  it("breaks a mention after a slash, inside or after a URL, and after a non-ASCII letter", () => {
     expect(neutralizeGitLab("a/@ada and /@sam")).toBe(`a/@${WJ}ada and /@${WJ}sam`);
-    expect(neutralizeGitLab("x://@ada")).toBe(`x://@${WJ}ada`);
-    const link = "[x](https://medium.com/@ada) and <https://h.example/u/@sam>";
-    expect(neutralizeGitLab(link)).toBe(link);
+    expect(neutralizeGitLab("[x](https://x/)@ada https://x/<@sam https://medium.com/@lee")).toBe(
+      `[x](https://x/)@${WJ}ada https://x/<@${WJ}sam https://medium.com/@${WJ}lee`,
+    );
+    expect(neutralizeGitLab("café@ada 日本@sam")).toBe(`café@${WJ}ada 日本@${WJ}sam`);
+  });
+
+  it("breaks a quick action after a lone carriage return", () => {
+    expect(neutralizeGitLab("a\r/merge")).toBe(`a\r${ZWSP}/merge`);
   });
 
   it("leaves a path mid-line and a slash not followed by a letter as they are", () => {
