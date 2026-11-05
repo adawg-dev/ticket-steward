@@ -294,6 +294,23 @@ describe("runFix", () => {
     expect(loopOf(id)).toMatchObject({ round: 1, state: "awaiting_review", reviewCountAtTrigger: 3 });
   });
 
+  it("posts the review request once when the publish is retried after the request was already posted", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) });
+    const ctx = claim(id);
+    expect(await runFix(ctx, makeDeps(brain))).toEqual({ status: "succeeded" });
+    const pushed = await git(repo.repo, ["rev-parse", BRANCH]);
+    expect(gitlab.notes).toHaveLength(1);
+    // The round's move to the next await is lost: the loop is back where the publish found it.
+    stores.loops.update(id, { state: "fixing", round: 0, headSha: pushed, pendingPush: { sha: pushed, pushed: true }, reviewCountAtTrigger: null });
+    gitlab.mr = { ...gitlab.mr, sha: pushed };
+
+    expect(await runFix(retry(ctx), makeDeps(brain))).toEqual({ status: "succeeded" });
+
+    expect(gitlab.notes.filter((note) => note.startsWith("@greptileai review"))).toHaveLength(1);
+    expect(loopOf(id)).toMatchObject({ round: 1, state: "awaiting_review", reviewCountAtTrigger: 3 });
+  });
+
   it("asks Greptile for no review when its setting is off", async () => {
     const id = createLoop();
     const deps: PipelineDeps = { ...makeDeps(editing({ result: changed(finding) })), settings: { get: () => ({ ...seedSettings(makeConfig()), "greptile.enabled": false }) } };
