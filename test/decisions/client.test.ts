@@ -81,6 +81,18 @@ describe("decisions client", () => {
     expect(answer).toMatchObject({ answers: null, error: "refusal" });
   });
 
+  it("treats a response missing an asked question's answer as invalid, in any order", async () => {
+    const two: Question[] = [...QUESTIONS, { type: "predicate", name: "other", instructions: "Other?" }];
+    const missing = stubFetch(async () => json({ id: "d", model: "jev-1.13.0", answers: [{ type: "predicate", name: "ready", probability: 0.4 }] }));
+    expect((await client(missing.fetchImpl).ask("t", two))[0]).toMatchObject({ answers: null, error: "invalid response" });
+    const empty = stubFetch(async () => json({ id: "d", model: "jev-1.13.0", answers: [] }));
+    expect((await client(empty.fetchImpl).ask("t", QUESTIONS))[0]).toMatchObject({ answers: null, error: "invalid response" });
+    const reordered = stubFetch(async () =>
+      json({ id: "d", model: "jev-1.13.0", answers: [{ type: "predicate", name: "other", probability: 0.1 }, { type: "predicate", name: "ready", probability: 0.9 }] }),
+    );
+    expect((await client(reordered.fetchImpl).ask("t", two))[0]).toMatchObject({ error: null });
+  });
+
   it("records an invalid body", async () => {
     const { fetchImpl } = stubFetch(async () => json({ nope: 1 }));
     const [answer] = await client(fetchImpl).ask("t", QUESTIONS);

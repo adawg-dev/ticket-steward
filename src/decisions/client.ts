@@ -36,7 +36,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 
 const ResponseSchema = z.object({
   model: z.string(),
-  answers: z.array(z.looseObject({ type: z.string() })),
+  answers: z.array(z.looseObject({ type: z.string(), name: z.string().optional() })),
   cost: z.looseObject({ total: z.number().optional() }).optional(),
 });
 
@@ -88,6 +88,9 @@ export const createDecisionsClient = (opts: {
       const parsed = ResponseSchema.safeParse(await response.json());
       if (!parsed.success) return failed("invalid response");
       if (parsed.data.answers.some((answer) => answer.type === "refusal")) return failed("refusal");
+      // Every asked question must be answered by name: a partial answer would read as a prediction it is not.
+      const named = new Set(parsed.data.answers.map((answer) => answer.name));
+      if (questions.some((question) => !named.has(question.name))) return failed("invalid response");
       return { model: parsed.data.model, requested, answers: parsed.data.answers, latencyMs: now() - started, cost: parsed.data.cost?.total ?? null, error: null };
     } catch (err) {
       if (controller.signal.aborted) return failed("timeout");

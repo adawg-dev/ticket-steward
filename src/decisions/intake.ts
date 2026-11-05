@@ -37,14 +37,32 @@ export const INTAKE_QUESTIONS: Question[] = [
 
 const present = (value: string | undefined): value is string => value !== undefined && value !== "";
 
-/** The Concentrate key: its own, else the gateway key the brain uses (Concentrate is the gateway). */
-export const decisionsKey = (secrets: Secrets): string | null =>
-  [secrets.CONCENTRATE_API_KEY, secrets.ANTHROPIC_AUTH_TOKEN, secrets.ANTHROPIC_API_KEY].find(present) ?? null;
+const hostOf = (url: string | undefined): string | null => {
+  if (!present(url)) return null;
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The decisions key: CONCENTRATE_API_KEY, else the brain's gateway key in the brain's own order (ANTHROPIC_API_KEY, then
+ * ANTHROPIC_AUTH_TOKEN), but only when the brain's gateway (ANTHROPIC_BASE_URL) is the decisions host. A key meant for
+ * another host is never sent.
+ */
+export const decisionsKey = (secrets: Secrets, baseUrl: string): string | null => {
+  if (present(secrets.CONCENTRATE_API_KEY)) return secrets.CONCENTRATE_API_KEY;
+  const gateway = hostOf(secrets.ANTHROPIC_BASE_URL);
+  if (gateway === null || gateway !== hostOf(baseUrl)) return null;
+  return [secrets.ANTHROPIC_API_KEY, secrets.ANTHROPIC_AUTH_TOKEN].find(present) ?? null;
+};
 
 /** The shadow client when `decisions` is configured and a key is present; otherwise nothing is asked. */
 export const decisionsClientOf = (config: Pick<StewardConfig, "decisions">, secrets: Secrets, redactor: Redactor): DecisionsClient | undefined => {
-  const apiKey = decisionsKey(secrets);
-  if (config.decisions === undefined || apiKey === null) return undefined;
+  if (config.decisions === undefined) return undefined;
+  const apiKey = decisionsKey(secrets, config.decisions.baseUrl);
+  if (apiKey === null) return undefined;
   return createDecisionsClient({ ...config.decisions, apiKey, redact: (text) => redactor.redact(text) });
 };
 
@@ -56,8 +74,9 @@ const enabled = (deps: AskDeps): boolean => (deps.settings?.get() ?? DEFAULT_SET
  */
 export const askAndRecord = async (deps: AskDeps, where: Where, input: string, questions: Question[]): Promise<void> => {
   const client = deps.decisions;
-  if (client === undefined || !enabled(deps)) return;
+  if (client === undefined) return;
   try {
+    if (!enabled(deps)) return;
     const models = client.models.filter((model) => !deps.stores.decisions.has(where.jobId, where.point, where.subject, model));
     if (models.length === 0) return;
     const sent = deps.redactor.redact(input).slice(0, MAX_INPUT_CHARS);

@@ -60,12 +60,25 @@ describe("INTAKE_QUESTIONS", () => {
 });
 
 describe("decisionsKey", () => {
-  it("prefers CONCENTRATE_API_KEY, then ANTHROPIC_AUTH_TOKEN, then ANTHROPIC_API_KEY", () => {
-    expect(decisionsKey({ CONCENTRATE_API_KEY: "c", ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_API_KEY: "k" })).toBe("c");
-    expect(decisionsKey({ ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_API_KEY: "k" })).toBe("t");
-    expect(decisionsKey({ ANTHROPIC_API_KEY: "k" })).toBe("k");
-    expect(decisionsKey({ CONCENTRATE_API_KEY: "" })).toBeNull();
-    expect(decisionsKey({})).toBeNull();
+  const BASE = "https://api.concentrate.ai/v1";
+  const gateway = { ANTHROPIC_BASE_URL: "https://api.concentrate.ai" };
+
+  it("uses CONCENTRATE_API_KEY first", () => {
+    expect(decisionsKey({ ...gateway, CONCENTRATE_API_KEY: "c", ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_API_KEY: "k" }, BASE)).toBe("c");
+    expect(decisionsKey({ CONCENTRATE_API_KEY: "c" }, BASE)).toBe("c");
+  });
+
+  it("falls back to the gateway key, in the brain's order, only when the brain's gateway is the decisions host", () => {
+    expect(decisionsKey({ ...gateway, ANTHROPIC_AUTH_TOKEN: "t", ANTHROPIC_API_KEY: "k" }, BASE)).toBe("k");
+    expect(decisionsKey({ ...gateway, ANTHROPIC_AUTH_TOKEN: "t" }, BASE)).toBe("t");
+  });
+
+  it("never sends a key meant for another host", () => {
+    expect(decisionsKey({ ANTHROPIC_API_KEY: "k" }, BASE)).toBeNull();
+    expect(decisionsKey({ ANTHROPIC_BASE_URL: "https://gateway.example", ANTHROPIC_API_KEY: "k" }, BASE)).toBeNull();
+    expect(decisionsKey({ ANTHROPIC_BASE_URL: "not a url", ANTHROPIC_API_KEY: "k" }, BASE)).toBeNull();
+    expect(decisionsKey({ CONCENTRATE_API_KEY: "" }, BASE)).toBeNull();
+    expect(decisionsKey({}, BASE)).toBeNull();
   });
 });
 
@@ -102,6 +115,13 @@ describe("askIntake", () => {
     await askIntake({ decisions: client, stores, settings: settings(false), redactor }, at, "t");
     expect(asked).toEqual([]);
     expect(rows()).toEqual([]);
+  });
+
+  it("swallows settings that throw", async () => {
+    const { asked, client } = recordingClient();
+    const broken = { get: () => { throw new Error("SQLITE_BUSY"); } };
+    await expect(askIntake({ decisions: client, stores, settings: broken, redactor }, at, "t")).resolves.toBeUndefined();
+    expect(asked).toEqual([]);
   });
 
   it("swallows a client that throws", async () => {

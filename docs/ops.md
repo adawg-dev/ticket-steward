@@ -602,8 +602,10 @@ decisions: {
 },
 ```
 
-The key is `CONCENTRATE_API_KEY` when set, else the gateway key the brain uses (`ANTHROPIC_AUTH_TOKEN`, then
-`ANTHROPIC_API_KEY`); the dispatcher holds it and it never reaches a run. Without a key the block is ignored. Every
+The key is `CONCENTRATE_API_KEY` when set. Otherwise, only when the brain's gateway (`ANTHROPIC_BASE_URL`) is on the same
+host as `decisions.baseUrl`, it is the gateway key in the brain's own order (`ANTHROPIC_API_KEY`, then
+`ANTHROPIC_AUTH_TOKEN`); a key meant for another host is never sent. The dispatcher holds it and it never reaches a run.
+Without a key the block is ignored. Every
 input is redacted with the steward's own redactor before it is sent (Concentrate cannot redact decisions requests) and
 cut to 100 000 characters. Each call times out after 10 s and is not retried. Switch it off without a deploy:
 
@@ -616,24 +618,30 @@ versioned model the alias resolved to, the answers as JSON, latency, cost, any e
 (never the input). Agreement per model, from `sqlite3 <dataDir>/steward.db`:
 
 ```sql
--- ready vs. the implement's outcome (needs_info = the agent asked a person)
-SELECT model,
-       CASE WHEN json_extract(answers, '$[0].probability') >= 0.5 THEN 'ready' ELSE 'not ready' END AS predicted,
-       outcome, count(*) AS n
-FROM decisions WHERE point = 'intake' AND error IS NULL AND outcome IS NOT NULL
-GROUP BY model, predicted, outcome ORDER BY model, predicted, outcome;
+-- ready vs. the implement's outcome (needs_info = the agent asked a person); answers are matched by name
+SELECT d.model,
+       CASE WHEN json_extract(a.value, '$.probability') >= 0.5 THEN 'ready' ELSE 'not ready' END AS predicted,
+       d.outcome, count(*) AS n
+FROM decisions d, json_each(d.answers) a
+WHERE d.point = 'intake' AND d.error IS NULL AND d.outcome IS NOT NULL
+  AND json_extract(a.value, '$.name') = 'ready' AND json_extract(a.value, '$.probability') IS NOT NULL
+GROUP BY d.model, predicted, d.outcome ORDER BY d.model, predicted, d.outcome;
 
 -- action vs. what the agent did with the thread
-SELECT model, json_extract(answers, '$[0].value') AS predicted, outcome, count(*) AS n
-FROM decisions WHERE point = 'fix_item' AND error IS NULL AND outcome IS NOT NULL
-GROUP BY model, predicted, outcome ORDER BY model, predicted, outcome;
+SELECT d.model, json_extract(a.value, '$.value') AS predicted, d.outcome, count(*) AS n
+FROM decisions d, json_each(d.answers) a
+WHERE d.point = 'fix_item' AND d.error IS NULL AND d.outcome IS NOT NULL
+  AND json_extract(a.value, '$.name') = 'action'
+GROUP BY d.model, predicted, d.outcome ORDER BY d.model, predicted, d.outcome;
 
 -- which models fail, and why
 SELECT requested, error, count(*) AS n FROM decisions WHERE error IS NOT NULL GROUP BY requested, error;
 ```
 
-The JSON paths follow Concentrate's documented answer shapes (a predicate's `probability`, a choice's `value`); check them
-against a real row (`SELECT answers FROM decisions LIMIT 1`) the first time.
+The JSON paths follow Concentrate's documented answer shapes: each answer carries its question's `name`, a predicate
+has `probability` and a choice `value`. A response missing an asked question's answer is recorded as an
+`invalid response` error, never as a prediction. Check the paths against a real row
+(`SELECT answers FROM decisions LIMIT 1`) the first time.
 
 ### 1.8 Doctor, then start the service
 
