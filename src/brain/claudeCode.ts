@@ -15,7 +15,8 @@ const OUTPUT_SCHEMAS: Record<BrainOutput, Record<string, unknown>> = {
 /** A fresh reviewer for design runs: it sees only what it is told to read, so it has no stake in the design's history. */
 export const GOLDFISH_AGENT: AgentDefinition = {
   description: "A fresh reviewer with no memory of this session. Give it the files to read and what to check; it returns findings.",
-  prompt: "You are a fresh reviewer with no memory of earlier work. Read only the files you are given, and nothing else. Return a list of findings, each marked `blocking` (the work should not proceed until it is fixed) or `note` (worth knowing, not a blocker).",
+  prompt:
+    "You are a fresh reviewer with no memory of earlier work. Read the files you are given and the source files they name. Search the code only to check a claim (for example, to find an existing helper the work should reuse). Never edit anything. Return a list of findings, each marked `blocking` (the work should not proceed until it is fixed) or `note` (worth knowing, not a blocker).",
   tools: ["Read", "Grep", "Glob"],
 };
 /** Claude Code deletes transcripts older than this; the steward's retention owns session deletion instead. */

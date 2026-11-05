@@ -217,6 +217,12 @@ describe("claude-code brain", () => {
     expect(captured?.skills).toBe("all");
     expect(captured?.allowedTools).toContain("Agent");
     expect(captured?.agents?.goldfish?.tools).toEqual(["Read", "Grep", "Glob"]);
+    const prompt = captured?.agents?.goldfish?.prompt ?? "";
+    expect(prompt).toContain("Read the files you are given and the source files they name.");
+    expect(prompt).toContain("Search the code only to check a claim");
+    expect(prompt).toContain("Never edit anything.");
+    expect(prompt).toContain("marked `blocking`");
+    expect(prompt).not.toContain("and nothing else");
   });
 
   it("asks for the implement schema when the input is an implement", async () => {
