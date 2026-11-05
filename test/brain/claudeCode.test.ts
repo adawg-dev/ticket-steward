@@ -28,6 +28,8 @@ const resultMessage = (fields: {
   total_cost_usd?: number;
   usage?: { input_tokens: number; output_tokens: number };
   user_message_uuids?: string[];
+  num_turns?: number;
+  queued_turn_count?: number;
 }): SDKResultMessage =>
   ({ type: "result", session_id: "sess-1", total_cost_usd: 0.5, usage: { input_tokens: 10, output_tokens: 20 }, ...fields }) as unknown as SDKResultMessage;
 
@@ -93,6 +95,30 @@ const steeredMidTurn =
       }
       // The SDK keeps reading input until it ends; a turn is still running while it is open.
       await pull();
+    })();
+
+/**
+ * Like Claude Code resuming a session whose previous run left a background shell: the leftover task's notification runs
+ * as a turn of its own first, a result with no turns that echoes no uuids, and only then the prompt's turn, whose
+ * PreToolUse hook needs the input still open. Records whether the input had ended before that turn.
+ */
+const leftoverTaskFirst =
+  (received: SDKUserMessage[], seen: { endedBeforeTurn: boolean | null }): QueryImpl =>
+  ({ prompt }) =>
+    (async function* () {
+      if (typeof prompt === "string") throw new Error("expected a streamed prompt");
+      const input = prompt[Symbol.asyncIterator]();
+      const first = await input.next();
+      if (first.done === true) throw new Error("no prompt");
+      received.push(first.value);
+      yield resultMessage({ subtype: "success", num_turns: 0, queued_turn_count: 0 });
+      // The prompt's turn: is the input still open for its hook? An ended input answers `next` at once.
+      const next = input.next();
+      const ended = await Promise.race([next.then((step) => step.done === true), new Promise<false>((resolve) => setTimeout(() => resolve(false), 20))]);
+      seen.endedBeforeTurn = ended;
+      yield assistantText("working on the prompt");
+      yield resultMessage({ subtype: "success", num_turns: 3, structured_output: { summary: "fixed" }, user_message_uuids: uuidsOf([first.value]) });
+      await next;
     })();
 
 const lines: string[] = [];
@@ -306,6 +332,16 @@ describe("claude-code brain", () => {
 
     expect(received.map(textOf)).toEqual(["investigate"]);
     expect(run).toMatchObject({ ok: true, output: { summary: "turn 1" } });
+  });
+
+  it("keeps the input open past a zero-turn result that echoes no uuids, as a resumed session's leftover task gives", async () => {
+    const received: SDKUserMessage[] = [];
+    const seen: { endedBeforeTurn: boolean | null } = { endedBeforeTurn: null };
+
+    const run = await createClaudeCodeBrain({ queryImpl: leftoverTaskFirst(received, seen) }).run(input, onMessage);
+
+    expect(seen.endedBeforeTurn).toBe(false);
+    expect(run).toMatchObject({ ok: true, output: { summary: "fixed" } });
   });
 
   it("keeps the input open while a steered message the CLI already took has not been answered", async () => {

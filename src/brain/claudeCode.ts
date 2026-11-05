@@ -52,6 +52,10 @@ class PromptStream implements AsyncIterable<SDKUserMessage> {
 
   /** Marks what the result answered and ends the input when nothing is left unanswered. */
   settle(result: SDKResultMessage): void {
+    // A result with no turns answered no prompt: a resumed session's leftover background task reports one before the
+    // prompt's own turn, echoing no uuids. Ending the input on it would leave that turn's PreToolUse hook unanswered,
+    // and the CLI then refuses every tool call.
+    if (result.num_turns === 0) return;
     const consumed = result.user_message_uuids ?? (result.user_message_uuid === undefined ? undefined : [result.user_message_uuid]);
     // An older CLI echoes no uuids: everything handed over counts as answered unless it says sends are still queued.
     const answered = consumed ?? ((result.queued_turn_count ?? 0) === 0 ? [...this.handedOver] : []);
