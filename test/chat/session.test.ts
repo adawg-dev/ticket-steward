@@ -238,6 +238,15 @@ describe("ensureWorktree", () => {
     expect(existsSync(join(worktree.path, "setup-ran"))).toBe(true);
   });
 
+  it("fetches the mirror before reusing a worktree, so the base branch an agent merges is current", async () => {
+    await createWorktree(repo.mirror, join(repo.dataDir, "work"), "ticket-API-1", repo.sha);
+    const moved = await commitFile(repo.repo, "later.txt", "later\n");
+
+    await ensureWorktree(deps(), { worktreeName: "ticket-API-1", headSha: repo.sha }, placement);
+
+    expect(await repo.mirror.resolveSha("main")).toBe(moved);
+  });
+
   it("moves a clean worktree that is behind up to the head", async () => {
     const created = await createWorktree(repo.mirror, join(repo.dataDir, "work"), "ticket-API-1", repo.sha);
     const head = await commitFile(repo.repo, "later.txt", "later\n");

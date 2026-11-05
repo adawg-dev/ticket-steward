@@ -138,6 +138,38 @@ describe("linearRangeProblem", () => {
   });
 });
 
+describe("linearRangeProblem with the base branch mergeable", () => {
+  const commitOn = async (from: string, file: string, subject: string): Promise<string> => {
+    await git(worktree.path, ["checkout", "--quiet", "--detach", from]);
+    await writeFile(join(worktree.path, file), `export const x = "${subject}";\n`);
+    await git(worktree.path, ["add", "--", file]);
+    await git(worktree.path, ["commit", "--quiet", "-m", subject]);
+    return git(worktree.path, ["rev-parse", "HEAD"]);
+  };
+
+  it("accepts a merge of the base branch's history and checks only the branch's own line", async () => {
+    const devHead = await commitOn(base, "src/dev.ts", "dev moved on");
+    const one = await commitOn(base, "src/a.ts", "one");
+    await git(worktree.path, ["merge", "--quiet", "--no-edit", devHead]);
+    const merged = await git(worktree.path, ["rev-parse", "HEAD"]);
+
+    expect(await linearRangeProblem(worktree.path, base, merged, { sha: devHead, name: "dev" })).toBeNull();
+    expect(await linearRangeProblem(worktree.path, one, merged, { sha: devHead, name: "dev" })).toBeNull();
+    // Without the base branch named, a merge is refused as before.
+    expect(await linearRangeProblem(worktree.path, base, merged)).toMatch(/is a merge commit/);
+  });
+
+  it("refuses a merge of anything that is not on the base branch", async () => {
+    const devHead = await commitOn(base, "src/dev.ts", "dev moved on");
+    const other = await commitOn(base, "src/other.ts", "someone else's branch");
+    await commitOn(base, "src/a.ts", "one");
+    await git(worktree.path, ["merge", "--quiet", "--no-edit", other]);
+    const merged = await git(worktree.path, ["rev-parse", "HEAD"]);
+
+    expect(await linearRangeProblem(worktree.path, base, merged, { sha: devHead, name: "dev" })).toMatch(/merges something other than dev/);
+  });
+});
+
 describe("unpushedWork", () => {
   it("names modified, staged and untracked paths in full, leaving out the steward's files", async () => {
     await writeFile(join(worktree.path, "src/a.ts"), "export const a = 2;\n");

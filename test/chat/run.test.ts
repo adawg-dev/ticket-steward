@@ -354,6 +354,7 @@ describe("runChat", () => {
     expect(input.prompt).toContain("ada");
     expect(input.prompt).toContain(gitlab.mr.webUrl);
     expect(input.prompt).toContain("Call the `push` tool");
+    expect(input.prompt).toContain("`git merge main`");
     expect(await git(input.workspacePath, ["rev-parse", "HEAD"])).toBe(headSha);
     expect(pushTargetOf(input)).toMatchObject({ jobId: ctx.jobId, mode: "fastForward", branch: BRANCH, baseSha, loopId, identifier: "API-1", issueId: "issue-1" });
     expect(gitlab.replies).toEqual([{ discussionId: DISCUSSION, body: `The retry hid the error; I removed it on purpose.\n\n${CHAT_MARKER}` }]);

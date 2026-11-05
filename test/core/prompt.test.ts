@@ -15,7 +15,7 @@ const implementVars: ImplementPromptVars = {
 };
 const fixInput: FixPromptInput = {
   identifier: "ENG-1", round: 2, score: 3, summary: "Confidence Score: 3/5", comments: [], ciFailures: [], ciTriage: [], personCommits: [],
-  decisions: [], workspacePath: "/ws", headSha: "deadbeef", stewardPort: 4321, artifactsDir: "/art", checks: "", hasChecks: false,
+  decisions: [], workspacePath: "/ws", headSha: "deadbeef", stewardPort: 4321, artifactsDir: "/art", checks: "", hasChecks: false, baseBranch: "dev",
 };
 const chatInput: ChatPromptInput = {
   identifier: "API-1", author: "ada", message: "why?", mrUrl: "https://gl/mr/1", workspacePath: "/ws", headSha: "deadbeef",

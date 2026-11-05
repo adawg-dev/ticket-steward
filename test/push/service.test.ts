@@ -173,14 +173,14 @@ describe("pushFromWorktree refusals", () => {
     expect(await push()).toEqual({ ok: false, reason: `nothing to push: HEAD is already at ${repo.sha.slice(0, 7)}`, detail: "" });
   });
 
-  it("refuses a merge commit in the series", async () => {
+  it("refuses a merge of anything but the base branch in the series", async () => {
     const one = await agentCommit("API-1: one");
     await git(worktree.path, ["checkout", "-q", "-b", "side", repo.sha]);
     await agentCommit("API-1: two", "x\n", "src/other.ts");
     await git(worktree.path, ["checkout", "-q", "--detach", one]);
     await git(worktree.path, ["merge", "-q", "--no-ff", "--no-edit", "-m", "API-1: merge", "side"]);
 
-    expect(await push()).toMatchObject({ ok: false, reason: `HEAD must be new commits on top of ${repo.sha.slice(0, 7)}`, detail: expect.stringContaining("is a merge commit") });
+    expect(await push()).toMatchObject({ ok: false, reason: `HEAD must be new commits on top of ${repo.sha.slice(0, 7)}`, detail: expect.stringContaining("merges something other than main") });
   });
 
   it("refuses a commit whose subject does not start with the identifier, naming it", async () => {
@@ -344,6 +344,31 @@ describe("pushFromWorktree onto a merge request's own branch (an MR chat)", () =
     expect(await push({ ...target, branch: "main" }, null)).toMatchObject({ ok: false, reason: "refusing to push to main: it is a protected branch" });
   });
 
+  it("lets the agent merge the base branch in to clear conflicts", async () => {
+    const { target } = await personBranch();
+    await commitFile(repo.repo, "src/main-only.ts", "export const m = 1;\n");
+    await repo.mirror.fetch();
+    await git(worktree.path, ["merge", "--quiet", "--no-edit", "main"]);
+    const merged = await git(worktree.path, ["rev-parse", "HEAD"]);
+
+    expect(await push(target, null)).toEqual({ ok: true, branch: PERSON_BRANCH, sha: merged, commits: 2 });
+    expect(await remoteHead(PERSON_BRANCH)).toBe(merged);
+  });
+
+  it("refuses a merge of a branch that is not the base branch", async () => {
+    const { target } = await personBranch();
+    await git(repo.repo, ["checkout", "-q", "-b", "someone-else", "main"]);
+    await commitFile(repo.repo, "src/theirs.ts", "export const t = 1;\n");
+    await git(repo.repo, ["checkout", "-q", "main"]);
+    await repo.mirror.fetch();
+    await git(worktree.path, ["merge", "--quiet", "--no-edit", "someone-else"]);
+
+    const result = await push(target, null);
+
+    expect(result).toMatchObject({ ok: false });
+    expect(JSON.stringify(result)).toContain("merges something other than main");
+  });
+
   it("runs the checks against the MR's diff base", async () => {
     const { target } = await personBranch();
     await agentCommit("Keep the last chunk", "export const adapter = 7;\n");
@@ -387,6 +412,18 @@ describe("pushFromWorktree pushes", () => {
     expect(await remoteHead(BRANCH)).toBe(sha);
     expect(stores.loops.get(loopId)).toMatchObject({ headSha: sha, pendingPush: { sha, pushed: true } });
     expect(stores.pushes.forJob(jobId)).toMatchObject([{ loopId, previousSha: head }]);
+  });
+
+  it("takes a fix round's merge of the base branch, whose subject needs no ticket key", async () => {
+    const { loopId } = await pushedLoop();
+    await commitFile(repo.repo, "src/main-only.ts", "export const m = 1;\n");
+    await repo.mirror.fetch();
+    await agentCommit("API-1: address review", "export const adapter = 9;\n");
+    await git(worktree.path, ["merge", "--quiet", "--no-edit", "main"]);
+    const merged = await git(worktree.path, ["rev-parse", "HEAD"]);
+
+    expect(await push(createTarget({ mode: "fastForward", branch: BRANCH, loopId }), null)).toMatchObject({ ok: true, sha: merged });
+    expect(await remoteHead(BRANCH)).toBe(merged);
   });
 
   it("refuses a loop push when the branch moved, and leaves the loop as it was", async () => {

@@ -71,6 +71,8 @@ export const sessionWorktree = async (
   const furnish = (worktree: Worktree): Promise<unknown> =>
     furnishWorktree(deps, worktree.path, placement.env, { port: placement.port, slot: placement.slot, setup: false });
   if (existing !== null) {
+    // Fresh refs first: the head may be new, and an agent that merges the base branch in must merge its current head.
+    await deps.mirror.fetch();
     const worktree = await catchUp(deps.mirror, existing, session.headSha);
     await furnish(worktree);
     return { worktree, created: false };

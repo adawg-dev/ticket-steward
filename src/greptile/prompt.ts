@@ -25,6 +25,8 @@ export interface FixPromptInput {
   /** implement.checks as a Markdown list. */
   checks: string;
   hasChecks: boolean;
+  /** `workspace.baseBranch`: the one branch the agent may merge in. */
+  baseBranch: string;
 }
 
 const SUGGESTION_RE = /```suggestion[^\n]*\n([\s\S]*?)```/;

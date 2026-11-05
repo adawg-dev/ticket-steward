@@ -4,11 +4,11 @@ import { join } from "node:path";
 import type { PipelineDeps } from "../core/deps.js";
 import { errorMessage, jobDirOf } from "../core/workspace.js";
 import { branchName } from "../implement/branch.js";
-import { BranchExistsError, guardRange, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, uncommittedPaths, type PushMode } from "../implement/git.js";
+import { BranchExistsError, guardRange, linearRangeProblem, pushCommit, remoteTicketBranches, saveBundle, uncommittedPaths, type MergeableBase, type PushMode } from "../implement/git.js";
 import { CHECK_TAIL_BYTES, guardSecrets, lsRemoteSite, settingsOf, stewardChecks, stewardCopies } from "../implement/pipeline.js";
 import type { Mirror, RemoteCredentials } from "../workspace/mirror.js";
 import { localCheckRunner, type CheckRunner } from "./checks.js";
-import { safeGitArgs, safeGitEnv, safeGitOrThrow } from "../tools/gitSafe.js";
+import { safeGit, safeGitArgs, safeGitEnv, safeGitOrThrow } from "../tools/gitSafe.js";
 import { git } from "../workspace/git.js";
 import type { PushLedger, RemoteHead } from "./ledger.js";
 import type { PushTarget } from "./target.js";
@@ -55,18 +55,31 @@ export const remoteHeadOf =
 
 /** Commits in `base..head` whose subject does not start with `<identifier>: `. */
 const unprefixed = async (worktreePath: string, base: string, head: string, identifier: string): Promise<string[]> => {
-  const log = await safeGitOrThrow(["log", "--format=%h %s", `${base}..${head}`], worktreePath, NO_REPLACE);
+  // The branch's own commits: a merge of the base branch keeps git's subject, and the commits it brings in are not ours.
+  const log = await safeGitOrThrow(["log", "--first-parent", "--no-merges", "--format=%h %s", `${base}..${head}`], worktreePath, NO_REPLACE);
   return log
     .split("\n")
     .filter((line) => line !== "")
     .filter((line) => !line.slice(line.indexOf(" ") + 1).startsWith(`${identifier}: `));
 };
 
+/**
+ * The base branch's head as the worktree sees it (the mirror's branch, or a clone's `origin/` one): what an agent that ran
+ * `git merge <base>` merged. Null when neither exists, and then no merge may be pushed.
+ */
+const baseBranchHead = async (worktreePath: string, baseBranch: string): Promise<MergeableBase | null> => {
+  for (const ref of [`refs/heads/${baseBranch}`, `refs/remotes/origin/${baseBranch}`]) {
+    const resolved = await safeGit(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], worktreePath, NO_REPLACE);
+    if (resolved.exitCode === 0 && resolved.stdout.trim() !== "") return { sha: resolved.stdout.trim(), name: baseBranch };
+  }
+  return null;
+};
+
 /** Pushes from a scratch repo in the job dir, never from the worktree or mirror, whose config the agent can change. */
 const pushFromBundle = async (
   deps: PushDeps,
   jobDir: string,
-  input: { remote: RemoteCredentials; sha: string; base: string; branch: string; identifier: string; branchTypes: string[]; mode: PushMode; anyBranch: boolean },
+  input: { remote: RemoteCredentials; sha: string; base: string; branch: string; identifier: string; branchTypes: string[]; mode: PushMode; anyBranch: boolean; mergeable: MergeableBase | null },
 ): Promise<void> => {
   const scratchDir = join(jobDir, PUSH_REPO);
   try {
@@ -82,6 +95,7 @@ const pushFromBundle = async (
       branchTypes: input.branchTypes,
       mode: input.mode,
       anyBranch: input.anyBranch,
+      mergeable: input.mergeable,
     });
   } finally {
     await rm(scratchDir, { recursive: true, force: true });
@@ -131,10 +145,11 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   const dirty = await uncommittedPaths(worktreePath, stewardFiles);
   if (dirty.length > 0) return refuse("commit or discard your changes first", dirty.join("\n"));
 
-  // 2. New, merge-free commits on the head the push starts from.
+  // 2. New commits on the head the push starts from: linear, apart from merges of the base branch.
   const sha = await safeGitOrThrow(["rev-parse", "HEAD"], worktreePath);
   if (sha === start.base) return refuse(`nothing to push: HEAD is already at ${short(start.base)}`);
-  const problem = await linearRangeProblem(worktreePath, start.base, sha);
+  const mergeable = await baseBranchHead(worktreePath, deps.config.workspace.baseBranch);
+  const problem = await linearRangeProblem(worktreePath, start.base, sha, mergeable);
   if (problem !== null) return refuse(`HEAD must be new commits on top of ${short(start.base)}`, problem);
 
   // 3. Every subject names the ticket (an MR chat's only when its branch or title names one).
@@ -182,7 +197,7 @@ export const pushFromWorktree = async (input: { deps: PushDeps; target: PushTarg
   try {
     await mkdir(jobDir, { recursive: true, mode: 0o700 });
     await saveBundle(worktreePath, start.base, join(jobDir, PUSH_BUNDLE));
-    await pushFromBundle(deps, jobDir, { remote, sha, base: start.base, branch, identifier: target.identifier, branchTypes: settings.branchTypes, mode, anyBranch: target.mode === "mrBranch" });
+    await pushFromBundle(deps, jobDir, { remote, sha, base: start.base, branch, identifier: target.identifier, branchTypes: settings.branchTypes, mode, anyBranch: target.mode === "mrBranch", mergeable });
   } catch (err) {
     await deps.ledger.revert(target, pushId);
     if (err instanceof BranchExistsError) return refuse(`a branch for ${target.identifier} already exists`, err.ref.replace(/^refs\/heads\//, ""));

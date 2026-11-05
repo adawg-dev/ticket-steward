@@ -319,9 +319,11 @@ agent edits, commits (as `commitAuthor`, with subjects prefixed `<IDENTIFIER>: `
 through the steward's `push` tool; it never runs `git push` and never sees the token. The tool
 pushes `HEAD` to the ticket's own branch only, stopping at the first refusal and returning the
 reason to the agent so it can fix it and call again: the worktree must be clean; `HEAD` must
-be a non-empty, merge-free series on the base (the job's base `dev` commit for the first push,
-the last pushed head after that); every commit subject must carry the identifier; every
-commit's diff (read as text, binary and `-diff` files included) must leave out the files the
+be a non-empty series on the base (the job's base `dev` commit for the first push,
+the last pushed head after that) whose only merges are of `workspace.baseBranch` (`git merge dev`
+to bring the branch up to date or clear conflicts; anything else merged, and any rebase, is
+refused); every commit subject on the branch's own line must carry the identifier (a merge keeps
+git's subject); every commit's diff (read as text, binary and `-diff` files included) must leave out the files the
 steward copied in (overlay files and its own `.claude/skills/` copies; the repo's own tracked
 skills can still be edited) and must not add a line containing the value of a secret-looking
 overlay variable or one of the steward's own secrets, and no commit message may carry one
@@ -590,7 +592,7 @@ chat: {
   fine), a fork's MR, and a source branch that is `workspace.baseBranch`, in `implement.protectedBranches` or protected
   on GitLab.
 - The agent works on the MR's head and may push to **its source branch only**: fast-forward from the head the run
-  started on, with every push rule (committed work only, no merges, secret guard, checks against the MR's diff base).
+  started on, with every push rule (committed work only, no merges but of the base branch, secret guard, checks against the MR's diff base).
   Commit subjects need the ticket key only when the branch or title names a ticket of `tracker.teams`; that ticket is
   shown to the agent for context. If the person pushes while the agent works, the push is refused and the work is
   listed as unpushed; the steward never force-pushes or rebases a person's commits.

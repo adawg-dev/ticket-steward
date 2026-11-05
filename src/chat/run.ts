@@ -58,6 +58,8 @@ export interface ChatPromptInput {
   hasChecks: boolean;
   /** The loop's decisions so far, so the agent neither records them again nor contradicts them. */
   decisions: string[];
+  /** `workspace.baseBranch`: the one branch the agent may merge in. */
+  baseBranch?: string;
   /** What every commit subject starts with (followed by `: `); empty when no prefix is required. */
   subjectPrefix?: string;
   /** An MR chat: `/agent` on a person's merge request, with no session of the ticket's behind it. */
@@ -81,6 +83,7 @@ export const renderChatPrompt = (template: string, input: ChatPromptInput, repo 
     hasDecisions: input.decisions.length > 0,
     subjectPrefix: input.subjectPrefix ?? input.identifier,
     isMrChat: input.mr !== undefined,
+    baseBranch: input.baseBranch ?? "dev",
     mr: input.mr ?? false,
   }, repo);
 
@@ -209,6 +212,7 @@ const prepareChat = async (ctx: RunContext, deps: PipelineDeps, answer: Answer, 
       checks: checks.map((command) => `- \`${command}\``).join("\n"),
       hasChecks: checks.length > 0,
       decisions: session.loopId === null ? [] : (deps.stores.loops.get(session.loopId)?.decisions ?? []),
+      baseBranch: deps.config.workspace.baseBranch,
     }, await readRepoPartial(deps.configPath));
   } catch (err) {
     return { outcome: prepareFailed(deps, err) };
@@ -454,6 +458,7 @@ const prepareMrChat = async (
       checks: checks.map((command) => `- \`${command}\``).join("\n"),
       hasChecks: checks.length > 0,
       decisions: [],
+      baseBranch: deps.config.workspace.baseBranch,
       subjectPrefix: subjectKey ?? "",
       mr: {
         title: mr.title,

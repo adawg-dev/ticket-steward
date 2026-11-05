@@ -333,6 +333,7 @@ const prepareFix = async (fix: Fix, observed: Observed): Promise<PreparedRound |
       artifactsDir: paths.artifactsDir,
       checks: stewardChecks(settings.checks, loop.baseSha).map((command) => `- \`${command}\``).join("\n"),
       hasChecks: settings.checks.length > 0,
+      baseBranch: deps.config.workspace.baseBranch,
     }, await readRepoPartial(deps.configPath));
   } catch (err) {
     return { outcome: prepareFailed(deps, err) };

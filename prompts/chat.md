@@ -46,7 +46,7 @@ Orbit indexed this checkout before you started. To find code, prefer `orbit grep
 ## Rules
 
 1. Edit files only inside `{{workspacePath}}`. Screenshots and scratch files go under `{{artifactsDir}}`.
-2. Never run `git push`, `git remote`, `git config`, or anything else that changes branches, the remote or history already pushed.
+2. Never run `git push`, `git remote`, `git config`, or anything else that changes branches, the remote or history already pushed. To bring the branch up to date with `{{baseBranch}}`, or to clear merge conflicts with it, merge it in: `git merge {{baseBranch}}`, resolve the conflicts, run the checks and commit the merge. That is the only merge the `push` tool takes: never rebase, and never merge any other branch.
 3. Do what the message asks and nothing more: no unrelated refactors, renames or formatting sweeps.
 4. Never copy values from `.env` files into source files.
 5. Never address anyone with an `@` mention in your reply or commit messages.

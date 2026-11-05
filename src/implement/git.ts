@@ -91,7 +91,8 @@ export const guardRange = async (input: GuardInput & { worktreePath: string; bas
   const overall = await guardDiff(input.worktreePath, [input.baseSha, input.headSha], input, NO_REPLACE);
   if (!overall.ok) return overall;
   const secrets = usableSecrets(input.secretValues);
-  const commits = (await safeGitOrThrow(["rev-list", "--reverse", "--parents", `${input.baseSha}..${input.headSha}`], input.worktreePath, NO_REPLACE))
+  // The branch's own line: a merge of the base branch is checked as one change, not each base-branch commit it brings in.
+  const commits = (await safeGitOrThrow(["rev-list", "--reverse", "--first-parent", "--parents", `${input.baseSha}..${input.headSha}`], input.worktreePath, NO_REPLACE))
     .split("\n")
     .filter((line) => line !== "")
     .map((line) => line.split(" "));
@@ -111,13 +112,30 @@ export const guardRange = async (input: GuardInput & { worktreePath: string; bas
  * Why `baseSha..sha` is not a non-empty, merge-free series of commits on top of `baseSha`, or null when it is.
  * The range is what a fast-forward from `baseSha` would push.
  */
-export const linearRangeProblem = async (cwd: string, baseSha: string, sha: string): Promise<string | null> => {
+/** The base branch's head when merging it in is allowed: the only merge a push may carry, to bring the branch up to date. */
+export interface MergeableBase {
+  sha: string;
+  name: string;
+}
+
+/**
+ * Null when `sha` is new commits on top of `baseSha`, else why not. Without `mergeable` the history must be linear. With
+ * it, the branch's own (first-parent) line may also hold merges of the base branch's history (`git merge dev` to clear
+ * conflicts); the base branch's own commits that a merge brings in are not the branch's and are not checked.
+ */
+export const linearRangeProblem = async (cwd: string, baseSha: string, sha: string, mergeable: MergeableBase | null = null): Promise<string | null> => {
   const ancestor = await safeGit(["merge-base", "--is-ancestor", baseSha, sha], cwd, NO_REPLACE);
   if (ancestor.exitCode !== 0) return `${sha.slice(0, 7)} does not descend from ${baseSha.slice(0, 7)}`;
-  const lines = (await safeGitOrThrow(["rev-list", "--parents", `${baseSha}..${sha}`], cwd, NO_REPLACE)).split("\n").filter((line) => line !== "");
+  const range = mergeable === null ? ["rev-list", "--parents", `${baseSha}..${sha}`] : ["rev-list", "--first-parent", "--parents", `${baseSha}..${sha}`];
+  const lines = (await safeGitOrThrow(range, cwd, NO_REPLACE)).split("\n").filter((line) => line !== "");
   if (lines.length === 0) return `there are no commits on top of ${baseSha.slice(0, 7)}`;
-  const merge = lines.find((line) => line.split(" ").length !== 2);
-  if (merge !== undefined) return `${merge.slice(0, 7)} is a merge commit; the history on top of ${baseSha.slice(0, 7)} must be linear`;
+  for (const line of lines) {
+    const [commit = "", , merged, ...more] = line.split(" ");
+    if (merged === undefined) continue;
+    if (mergeable === null) return `${commit.slice(0, 7)} is a merge commit; the history on top of ${baseSha.slice(0, 7)} must be linear`;
+    const fromBase = more.length === 0 && (await safeGit(["merge-base", "--is-ancestor", merged, mergeable.sha], cwd, NO_REPLACE)).exitCode === 0;
+    if (!fromBase) return `${commit.slice(0, 7)} merges something other than ${mergeable.name}; only ${mergeable.name} may be merged in`;
+  }
   return null;
 };
 
@@ -226,6 +244,8 @@ export const pushCommit = async (input: {
   mode: PushMode;
   /** An MR chat's fast-forward onto a person's branch: the steward's own branch-name pattern does not apply. */
   anyBranch?: boolean;
+  /** The base branch's head: merges of its history may be pushed. */
+  mergeable?: MergeableBase | null;
 }): Promise<void> => {
   const ref = `refs/heads/${input.branch}`;
   if (input.anyBranch === true && input.mode.kind === "create") throw new Error(`refusing to create ${ref}: an MR chat only fast-forwards its merge request's branch`);
@@ -237,7 +257,7 @@ export const pushCommit = async (input: {
   await restoreFromBundle(input.scratchDir, input.bundlePath, input.sha);
   // A fast-forward checks from the head the lease expects, so nothing on the branch is ever dropped.
   const from = input.mode.kind === "create" ? input.baseSha : input.mode.previousHead;
-  const problem = await linearRangeProblem(input.scratchDir, from, input.sha);
+  const problem = await linearRangeProblem(input.scratchDir, from, input.sha, input.mergeable ?? null);
   if (problem !== null) throw new Error(`refusing to push: ${problem}`);
   if (input.mode.kind === "create") {
     const existing = await remoteTicketBranches(input.remote, input.scratchDir, input.identifier);

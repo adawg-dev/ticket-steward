@@ -15,6 +15,7 @@ const input: FixPromptInput = {
   ciTriage: ["unit-tests failed again after a retry on this commit; treat it as a real failure"],
   personCommits: ["abc123 tweak copy"], decisions: ["Keep the v1 endpoint"],
   workspacePath: "/ws", headSha: "deadbeef", stewardPort: 4321, artifactsDir: "/art", checks: "- `pnpm lint`", hasChecks: true,
+  baseBranch: "dev",
 };
 
 describe("renderFixPrompt", () => {
@@ -27,6 +28,7 @@ describe("renderFixPrompt", () => {
     expect(out).toContain("### Thread `disc-def`: Sam (person) at a general comment");
     expect(out).toContain("also handle empty");
     expect(out).toContain("Never resolve a thread");
+    expect(out).toContain("`git merge dev`");
     expect(out).toContain("unit-tests");
     expect(out).toContain("AssertionError: boom");
     expect(out).toContain("## CI triage\n\nBefore this round the steward looked at the failed jobs:\n\n- unit-tests failed again after a retry on this commit; treat it as a real failure\n");
