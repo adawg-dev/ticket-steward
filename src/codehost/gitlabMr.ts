@@ -25,6 +25,8 @@ export interface MrDiscussion { id: string; notes: MrNote[] }
 export interface FailedJob { id: number; name: string; stage: string; webUrl: string; failureReason: string | null }
 /** One test case of a pipeline's test report; `suite` is the job that ran it, `name` the class name and test name. */
 export interface TestCase { suite: string; name: string; status: string }
+/** What the steward opens a merge request with; the source branch is kept and its commits are not squashed. */
+export interface NewMergeRequest { sourceBranch: string; targetBranch: string; title: string; description: string }
 export interface GitLabMrApi {
   currentUser(): Promise<{ username: string }>;
   tokenScopes(): Promise<string[]>;
@@ -33,6 +35,8 @@ export interface GitLabMrApi {
   /** The branch is protected on the project (exact name or a wildcard rule that matches it). */
   isProtectedBranch(project: ProjectRef, branch: string): Promise<boolean>;
   findOpenMergeRequest(project: ProjectRef, sourceBranch: string): Promise<MergeRequestInfo | null>;
+  /** Opens a merge request (`POST /projects/:id/merge_requests`), ready, with `remove_source_branch=false` and `squash=false`. */
+  createMergeRequest(project: ProjectRef, input: NewMergeRequest): Promise<MergeRequestInfo>;
   listDiscussions(project: ProjectRef, iid: number): Promise<MrDiscussion[]>;
   createNote(project: ProjectRef, iid: number, body: string): Promise<void>;
   replyToDiscussion(project: ProjectRef, iid: number, discussionId: string, body: string): Promise<void>;
@@ -180,6 +184,14 @@ export class GitLabMrClient implements GitLabMrApi {
     const path = `${this.projectPath(project)}/merge_requests?state=opened&source_branch=${encodeURIComponent(sourceBranch)}`;
     const [first] = z.array(MergeRequestSchema).parse(await (await this.request("GET", path)).json());
     return first === undefined ? null : toMergeRequest(first);
+  }
+
+  async createMergeRequest(project: ProjectRef, input: NewMergeRequest): Promise<MergeRequestInfo> {
+    const body = {
+      source_branch: input.sourceBranch, target_branch: input.targetBranch, title: input.title, description: input.description,
+      remove_source_branch: false, squash: false,
+    };
+    return toMergeRequest(MergeRequestSchema.parse(await (await this.request("POST", `${this.projectPath(project)}/merge_requests`, body)).json()));
   }
 
   async listDiscussions(project: ProjectRef, iid: number): Promise<MrDiscussion[]> {

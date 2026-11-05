@@ -1,4 +1,4 @@
-import type { FailedJob, GitLabMrApi, MergeRequestInfo, MrDiscussion, PipelineRef, TestCase } from "../../src/codehost/gitlabMr.js";
+import type { FailedJob, GitLabMrApi, MergeRequestInfo, MrDiscussion, NewMergeRequest, PipelineRef, TestCase } from "../../src/codehost/gitlabMr.js";
 
 export const BOT = "steward-bot";
 
@@ -137,6 +137,28 @@ export class FakeGitLabMr implements GitLabMrApi {
 
   async findOpenMergeRequest(): Promise<MergeRequestInfo | null> {
     return structuredClone(this.openMr);
+  }
+
+  /** Merge requests createMergeRequest opened, by project and what it was asked for. */
+  readonly created: Array<{ project: number | string } & NewMergeRequest> = [];
+  private failingCreates = 0;
+
+  /** The next createMergeRequest throws, as GitLab being down would. */
+  failNextCreate(): void {
+    this.failingCreates += 1;
+  }
+
+  /** Opens the MR as GitLab would: findOpenMergeRequest and getMergeRequest answer it from then on. */
+  async createMergeRequest(project: number | string, input: NewMergeRequest): Promise<MergeRequestInfo> {
+    if (this.failingCreates > 0) {
+      this.failingCreates -= 1;
+      throw new Error("GitLab down");
+    }
+    this.created.push({ project, ...input });
+    const { sourceBranch, targetBranch, title, description } = input;
+    this.mr = { ...this.mr, sourceBranch, targetBranch, title, description };
+    this.openMr = structuredClone(this.mr);
+    return structuredClone(this.mr);
   }
 
   async listDiscussions(): Promise<MrDiscussion[]> {

@@ -211,6 +211,20 @@ describe("GitLabMrClient", () => {
     expect(seen).toEqual([{ url: "https://g/api/v4/projects/acme%2Frepo/uploads", method: "POST", contentType: null, file: { name: "after.png", bytes: 3 } }]);
   });
 
+  it("opens a merge request from a branch, keeping the branch and its commits, and maps it", async () => {
+    const { calls, fetchImpl } = recorder([reply(201, { ...mrBody, title: "fix(api): API-1 flush", description: "body", target_branch: "dev" })]);
+
+    const mr = await client(fetchImpl).createMergeRequest("acme/repo", { sourceBranch: "api-1-fix", targetBranch: "dev", title: "fix(api): API-1 flush", description: "body" });
+
+    expect(mr).toMatchObject({ projectId: 42, iid: 7, title: "fix(api): API-1 flush", description: "body", targetBranch: "dev", webUrl: mrBody.web_url });
+    expect(calls).toEqual([{
+      url: "https://g/api/v4/projects/acme%2Frepo/merge_requests",
+      method: "POST",
+      headers: { "private-token": "t", "content-type": "application/json" },
+      body: { source_branch: "api-1-fix", target_branch: "dev", title: "fix(api): API-1 flush", description: "body", remove_source_branch: false, squash: false },
+    }]);
+  });
+
   it("retries a job", async () => {
     const { calls, fetchImpl } = recorder([reply(201, { id: 6 })]);
     await client(fetchImpl).retryJob(42, 5);

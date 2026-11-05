@@ -1,11 +1,11 @@
-import type { MergeRequestInfo, MrDiscussion, MrNote } from "../codehost/gitlabMr.js";
+import { GitLabApiError, type MergeRequestInfo, type MrDiscussion, type MrNote } from "../codehost/gitlabMr.js";
 import { readAuthorKinds, type AuthorKind } from "../codehost/mrAuthors.js";
 import type { PipelineDeps } from "../core/deps.js";
 import { CLOSED_STATE_TYPES } from "../core/intake.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
 import { logger } from "../log.js";
-import { buildImplementSummary } from "../implement/publish.js";
+import { buildImplementSummary, buildMrDescription } from "../implement/publish.js";
 import { ACTIVE_LOOP_STATES, transaction, type Loop } from "../store/index.js";
 import { linearSessionFor, mergeRequestOpened } from "../linear/session.js";
 import { loopSettings, seedSettings, type Settings } from "../settings/schema.js";
@@ -14,6 +14,7 @@ import { evaluateRound, startedBy, workList, type RoundInput } from "./evaluate.
 import { LOOP_MARKER, noteOnce, publishHandback, publishPassed, publishStop } from "./publish.js";
 import { findSummary } from "./summary.js";
 import { triageFailures, type Triage } from "./triage.js";
+import type { TicketBundle } from "../tracker/types.js";
 
 interface Observed {
   ticketClosed: boolean;
@@ -31,6 +32,38 @@ const reload = (deps: PipelineDeps, id: number): Loop => {
   return loop;
 };
 
+/** GitLab refuses a second open MR from a branch: 409, or 422 on some versions. */
+const mrExists = (err: unknown): boolean =>
+  err instanceof GitLabApiError && (err.status === 409 || (err.status === 422 && err.message.includes("already exists")));
+
+/**
+ * Opens the MR for the implement job's push, with the agent's title and description; null when the implement job handed
+ * back or stored no result. When CI opened one meanwhile, that one is used; any other failure throws, so the poll retries.
+ */
+const openMergeRequest = async (deps: PipelineDeps, loop: Loop, project: string, ticket: TicketBundle): Promise<MergeRequestInfo | null> => {
+  const gitlab = deps.gitlab;
+  if (gitlab === undefined) throw new Error("no GitLab client");
+  const stored = deps.stores.jobs.get(loop.implementJobId)?.implementResult ?? null;
+  if (stored === null || stored.result === null || stored.handback !== null) return null;
+  const { result } = stored;
+  const written = result.mrTitle?.trim() ?? "";
+  const title = written === "" ? `${loop.identifier}: ${ticket.title}` : written;
+  const description = buildMrDescription({
+    loopId: loop.id, identifier: loop.identifier, ticketUrl: ticket.url, jobId: loop.implementJobId, result,
+    ...(stored.media === undefined ? {} : { media: stored.media }),
+  });
+  try {
+    return await gitlab.createMergeRequest(project, {
+      sourceBranch: loop.branch, targetBranch: deps.config.workspace.baseBranch, title: deps.redactor.redact(title), description: deps.redactor.redact(description),
+    });
+  } catch (err) {
+    if (!mrExists(err)) throw err;
+    const raced = await gitlab.findOpenMergeRequest(project, loop.branch);
+    if (raced === null) throw err;
+    return raced;
+  }
+};
+
 /**
  * One poll: the ticket's state, the MR (looked up by branch until found, then stored), its discussions and the steward's
  * account. Finding the MR
@@ -43,7 +76,7 @@ const observe = async (deps: PipelineDeps, loop: Loop, project: string, trustedB
   const ticketClosed = CLOSED_STATE_TYPES.includes(ticket.state.type);
   let mr: MergeRequestInfo | null;
   if (loop.projectId === null || loop.mrIid === null) {
-    mr = await gitlab.findOpenMergeRequest(project, loop.branch);
+    mr = (await gitlab.findOpenMergeRequest(project, loop.branch)) ?? (await openMergeRequest(deps, loop, project, ticket));
     if (mr !== null) {
       deps.stores.loops.update(loop.id, { projectId: mr.projectId, mrIid: mr.iid, mrUrl: mr.webUrl, state: "awaiting_review", waitStartedAt: now.toISOString() });
       // Once, as the loop first finds it: the agent session links the MR and the ticket moves to review.
@@ -61,8 +94,10 @@ const observe = async (deps: PipelineDeps, loop: Loop, project: string, trustedB
  * The implement job's summary, posted on the MR the first poll that finds it (Linear gets no comments). Checked against the
  * discussions already read, so later polls cost nothing; a loop whose implement job stored no result posts nothing.
  */
-const postImplementSummary = async (deps: PipelineDeps, loop: Loop, discussions: MrDiscussion[]): Promise<void> => {
+const postImplementSummary = async (deps: PipelineDeps, loop: Loop, mr: MergeRequestInfo, discussions: MrDiscussion[]): Promise<void> => {
   const marker = LOOP_MARKER(loop.id, "implement-summary");
+  // The MR the steward opened carries the summary in its description.
+  if (mr.description.includes(marker)) return;
   if (discussions.some((discussion) => discussion.notes.some((note) => note.body.includes(marker)))) return;
   const stored = deps.stores.jobs.get(loop.implementJobId)?.implementResult ?? null;
   if (stored === null || stored.result === null || stored.handback !== null) return;
@@ -142,7 +177,7 @@ export const runAwaitReview = async (ctx: RunContext, deps: PipelineDeps): Promi
   let observed: Observed;
   try {
     observed = await observe(deps, stored, config.codehost.project, trustedBots, now);
-    if (observed.mr?.state === "opened") await postImplementSummary(deps, reload(deps, loopId), observed.discussions);
+    if (observed.mr?.state === "opened") await postImplementSummary(deps, reload(deps, loopId), observed.mr, observed.discussions);
   } catch (err) {
     return { status: "failed", error: errorMessage(err), retryable: true };
   }
