@@ -24,7 +24,7 @@ import { ciFailuresOf, type CiFailure } from "./ci.js";
 import { peopleOn, workList, type WorkItem } from "./evaluate.js";
 import { renderFixPrompt } from "./prompt.js";
 import { askReview, recordReviewOutcomes } from "../decisions/review.js";
-import { publishHandback, publishRoundMedia, publishStop, publishThreads } from "./publish.js";
+import { publishHandback, publishRoundMedia, publishStop, publishThreads, requestReview } from "./publish.js";
 import { validateFixResult, type FixResult, type StoredFix } from "./result.js";
 import { findSummary } from "./summary.js";
 import { triageFailures } from "./triage.js";
@@ -115,6 +115,12 @@ const nextRound = (fix: Fix, patch: LoopPatch, finished: LoopRound): JobOutcome 
   return moved ? { status: "succeeded" } : { status: "succeeded", warning: `loop ${loop.id} is ${reload(fix).state}, not fixing` };
 };
 
+/** Greptile is asked and waited for only with the setting on and a `greptile` block configured. */
+const greptileEnabled = (fix: Fix): boolean => {
+  const { deps, greptileBot } = fix;
+  return loopSettings(deps.config, deps.settings?.get() ?? seedSettings(deps.config))["greptile.enabled"] && greptileBot !== null;
+};
+
 /**
  * A `changed` fix: the agent pushed it through the push tool. Reply and resolve, then move the loop to the pushed head.
  * Never pushes: a push the tool recorded but never marked counts only when the MR is already at its commit.
@@ -136,9 +142,15 @@ const publishChanged = async (fix: Fix, stored: StoredFix, result: FixResult, mr
   if (replied.status !== "succeeded") return replied;
   const noted = await publishRoundMedia(deps, reload(fix), result.summary, stored.media);
   if (noted.status !== "succeeded") return noted;
+  // Greptile reviews on open only: the steward asks for the pushed head, and the loop waits for a review count above this round's.
+  const asking = greptileEnabled(fix);
+  if (asking) {
+    const requested = await requestReview(deps, reload(fix));
+    if (requested.status !== "succeeded") return requested;
+  }
   return nextRound(
     fix,
-    { headSha: pending.sha, reviewCountAtTrigger: null, adoptedFrom: null, pendingPush: null },
+    { headSha: pending.sha, reviewCountAtTrigger: asking ? stored.reviewCount : null, adoptedFrom: null, pendingPush: null },
     round(fix, stored, result, "changed"),
   );
 };

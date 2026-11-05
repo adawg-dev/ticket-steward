@@ -427,6 +427,13 @@ Otherwise the loop still waits for the pipeline, since a green one can pass a bo
 always needs a green head pipeline; a red one is still triaged and becomes work in a later round. CI logs go to the agent
 only when the pipeline had already failed at the round's start.
 
+**Asking Greptile again.** Greptile itself stays review-on-open: its dashboard must not review every push (people's own
+pushes should not trigger it), and there is no "Automatic reviews: On new pushes" setting to turn on. After every fix
+round that pushed, the steward posts one `@greptileai review` note on the MR (once per round and head, so a retried
+publish does not repeat it) and stores the summary's review count; the next round waits for a count above it. Only the
+steward asks: an agent reply that mentions `@greptile` is refused. A round with no push asks for nothing, and with
+Greptile off (setting or no `greptile` block) nothing is asked.
+
 **CI triage.** A red head pipeline is triaged before it counts as a round (`ci.triage`, on by default). A job that
 failed for an infrastructure reason (runner system failure, stuck or timed out, API or scheduler failure, no matching
 runner and similar) is retried, up to twice per job per commit. A job that looks flaky is retried once per job per

@@ -271,11 +271,37 @@ describe("runFix", () => {
     expect(gitlab.replies[0]?.body).toContain(`Added the null check.\n\nFixed in ${pushed.slice(0, 7)}.`);
     expect(gitlab.replies[0]?.body).toContain(LOOP_MARKER(id, `reply ${finding} ${pushed}`));
     expect(gitlab.resolved).toEqual([]);
-    expect(gitlab.notes).toEqual([]);
+    expect(gitlab.notes).toEqual([`@greptileai review\n\n${LOOP_MARKER(id, `review round=0 head=${pushed.slice(0, 7)} after=start`)}`]);
     const loop = loopOf(id);
-    expect(loop).toMatchObject({ round: 1, headSha: pushed, state: "awaiting_review", sessionId: "session-2", pendingPush: null, waitStartedAt: null, reviewCountAtTrigger: null });
+    expect(loop).toMatchObject({ round: 1, headSha: pushed, state: "awaiting_review", sessionId: "session-2", pendingPush: null, waitStartedAt: null, reviewCountAtTrigger: 3 });
     expect(loop.history).toEqual([{ round: 0, headSha, score: 3, pipeline: "success", fixed: 1, declined: 0, outcome: "changed" }]);
     expect(queuedAwaits()).toEqual([{ kind: "loop", issueId: "issue-1", identifier: "API-1", teamKey: "API", loopId: id, step: "await" }]);
+  });
+
+  it("posts the review request once when a changed round's publish is retried", async () => {
+    const id = createLoop();
+    const brain = editing({ result: changed(finding) });
+    const ctx = claim(id);
+    gitlab.failNextNote();
+
+    const first = await runFix(ctx, makeDeps(brain));
+
+    expect(first.status).toBe("publish_failed");
+    expect(gitlab.notes).toEqual([]);
+    gitlab.mr = { ...gitlab.mr, sha: await git(repo.repo, ["rev-parse", BRANCH]) };
+    expect(await runFix(retry(ctx), makeDeps(brain))).toEqual({ status: "succeeded" });
+    expect(gitlab.notes.filter((note) => note.startsWith("@greptileai review"))).toHaveLength(1);
+    expect(loopOf(id)).toMatchObject({ round: 1, state: "awaiting_review", reviewCountAtTrigger: 3 });
+  });
+
+  it("asks Greptile for no review when its setting is off", async () => {
+    const id = createLoop();
+    const deps: PipelineDeps = { ...makeDeps(editing({ result: changed(finding) })), settings: { get: () => ({ ...seedSettings(makeConfig()), "greptile.enabled": false }) } };
+
+    expect(await runFix(claim(id), deps)).toEqual({ status: "succeeded" });
+
+    expect(gitlab.notes).toEqual([]);
+    expect(loopOf(id)).toMatchObject({ round: 1, state: "awaiting_review", reviewCountAtTrigger: null });
   });
 
   it("posts the round's screenshots in a note on the MR once its threads are answered, and stores them with the round", async () => {
@@ -294,10 +320,11 @@ describe("runFix", () => {
 
     expect(gitlab.uploads).toEqual([{ project: 42, filename: "after.png", bytes: PNG.length }]);
     expect(stores.jobs.get(ctx.jobId)?.fixResult?.media).toEqual({ embeds: [{ caption: "The last chunk now renders", markdown: "![after.png](/uploads/1/after.png)" }], rejected: [] });
-    expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes).toHaveLength(2);
     expect(gitlab.notes[0]).toContain("Round 1: Added the null check the review asked for.");
     expect(gitlab.notes[0]).toContain("**Screenshots and recordings**\n\nThe last chunk now renders\n\n![after.png](/uploads/1/after.png)");
     expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "round 0 media after=start"));
+    expect(gitlab.notes[1]).toMatch(/^@greptileai review\n/);
     expect(loopOf(id)).toMatchObject({ round: 1, state: "awaiting_review" });
   });
 

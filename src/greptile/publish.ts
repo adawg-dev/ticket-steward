@@ -157,3 +157,14 @@ export const publishThreads = async (deps: PipelineDeps, loop: Loop, result: Fix
   }
   return { status: "succeeded" };
 };
+
+/** Asks Greptile to review the pushed head, which it does not do on its own; once per round, head and life of the loop. */
+export const requestReview = async (deps: PipelineDeps, loop: Loop): Promise<JobOutcome> => {
+  if (deps.gitlab === undefined || loop.projectId === null || loop.mrIid === null) return { status: "publish_failed", error: "review request: no merge request" };
+  try {
+    await noteOnce(deps, loop, LOOP_MARKER(loop.id, `review round=${loop.round} head=${loop.headSha.slice(0, 7)} ${lifetime(loop)}`), "@greptileai review");
+  } catch (err) {
+    return { status: "publish_failed", error: `review request: ${errorMessage(err)}` };
+  }
+  return { status: "succeeded" };
+};
