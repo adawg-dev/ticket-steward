@@ -580,6 +580,61 @@ without serve and holds no Linear token. A ticket whose key changed in Linear is
 - It runs outside `serve`'s process, so recreating a worktree can collide with a fetch `serve` is running on the mirror
   (a git lock error). Run it again.
 
+### 1.7d Decisions in shadow mode (optional)
+
+The steward can ask Concentrate's `/v1/decisions` models typed questions and record the answers next to what really
+happened, so their accuracy can be measured before anything acts on them. **Nothing the steward does depends on the
+answers:** a slow, failing or switched-off decisions call changes no job.
+
+What is asked:
+
+| when | point | question | ground truth written on the row |
+|---|---|---|---|
+| a ticket's first implement (not an answer to its questions, not a dry run) | `intake` | `ready` (predicate), `workflow` (`small`/`standard`/`design`) | the implement's outcome: `implemented`, `needs_info` or `failed` |
+| every fix round, per work item (first 20) | `fix_item` | `action` (`fix`/`decline`/`nit`/`escalate`) | the agent's action on that thread: `fixed` or `declined` |
+
+Turn it on with a `decisions` block in `steward.config.ts`. An empty block uses the defaults:
+
+```ts
+decisions: {
+  // baseUrl: "https://api.concentrate.ai/v1",
+  // models: ["jev-latest", "clef", "mercury-decide"],   // every model is asked; each answer is its own row
+},
+```
+
+The key is `CONCENTRATE_API_KEY` when set, else the gateway key the brain uses (`ANTHROPIC_AUTH_TOKEN`, then
+`ANTHROPIC_API_KEY`); the dispatcher holds it and it never reaches a run. Without a key the block is ignored. Every
+input is redacted with the steward's own redactor before it is sent (Concentrate cannot redact decisions requests) and
+cut to 100 000 characters. Each call times out after 10 s and is not retried. Switch it off without a deploy:
+
+```bash
+steward settings set decisions.enabled false
+```
+
+Answers live in the `decisions` table of the steward's database: one row per model per question set, with the
+versioned model the alias resolved to, the answers as JSON, latency, cost, any error, and the input's length and SHA-256
+(never the input). Agreement per model, from `sqlite3 <dataDir>/steward.db`:
+
+```sql
+-- ready vs. the implement's outcome (needs_info = the agent asked a person)
+SELECT model,
+       CASE WHEN json_extract(answers, '$[0].probability') >= 0.5 THEN 'ready' ELSE 'not ready' END AS predicted,
+       outcome, count(*) AS n
+FROM decisions WHERE point = 'intake' AND error IS NULL AND outcome IS NOT NULL
+GROUP BY model, predicted, outcome ORDER BY model, predicted, outcome;
+
+-- action vs. what the agent did with the thread
+SELECT model, json_extract(answers, '$[0].value') AS predicted, outcome, count(*) AS n
+FROM decisions WHERE point = 'fix_item' AND error IS NULL AND outcome IS NOT NULL
+GROUP BY model, predicted, outcome ORDER BY model, predicted, outcome;
+
+-- which models fail, and why
+SELECT requested, error, count(*) AS n FROM decisions WHERE error IS NOT NULL GROUP BY requested, error;
+```
+
+The JSON paths follow Concentrate's documented answer shapes (a predicate's `probability`, a choice's `value`); check them
+against a real row (`SELECT answers FROM decisions LIMIT 1`) the first time.
+
 ### 1.8 Doctor, then start the service
 
 ```bash
