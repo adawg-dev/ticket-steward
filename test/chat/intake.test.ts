@@ -249,6 +249,23 @@ describe("noteIntake", () => {
     ]);
   });
 
+  it.each(["handed_back", "passed"] as const)("picks a %s loop back up on an `/agent` note: its restart runs first, then the chat", async (state) => {
+    const { loopId } = loopIn(state);
+
+    expect(await intake("/agent address Greptile's comments")).toEqual({ action: "chat_resume", loopId });
+
+    const inOrder = [...queued()].sort((x, y) => x.id - y.id);
+    expect(inOrder.map((job) => job.kind)).toEqual(["restart", "chat"]);
+    expect(inOrder.map((job) => job.subject)).toEqual([loopSubject(loopId), loopSubject(loopId)]);
+  });
+
+  it("answers an `/agent` note on a running or stopped loop with a chat only", async () => {
+    const stopped = loopIn("stopped").loopId;
+    expect((await intake("/agent why was it closed?")).action).toBe("chat");
+    expect(queued().map((job) => job.kind)).toEqual(["chat"]);
+    expect(stores.loops.get(stopped)?.state).toBe("stopped");
+  });
+
   it("keeps `/agent` notes on the chat path", async () => {
     loopIn("awaiting_review");
 

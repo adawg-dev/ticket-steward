@@ -526,8 +526,11 @@ chat: {
   (fast-forward only, every push rule applies); without one it answers only. Work it leaves unpushed is listed in the reply;
   the steward never pushes it.
 - On an unassigned loop, an `/agent` note revives it (see above) before its chat runs; any other note is ignored.
-  `/agent restart` is no longer a keyword: it is a chat like any other.
-- The webhook answers `chat`, `chat_mr`, `chat_revive`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
+  On a handed-back or passed loop, an `/agent` note picks the loop back up the same way (its restart step resumes it
+  on the MR head, then the chat answers, and the review loop carries on), so `/agent` never has to be avoided to get
+  the loop going again. A stopped loop (its MR or ticket closed) only chats. `/agent restart` is no longer a keyword:
+  it is a chat like any other.
+- The webhook answers `chat`, `chat_mr`, `chat_resume`, `chat_revive`, `chat_denied`, `chat_ignored`, `chat_duplicate`, `chat_no_session` or
   `chat_failed` (the access check could not reach GitLab) for an `/agent` note. A bare `/agent` with no message is
   `chat_ignored`.
 - An `/agent` note does not wake a loop waiting for review; the loop's next poll (or any other note) does.

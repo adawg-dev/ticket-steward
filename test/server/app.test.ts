@@ -723,11 +723,11 @@ describe("buildServer", () => {
         expect(recording.calls).toEqual([]);
       });
 
-      it("chats on a handed-back loop without restarting it, `/agent restart` included", async () => {
+      it("picks a handed-back loop back up and then chats, `/agent restart` included", async () => {
         sessionLoop("handed_back");
 
-        expect((await postGitlab("Note Hook", chatNote("/agent restart"))).json()).toEqual({ ok: true, action: "chat" });
-        expect(jobsOfKind("restart")).toEqual([]);
+        expect((await postGitlab("Note Hook", chatNote("/agent restart"))).json()).toEqual({ ok: true, action: "chat_resume" });
+        expect(jobsOfKind("restart")).toHaveLength(1);
         expect(jobsOfKind("chat")).toHaveLength(1);
       });
     });

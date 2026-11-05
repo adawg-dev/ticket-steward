@@ -14,7 +14,7 @@ import { ackNote } from "./reactions.js";
 import { CHAT_MARKER, NO_SESSION_REPLY } from "./result.js";
 import { latestSession } from "./session.js";
 
-export type ChatAction = "chat" | "chat_mr" | "chat_revive" | "chat_denied" | "chat_ignored" | "chat_duplicate" | "chat_no_session" | "chat_failed";
+export type ChatAction = "chat" | "chat_mr" | "chat_resume" | "chat_revive" | "chat_denied" | "chat_ignored" | "chat_duplicate" | "chat_no_session" | "chat_failed";
 
 /** With `linear` and `tracker`, a note that revives an unassigned loop sets the steward back as the issue's delegate. */
 export interface ChatIntakeDeps extends DelegateDeps {
@@ -173,6 +173,13 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
       // The restart runs first: the chat shares the loop's subject, so it follows on the resumed loop.
       reviveTicket(stores, issueId, loop, chatJob);
       return { action: "chat_revive", loopId: loop?.id ?? null };
+    }
+    // A loop that ended its rounds (passed or handed back) picks the work back up, as a plain note would: its restart
+    // resumes it on the MR head, then the chat answers, and the review loop carries on after. A stopped loop (its MR or
+    // ticket closed) only chats.
+    if (loop !== null && (loop.state === "handed_back" || loop.state === "passed")) {
+      reviveTicket(stores, issueId, loop, chatJob);
+      return { action: "chat_resume", loopId: loop.id };
     }
     stores.jobs.enqueue(chatJob);
     return { action: "chat", loopId: loop?.id ?? null };
