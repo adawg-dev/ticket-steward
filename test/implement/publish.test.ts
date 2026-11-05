@@ -30,6 +30,8 @@ const implemented: ImplementResult = {
   questions: [],
   failureDetail: null,
   media: [],
+  level: null,
+  design: null,
 };
 
 const labeled: TriggerEvent = { kind: "linear", run: "implement", issueId: "issue-1", identifier: "API-1", teamKey: "API", sessionId: "session-1", message: null };

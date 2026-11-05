@@ -64,6 +64,8 @@ const implemented: ImplementResult = {
   questions: [],
   failureDetail: null,
   media: [],
+  level: null,
+  design: null,
 };
 
 let repo: TmpRepo;

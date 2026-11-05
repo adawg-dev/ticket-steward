@@ -92,7 +92,7 @@ const needsInfoImplement = (): number => {
   stores.jobs.recordWorkspace(jobId, "ticket-API-1", "a".repeat(40));
   stores.jobs.recordSession(jobId, "claude-session-1");
   stores.jobs.saveImplementResult(jobId, {
-    result: { outcome: "needs_info", summary: "Which adapter?", reviewNotes: [], checksRun: [], questions: ["Which adapter?"], failureDetail: null, media: [] },
+    result: { outcome: "needs_info", summary: "Which adapter?", reviewNotes: [], checksRun: [], questions: ["Which adapter?"], failureDetail: null, media: [], level: null, design: null },
     handback: { label: "needsInfo", reason: "the ticket needs more information", detail: "" },
   });
   stores.jobs.finish(jobId, { status: "succeeded" });

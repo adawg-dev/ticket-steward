@@ -51,6 +51,8 @@ const implemented: ImplementResult = {
   questions: [],
   failureDetail: null,
   media: [],
+  level: null,
+  design: null,
 };
 
 const summaryBody = (score: number, sha = SHA): string =>

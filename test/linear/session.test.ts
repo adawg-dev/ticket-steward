@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Redactor } from "../../src/core/redact.js";
-import type { ImplementResult } from "../../src/implement/result.js";
+import { StoredImplementSchema, type ImplementResult } from "../../src/implement/result.js";
 import { linearIntake } from "../../src/linear/intake.js";
 import { logger } from "../../src/log.js";
 import { answerLinearIntake, failureContent, implementFinish, linearSessionFor, mergeRequestOpened, PANEL_TEXT, steerText, stoppedResponse } from "../../src/linear/session.js";
@@ -67,6 +67,8 @@ const implemented: ImplementResult = {
   questions: [],
   failureDetail: null,
   media: [],
+  level: null,
+  design: null,
 };
 
 beforeEach(async () => {
@@ -130,6 +132,26 @@ describe("panel contents", () => {
       type: "response",
       body: "Flush the buffer before closing the stream.\n\n**Checks I ran**\n- pnpm test: ok",
     });
+  });
+
+  it("shows the design after the questions of a needs_info implement", () => {
+    const content = implementFinish({ result: { ...implemented, outcome: "needs_info", questions: ["Which adapter?"], design: "Use the v2 adapter." }, handback: { label: "needsInfo", reason: "the ticket needs more information", detail: "" } });
+    expect(content).toEqual({
+      type: "elicitation",
+      body: "I need more information before I can implement this:\n\n- Which adapter?\n\n<details><summary>Design so far</summary>\n\nUse the v2 adapter.\n\n</details>",
+    });
+  });
+
+  it("shows the design after the checks of a pushed implement", () => {
+    expect(implementFinish({ result: { ...implemented, design: "Flush in close()." }, handback: null })).toEqual({
+      type: "response",
+      body: "Flush the buffer before closing the stream.\n\n**Checks I ran**\n- pnpm test: ok\n\n<details><summary>Design so far</summary>\n\nFlush in close().\n\n</details>",
+    });
+  });
+
+  it("renders a stored result without level or design as before", () => {
+    const stored = StoredImplementSchema.parse({ result: { outcome: "implemented", summary: "Done.", reviewNotes: [], checksRun: ["pnpm test: ok"], questions: [], failureDetail: null, media: [] }, handback: null });
+    expect(implementFinish(stored)).toEqual({ type: "response", body: "Done.\n\n**Checks I ran**\n- pnpm test: ok" });
   });
 
   it("reports a hand-back as an error with its reason, never its detail", () => {

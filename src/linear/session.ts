@@ -147,6 +147,8 @@ export const stoppedResponse = (lastThought: string | null, pushedSha: string | 
   ].join("\n"),
 });
 
+const designDetails = (design: string | null): string[] => (design === null || design.trim() === "" ? [] : ["", "<details><summary>Design so far</summary>", "", design.trim(), "", "</details>"]);
+
 /**
  * The implement's last word in the panel, from its stored result: questions as an elicitation, a hand-back as an error,
  * and a pushed change as a response with its summary, checks and media. Null when nothing was stored.
@@ -155,7 +157,7 @@ export const implementFinish = (stored: StoredImplement | null): ActivityContent
   if (stored === null) return null;
   const { result, handback } = stored;
   if (result?.outcome === "needs_info") {
-    return { type: "elicitation", body: ["I need more information before I can implement this:", "", ...bullets(result.questions)].join("\n") };
+    return { type: "elicitation", body: ["I need more information before I can implement this:", "", ...bullets(result.questions), ...designDetails(result.design)].join("\n") };
   }
   if (handback !== null) {
     const detail = result?.outcome === "failed" && result.failureDetail !== null ? ["", result.failureDetail.trim()] : [];
@@ -169,6 +171,7 @@ export const implementFinish = (stored: StoredImplement | null): ActivityContent
       result.summary.trim(),
       ...(result.checksRun.length > 0 ? ["", "**Checks I ran**", ...bullets(result.checksRun)] : []),
       ...(media.length > 0 ? ["", ...media] : []),
+      ...designDetails(result.design),
     ].join("\n"),
   };
 };

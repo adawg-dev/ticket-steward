@@ -170,7 +170,7 @@ describe("steward jobs", () => {
 
   describe("retry of an implement job", () => {
     const implementEvent: TriggerEvent = createdEvent;
-    const result = { outcome: "implemented" as const, summary: "s", reviewNotes: [], checksRun: [], questions: [], failureDetail: null, media: [] };
+    const result = { outcome: "implemented" as const, summary: "s", reviewNotes: [], checksRun: [], questions: [], failureDetail: null, media: [], level: null, design: null };
     const retryLine = async (setup: (id: number) => void): Promise<string> => {
       const id = stores.jobs.enqueue(implementEvent);
       stores.jobs.claimById(id);

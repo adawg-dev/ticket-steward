@@ -8,6 +8,8 @@ const implemented: ImplementResult = {
   questions: [],
   failureDetail: null,
   media: [],
+  level: null,
+  design: null,
 };
 
 describe("validateImplementResult", () => {
@@ -38,5 +40,17 @@ describe("validateImplementResult", () => {
 
   it("rejects an empty summary", () => {
     expect(validateImplementResult({ ...implemented, summary: "" }).ok).toBe(false);
+  });
+
+  it("reads a result without level or design as having neither", () => {
+    const older: Partial<ImplementResult> = { ...implemented };
+    delete older.level;
+    delete older.design;
+    expect(validateImplementResult(older)).toEqual({ ok: true, result: implemented });
+  });
+
+  it("rejects a level that finished below where it started", () => {
+    expect(validateImplementResult({ ...implemented, level: { started: "standard", finished: "small", reason: null } })).toEqual({ ok: false, error: "level finished below where it started" });
+    expect(validateImplementResult({ ...implemented, level: { started: "small", finished: "design", reason: "needs a design" } }).ok).toBe(true);
   });
 });
