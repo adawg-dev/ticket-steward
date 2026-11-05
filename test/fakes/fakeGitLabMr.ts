@@ -1,4 +1,5 @@
-import type { FailedJob, GitLabMrApi, MergeRequestInfo, MrDiscussion, PipelineRef, TestCase } from "../../src/codehost/gitlabMr.js";
+import { MAX_MR_TITLE, type FailedJob, type GitLabMrApi, type MergeRequestInfo, type MrDiscussion, type NewMergeRequest, type NoteOptions, type PipelineRef, type TestCase } from "../../src/codehost/gitlabMr.js";
+import { neutralizeGitLab } from "../../src/codehost/neutralize.js";
 
 export const BOT = "steward-bot";
 
@@ -20,7 +21,7 @@ export const fakeMergeRequest = (overrides: Partial<MergeRequestInfo> = {}): Mer
   ...overrides,
 });
 
-/** In-memory GitLab: created notes appear in listDiscussions, like the real API. */
+/** In-memory GitLab: created notes appear in listDiscussions, like the real API, neutralised as the real client posts them. */
 export class FakeGitLabMr implements GitLabMrApi {
   mr: MergeRequestInfo;
   /** What findOpenMergeRequest answers. */
@@ -139,11 +140,36 @@ export class FakeGitLabMr implements GitLabMrApi {
     return structuredClone(this.openMr);
   }
 
+  /** Merge requests createMergeRequest opened, by project and what it was asked for. */
+  readonly created: Array<{ project: number | string } & NewMergeRequest> = [];
+  private failingCreates = 0;
+
+  /** The next createMergeRequest throws, as GitLab being down would. */
+  failNextCreate(): void {
+    this.failingCreates += 1;
+  }
+
+  /** Opens the MR as GitLab would: findOpenMergeRequest and getMergeRequest answer it from then on. */
+  async createMergeRequest(project: number | string, input: NewMergeRequest): Promise<MergeRequestInfo> {
+    if (this.failingCreates > 0) {
+      this.failingCreates -= 1;
+      throw new Error("GitLab down");
+    }
+    const { sourceBranch, targetBranch } = input;
+    const title = neutralizeGitLab(input.title).slice(0, MAX_MR_TITLE);
+    const description = neutralizeGitLab(input.description);
+    this.created.push({ project, sourceBranch, targetBranch, title, description });
+    this.mr = { ...this.mr, sourceBranch, targetBranch, title, description };
+    this.openMr = structuredClone(this.mr);
+    return structuredClone(this.mr);
+  }
+
   async listDiscussions(): Promise<MrDiscussion[]> {
     return structuredClone(this.discussions);
   }
 
-  async createNote(_project: number | string, _iid: number, body: string): Promise<void> {
+  async createNote(_project: number | string, _iid: number, text: string, opts: NoteOptions = {}): Promise<void> {
+    const body = opts.raw === true ? text : neutralizeGitLab(text);
     if (this.failingNotes > 0) {
       this.failingNotes -= 1;
       throw new Error("GitLab down");
@@ -157,7 +183,8 @@ export class FakeGitLabMr implements GitLabMrApi {
     this.failingReplies += 1;
   }
 
-  async replyToDiscussion(_project: number | string, _iid: number, discussionId: string, body: string): Promise<void> {
+  async replyToDiscussion(_project: number | string, _iid: number, discussionId: string, text: string): Promise<void> {
+    const body = neutralizeGitLab(text);
     if (this.failingReplies > 0) {
       this.failingReplies -= 1;
       throw new Error("GitLab down");

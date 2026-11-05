@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Secrets } from "../config/load.js";
 import type { StewardConfig } from "../config/schema.js";
+import { neutralizeGitLab } from "./neutralize.js";
 
 /** A numeric project id or a "group/project" path (URL-encoded by the client). */
 export type ProjectRef = number | string;
@@ -25,6 +26,12 @@ export interface MrDiscussion { id: string; notes: MrNote[] }
 export interface FailedJob { id: number; name: string; stage: string; webUrl: string; failureReason: string | null }
 /** One test case of a pipeline's test report; `suite` is the job that ran it, `name` the class name and test name. */
 export interface TestCase { suite: string; name: string; status: string }
+/** What the steward opens a merge request with; the source branch is kept and its commits are not squashed. */
+export interface NewMergeRequest { sourceBranch: string; targetBranch: string; title: string; description: string }
+/** `raw` posts the body as it is; only the steward's own `@greptileai review` request may set it. */
+export interface NoteOptions { raw?: boolean }
+/** GitLab's longest merge request title. */
+export const MAX_MR_TITLE = 255;
 export interface GitLabMrApi {
   currentUser(): Promise<{ username: string }>;
   tokenScopes(): Promise<string[]>;
@@ -33,8 +40,13 @@ export interface GitLabMrApi {
   /** The branch is protected on the project (exact name or a wildcard rule that matches it). */
   isProtectedBranch(project: ProjectRef, branch: string): Promise<boolean>;
   findOpenMergeRequest(project: ProjectRef, sourceBranch: string): Promise<MergeRequestInfo | null>;
+  /**
+   * Opens a merge request (`POST /projects/:id/merge_requests`), ready, with `remove_source_branch=false` and `squash=false`.
+   * Its title and description are posted neutralised (`neutralizeGitLab`), as are notes and replies unless `raw`.
+   */
+  createMergeRequest(project: ProjectRef, input: NewMergeRequest): Promise<MergeRequestInfo>;
   listDiscussions(project: ProjectRef, iid: number): Promise<MrDiscussion[]>;
-  createNote(project: ProjectRef, iid: number, body: string): Promise<void>;
+  createNote(project: ProjectRef, iid: number, body: string, opts?: NoteOptions): Promise<void>;
   replyToDiscussion(project: ProjectRef, iid: number, discussionId: string, body: string): Promise<void>;
   /** The user's access level on the project, inherited membership included; null when they are not a member. */
   memberAccessLevel(project: ProjectRef, userId: number): Promise<number | null>;
@@ -182,6 +194,15 @@ export class GitLabMrClient implements GitLabMrApi {
     return first === undefined ? null : toMergeRequest(first);
   }
 
+  async createMergeRequest(project: ProjectRef, input: NewMergeRequest): Promise<MergeRequestInfo> {
+    const body = {
+      source_branch: input.sourceBranch, target_branch: input.targetBranch,
+      title: neutralizeGitLab(input.title).slice(0, MAX_MR_TITLE), description: neutralizeGitLab(input.description),
+      remove_source_branch: false, squash: false,
+    };
+    return toMergeRequest(MergeRequestSchema.parse(await (await this.request("POST", `${this.projectPath(project)}/merge_requests`, body)).json()));
+  }
+
   async listDiscussions(project: ProjectRef, iid: number): Promise<MrDiscussion[]> {
     const items = await this.paged(`${this.mrPath(project, iid)}/discussions`, DiscussionSchema);
     return items.map((item) => ({
@@ -211,12 +232,12 @@ export class GitLabMrClient implements GitLabMrApi {
     }));
   }
 
-  async createNote(project: ProjectRef, iid: number, body: string): Promise<void> {
-    await this.request("POST", `${this.mrPath(project, iid)}/notes`, { body });
+  async createNote(project: ProjectRef, iid: number, body: string, opts: NoteOptions = {}): Promise<void> {
+    await this.request("POST", `${this.mrPath(project, iid)}/notes`, { body: opts.raw === true ? body : neutralizeGitLab(body) });
   }
 
   async replyToDiscussion(project: ProjectRef, iid: number, discussionId: string, body: string): Promise<void> {
-    await this.request("POST", `${this.mrPath(project, iid)}/discussions/${discussionId}/notes`, { body });
+    await this.request("POST", `${this.mrPath(project, iid)}/discussions/${discussionId}/notes`, { body: neutralizeGitLab(body) });
   }
 
   async awardNoteEmoji(project: ProjectRef, iid: number, noteId: number, name: string): Promise<void> {

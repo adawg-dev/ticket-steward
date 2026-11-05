@@ -1,5 +1,6 @@
 import { renderMedia, type MediaUploads } from "../codehost/media.js";
 import { closedReason } from "../core/intake.js";
+import { LOOP_MARKER } from "../greptile/publish.js";
 import type { JobOutcome, RunContext } from "../core/types.js";
 import { errorMessage } from "../core/workspace.js";
 import type { Tracker } from "../tracker/types.js";
@@ -7,21 +8,45 @@ import type { ImplementResult, StoredImplement } from "./result.js";
 
 const list = (items: string[]): string[] => items.filter((item) => item.trim() !== "").map((item) => `- ${item.trim()}`);
 
+/** What changed, review notes and checks run. */
+const summaryBody = (result: ImplementResult): string[] => [
+  result.summary.trim(),
+  ...(result.reviewNotes.length > 0 ? ["", "**For the reviewer**", ...list(result.reviewNotes)] : []),
+  ...(result.checksRun.length > 0 ? ["", "**Checks the agent ran**", ...list(result.checksRun)] : []),
+];
+
 /**
- * The implement summary the Greptile loop posts on the MR once it finds it: what changed, review notes, checks run, and
- * the screenshots and recordings the job attached.
+ * The implement summary the Greptile loop posts on the MR it finds (one it did not open): what changed, review notes,
+ * checks run, and the screenshots and recordings the job attached.
  */
 export const buildImplementSummary = (input: { jobId: number; identifier: string; result: ImplementResult; media?: MediaUploads }): string => {
-  const { result } = input;
   const media = renderMedia(input.media);
   return [
     `Ticket Steward implemented ${input.identifier} (job ${input.jobId}).`,
     "",
-    result.summary.trim(),
-    ...(result.reviewNotes.length > 0 ? ["", "**For the reviewer**", ...list(result.reviewNotes)] : []),
-    ...(result.checksRun.length > 0 ? ["", "**Checks the agent ran**", ...list(result.checksRun)] : []),
+    ...summaryBody(input.result),
     ...(media.length > 0 ? ["", ...media] : []),
   ].join("\n");
+};
+
+/**
+ * The description of the MR the steward opens: the agent's (or the implement summary when it wrote none), the screenshots
+ * and recordings the job attached, `Closes <KEY>`, a footer and the implement-summary marker, so the summary is not also
+ * posted as a note.
+ */
+export const buildMrDescription = (input: {
+  loopId: number; identifier: string; ticketUrl: string; jobId: number; result: ImplementResult; media?: MediaUploads;
+}): string => {
+  const { result } = input;
+  const media = renderMedia(input.media);
+  const written = result.mrDescription?.trim() ?? "";
+  return [
+    written === "" ? summaryBody(result).join("\n") : written,
+    ...(media.length > 0 ? [media.join("\n")] : []),
+    `Closes ${input.identifier}`,
+    `Opened by Ticket Steward for [${input.identifier}](${input.ticketUrl}), job ${input.jobId}.`,
+    LOOP_MARKER(input.loopId, "implement-summary"),
+  ].join("\n\n");
 };
 
 /**

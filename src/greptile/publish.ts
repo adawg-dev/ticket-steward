@@ -1,3 +1,4 @@
+import type { NoteOptions } from "../codehost/gitlabMr.js";
 import { renderMedia, type MediaUploads } from "../codehost/media.js";
 import type { PipelineDeps } from "../core/deps.js";
 import type { JobOutcome } from "../core/types.js";
@@ -25,12 +26,15 @@ const hasMarker = (bodies: string[], marker: string): boolean => bodies.some((bo
 
 const score = (value: number | null): string => (value === null ? "?" : String(value));
 
-/** Posts the MR note unless one with the marker is already on the MR; a loop with no known MR has nowhere to post. */
-export const noteOnce = async (deps: Pick<PipelineDeps, "gitlab" | "redactor">, loop: Loop, marker: string, text: string): Promise<void> => {
+/**
+ * Posts the MR note unless one with the marker is already on the MR; a loop with no known MR has nowhere to post. The
+ * client neutralises quick actions and mentions in it unless `opts.raw`.
+ */
+export const noteOnce = async (deps: Pick<PipelineDeps, "gitlab" | "redactor">, loop: Loop, marker: string, text: string, opts: NoteOptions = {}): Promise<void> => {
   if (deps.gitlab === undefined || loop.projectId === null || loop.mrIid === null) return;
   const discussions = await deps.gitlab.listDiscussions(loop.projectId, loop.mrIid);
   if (hasMarker(discussions.flatMap((discussion) => discussion.notes.map((note) => note.body)), marker)) return;
-  await deps.gitlab.createNote(loop.projectId, loop.mrIid, deps.redactor.redact(`${text}\n\n${marker}`));
+  await deps.gitlab.createNote(loop.projectId, loop.mrIid, deps.redactor.redact(`${text}\n\n${marker}`), opts);
 };
 
 type Step = { what: string; run: () => Promise<void> };
@@ -154,6 +158,20 @@ export const publishThreads = async (deps: PipelineDeps, loop: Loop, result: Fix
     }
   } catch (err) {
     return { status: "publish_failed", error: `replies: ${errorMessage(err)}` };
+  }
+  return { status: "succeeded" };
+};
+
+/**
+ * Asks Greptile to review the pushed head, which it does not do on its own; once per round, head and life of the loop.
+ * The one note posted raw: its mention is the point.
+ */
+export const requestReview = async (deps: PipelineDeps, loop: Loop): Promise<JobOutcome> => {
+  if (deps.gitlab === undefined || loop.projectId === null || loop.mrIid === null) return { status: "publish_failed", error: "review request: no merge request" };
+  try {
+    await noteOnce(deps, loop, LOOP_MARKER(loop.id, `review round=${loop.round} head=${loop.headSha.slice(0, 7)} ${lifetime(loop)}`), "@greptileai review", { raw: true });
+  } catch (err) {
+    return { status: "publish_failed", error: `review request: ${errorMessage(err)}` };
   }
   return { status: "succeeded" };
 };

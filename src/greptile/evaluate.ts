@@ -100,7 +100,8 @@ const DEAD_PIPELINE = new Set(["canceled", "skipped", "manual"]);
 
 /**
  * Decide what the review loop does next; every timeout counts from `loop.waitStartedAt`. With Greptile on, the head's
- * review is waited for first. A red pipeline goes to CI triage first (`ci.triage`). Then: Greptile at the pass score on a
+ * review is waited for first. A round that would fix anyway starts before the head pipeline finishes, except a bot
+ * round that is the last under the cap. A red pipeline goes to CI triage first (`ci.triage`). Then: Greptile at the pass score on a
  * green head ends a round only bots started; an empty work list on a green head passes; a bot-started round past the
  * bot-round cap hands back; anything else is a fix.
  */
@@ -140,8 +141,16 @@ export const evaluateRound = (input: RoundInput): RoundDecision => {
         : { kind: "wait", waitingFor: "review", deadline: deadline(config.reviewTimeoutMinutes) };
     }
   }
+  const cap = settings["greptile.maxRounds"];
+  const belowPass = summary === null || summary.score < settings["greptile.passScore"];
   const pipeline = mr.headPipeline !== null && mr.headPipeline.sha === mr.sha ? mr.headPipeline : null;
   if (pipeline === null || UNFINISHED_PIPELINE.has(pipeline.status)) {
+    // The review is in: a round that would fix once the pipeline finished starts now. Only a green pipeline can still pass
+    // a bot round, and the last bot round under the cap waits for it, so that round carries the CI failures.
+    const fixesAnyway = input.startedBy === "person" || (belowPass && loop.botRounds < cap - 1);
+    if (input.workList.length > 0 && fixesAnyway) {
+      return { kind: "fix", workList: input.workList, startedBy: input.startedBy, pipelineFailed: false };
+    }
     return timedOut(config.pipelineTimeoutMinutes)
       ? { kind: "handback", reason: `no finished pipeline for ${short}` }
       : { kind: "wait", waitingFor: "pipeline", deadline: deadline(config.pipelineTimeoutMinutes) };
@@ -156,7 +165,6 @@ export const evaluateRound = (input: RoundInput): RoundDecision => {
     return { kind: "passed", summary };
   }
   if (green && input.workList.length === 0) return { kind: "passed", summary };
-  const cap = settings["greptile.maxRounds"];
   if (input.startedBy === "bot" && loop.botRounds >= cap) {
     return { kind: "handback", reason: `stopped after ${loop.botRounds} rounds started by bots; a person's comment starts another` };
   }

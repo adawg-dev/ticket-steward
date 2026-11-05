@@ -7,7 +7,7 @@ import type { RunContext } from "../../src/core/types.js";
 import { runAwaitReview } from "../../src/greptile/await.js";
 import { LOOP_MARKER, publishHandback, publishPassed } from "../../src/greptile/publish.js";
 import { unassignTicket } from "../../src/linear/assignment.js";
-import type { ImplementResult } from "../../src/implement/result.js";
+import type { Handback, ImplementResult } from "../../src/implement/result.js";
 import { logger } from "../../src/log.js";
 import { seedSettings } from "../../src/settings/schema.js";
 import { openStores, type Loop, type Stores } from "../../src/store/index.js";
@@ -16,6 +16,7 @@ import { Mirror } from "../../src/workspace/mirror.js";
 import { FakeBrain } from "../fakes/fakeBrain.js";
 import { FakeCodeHost } from "../fakes/fakeCodeHost.js";
 import { FakeGitLabMr, fakeMergeRequest } from "../fakes/fakeGitLabMr.js";
+import { GitLabApiError } from "../../src/codehost/gitlabMr.js";
 import { RecordingLinear } from "../fakes/fakeLinearAgent.js";
 import { FakeTracker } from "../fakes/fakeTracker.js";
 import { freshDataDir } from "../store/helpers.js";
@@ -102,18 +103,20 @@ const makeDeps = (): PipelineDeps => ({
   now: () => NOW,
 });
 
-/** A finished implement job for the loop to come from, with the result its push stored. */
-const implementJob = (media?: MediaUploads): number => {
+const handedBack: Handback = { label: "readyForHuman", reason: "checks failed", detail: "" };
+
+/** A finished implement job for the loop to come from, with the result its push stored (a hand-back when `handback` is given). */
+const implementJob = (media?: MediaUploads, result: ImplementResult = implemented, handback: Handback | null = null): number => {
   const jobId = stores.jobs.enqueue({ kind: "cli", issueId: "issue-1", identifier: "API-1", teamKey: "API", action: "implement" });
   stores.jobs.claimById(jobId);
-  stores.jobs.saveImplementResult(jobId, { result: implemented, handback: null, ...(media === undefined ? {} : { media }) });
+  stores.jobs.saveImplementResult(jobId, { result, handback, ...(media === undefined ? {} : { media }) });
   stores.jobs.finish(jobId, { status: "succeeded" });
   return jobId;
 };
 
-const createLoop = (labelDriven = true, media?: MediaUploads): number =>
+const createLoop = (labelDriven = true, media?: MediaUploads, implementJobId = implementJob(media)): number =>
   stores.loops.create({
-    issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId: implementJob(media), branch: "api-1-fix", baseSha: "a".repeat(40),
+    issueId: "issue-1", identifier: "API-1", teamKey: "API", implementJobId, branch: "api-1-fix", baseSha: "a".repeat(40),
     headSha: SHA, worktreeName: "API-1-1", labelDriven, sessionId: "session-1",
   });
 
@@ -152,7 +155,8 @@ afterEach(() => {
 
 describe("runAwaitReview", () => {
   it("defers a poll later while no MR is open, and starts the wait clock", async () => {
-    const id = createLoop();
+    // A handed-back implement opens no MR, so the loop waits for one.
+    const id = createLoop(true, undefined, implementJob(undefined, implemented, handedBack));
 
     const outcome = await runAwaitReview(claim(id), makeDeps());
 
@@ -219,7 +223,7 @@ describe("runAwaitReview", () => {
   });
 
   it("posts nothing while no MR is open", async () => {
-    const id = createLoop();
+    const id = createLoop(true, undefined, implementJob(undefined, implemented, handedBack));
 
     await runAwaitReview(claim(id), makeDeps());
 
@@ -236,6 +240,143 @@ describe("runAwaitReview", () => {
 
     expect(gitlab.notes).toHaveLength(1);
     expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "implement-summary"));
+  });
+
+  it("opens the MR itself on the first poll: the agent's title, the built description, against the base branch", async () => {
+    const linear = new RecordingLinear();
+    stores.agentSessions.record("lin-1", "issue-1", "API-1");
+    const result = { ...implemented, mrTitle: "fix(api): API-1 flush the last chunk", mrDescription: "## What\n\nFlushes the buffer." };
+    const media = { embeds: [{ caption: "After", markdown: "![after.png](/uploads/1/after.png)" }], rejected: [] };
+    const id = createLoop(true, undefined, implementJob(media, result));
+
+    const outcome = await runAwaitReview(claim(id), { ...makeDeps(), linear });
+
+    expect(outcome.status).toBe("deferred");
+    expect(gitlab.created).toHaveLength(1);
+    const [created] = gitlab.created;
+    expect(created).toMatchObject({ project: "acme/repo", sourceBranch: "api-1-fix", targetBranch: "dev", title: "fix(api): API-1 flush the last chunk" });
+    const jobId = loopOf(id).implementJobId;
+    expect(created?.description).toBe([
+      "## What\n\nFlushes the buffer.",
+      "**Screenshots and recordings**\n\nAfter\n\n![after.png](/uploads/1/after.png)",
+      "Closes API-1",
+      `Opened by Ticket Steward for [API-1](${issue.url}), job ${jobId}.`,
+      LOOP_MARKER(id, "implement-summary"),
+    ].join("\n\n"));
+    expect(loopOf(id)).toMatchObject({ projectId: 42, mrIid: 7, mrUrl: gitlab.mr.webUrl, state: "awaiting_review", waitStartedAt: NOW.toISOString() });
+    expect(gitlab.notes).toEqual([]);
+    expect(linear.calls.filter((call) => call.kind === "urls")).toHaveLength(1);
+  });
+
+  it("falls back to the ticket's title and the implement summary when the agent wrote neither", async () => {
+    const id = createLoop(true, undefined, implementJob(undefined, { ...implemented, mrTitle: "", mrDescription: " " }));
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    const [created] = gitlab.created;
+    expect(created?.title).toBe("API-1: Adapter drops the last chunk");
+    expect(created?.description).toContain("Flush the buffer before closing the stream.\n\n**For the reviewer**\n- Check the streaming test.");
+    expect(created?.description).not.toContain("Screenshots and recordings");
+    expect(created?.description).toContain(`Closes API-1\n\nOpened by Ticket Steward for [API-1](${issue.url}), job ${loopOf(id).implementJobId}.`);
+  });
+
+  it("titles the MR with the first line of the agent's title, trimmed", async () => {
+    const id = createLoop(true, undefined, implementJob(undefined, { ...implemented, mrTitle: "  fix(api): API-1 flush the last chunk  \nmore detail" }));
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.created[0]?.title).toBe("fix(api): API-1 flush the last chunk");
+  });
+
+  it("falls back to the ticket's title for an agent title over 255 characters, clamped to 255", async () => {
+    tracker = new FakeTracker([{ ...structuredClone(issue), title: "t".repeat(300) }]);
+    const id = createLoop(true, undefined, implementJob(undefined, { ...implemented, mrTitle: "x".repeat(256) }));
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.created[0]?.title).toBe(`API-1: ${"t".repeat(300)}`.slice(0, 255));
+  });
+
+  it("redacts the description it opens the MR with", async () => {
+    const id = createLoop(true, undefined, implementJob(undefined, { ...implemented, mrDescription: "token s3cret-value" }));
+
+    await runAwaitReview(claim(id), { ...makeDeps(), redactor: new Redactor(["s3cret-value"]) });
+
+    expect(gitlab.created[0]?.description).not.toContain("s3cret-value");
+  });
+
+  it("never opens a second MR on a later poll, nor posts the summary it already carries", async () => {
+    const id = createLoop();
+
+    await runAwaitReview(claim(id), makeDeps());
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.created).toHaveLength(1);
+    expect(gitlab.notes).toEqual([]);
+  });
+
+  it("opens no MR when CI opened one first, and posts the summary on it as a note", async () => {
+    const id = createLoop();
+    gitlab.openMr = fakeMergeRequest({ sha: SHA });
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.created).toEqual([]);
+    expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "implement-summary"));
+  });
+
+  it("uses the MR CI opened while the steward was opening its own, and posts the summary on it", async () => {
+    const linear = new RecordingLinear();
+    stores.agentSessions.record("lin-1", "issue-1", "API-1");
+    const id = createLoop();
+    gitlab.createMergeRequest = async () => {
+      gitlab.openMr = fakeMergeRequest({ sha: SHA });
+      throw new GitLabApiError(409, "GitLab POST /projects/acme%2Frepo/merge_requests answered 409: Another open merge request already exists for this source branch");
+    };
+
+    expect((await runAwaitReview(claim(id), { ...makeDeps(), linear })).status).toBe("deferred");
+    await runAwaitReview(claim(id), { ...makeDeps(), linear });
+
+    expect(loopOf(id)).toMatchObject({ mrIid: 7, state: "awaiting_review" });
+    expect(gitlab.notes).toHaveLength(1);
+    expect(gitlab.notes[0]).toContain(LOOP_MARKER(id, "implement-summary"));
+    // The ticket hears of the MR once: the session links it and the ticket moves to review.
+    expect(linear.calls.filter((call) => call.kind === "urls")).toHaveLength(1);
+  });
+
+  it("opens no MR for a handed-back implement", async () => {
+    const id = createLoop(true, undefined, implementJob(undefined, implemented, handedBack));
+
+    await runAwaitReview(claim(id), makeDeps());
+
+    expect(gitlab.created).toEqual([]);
+    expect(loopOf(id)).toMatchObject({ mrIid: null, state: "awaiting_mr" });
+  });
+
+  it("waits as usual when the MR cannot be opened, the wait clock started, and opens it on the next poll", async () => {
+    const id = createLoop();
+    gitlab.failNextCreate();
+
+    expect(await runAwaitReview(claim(id), makeDeps())).toEqual({ status: "deferred", until: new Date(NOW.getTime() + 60_000) });
+    expect(loopOf(id)).toMatchObject({ mrIid: null, state: "awaiting_mr", waitStartedAt: NOW.toISOString() });
+
+    expect((await runAwaitReview(claim(id), makeDeps())).status).toBe("deferred");
+    expect(gitlab.created).toHaveLength(1);
+    expect(loopOf(id)).toMatchObject({ mrIid: 7, state: "awaiting_review" });
+  });
+
+  it("hands back once the MR wait runs out while the MR keeps failing to open", async () => {
+    const id = createLoop();
+    gitlab.createMergeRequest = async () => {
+      throw new Error("GitLab down");
+    };
+    await runAwaitReview(claim(id), makeDeps());
+
+    const later = { ...makeDeps(), now: () => new Date(NOW.getTime() + 61 * 60_000) };
+    expect(await runAwaitReview(claim(id), later)).toEqual({ status: "succeeded", warning: "handed back: no merge request was opened for api-1-fix" });
+
+    expect(loopOf(id)).toMatchObject({ state: "handed_back", mrIid: null });
   });
 
   it("gives the review its own wait once the MR is found, however long the MR took", async () => {
