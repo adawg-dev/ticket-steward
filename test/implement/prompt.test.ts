@@ -133,6 +133,13 @@ describe("implement prompt", () => {
       expect(standard).toContain("the level this run was given (`standard`)");
     });
 
+    it("asks every level for the merge request title and description", () => {
+      for (const prompt of [small, standard, design]) {
+        expect(prompt).toContain("`mrTitle`");
+        expect(prompt).toContain("`mrDescription`");
+      }
+    });
+
     it("continues from the design so far when answers resume a design run", () => {
       const resumed = renderImplementPrompt(template, { ...vars, small: false, design: true, hasDesign: true, designText: "# Flush <all> chunks" });
       expect(resumed).toContain("# Flush <all> chunks");

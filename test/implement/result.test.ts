@@ -1,4 +1,4 @@
-import { atRunLevel, validateImplementResult, type ImplementResult } from "../../src/implement/result.js";
+import { atRunLevel, implementResultJsonSchema, validateImplementResult, type ImplementResult } from "../../src/implement/result.js";
 
 const implemented: ImplementResult = {
   outcome: "implemented",
@@ -52,6 +52,28 @@ describe("validateImplementResult", () => {
   it("accepts any level the agent reports: the steward stamps it with the run's level", () => {
     expect(validateImplementResult({ ...implemented, level: { started: "standard", finished: "small", reason: null } }).ok).toBe(true);
     expect(validateImplementResult({ ...implemented, level: { started: "small", finished: "design", reason: "needs a design" } }).ok).toBe(true);
+  });
+});
+
+describe("merge request title and description", () => {
+  const mr = { mrTitle: "fix(user-app): add missing space in optimizer scan card prompt (USRAPP-182)", mrDescription: "## What\n\nAdds the space." };
+
+  it("accepts a result with both fields and keeps them", () => {
+    expect(validateImplementResult({ ...implemented, ...mr })).toEqual({ ok: true, result: { ...implemented, ...mr } });
+  });
+
+  it("accepts a result without them: rows stored before still parse", () => {
+    expect(validateImplementResult(implemented)).toEqual({ ok: true, result: implemented });
+  });
+
+  it("requires both in the schema the agent answers to", () => {
+    expect(implementResultJsonSchema.required).toEqual(expect.arrayContaining(["mrTitle", "mrDescription"]));
+    expect(implementResultJsonSchema.properties).toHaveProperty("mrTitle");
+    expect(implementResultJsonSchema.properties).toHaveProperty("mrDescription");
+  });
+
+  it("keeps them when the steward stamps the run's level", () => {
+    expect(atRunLevel({ ...implemented, ...mr }, "standard")).toMatchObject(mr);
   });
 });
 

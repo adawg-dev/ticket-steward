@@ -135,6 +135,8 @@ When your change shows in the app, show it on the merge request. Take screenshot
 - `outcome: "failed"` when you tried and could not get to a working change, or the `push` tool kept refusing for a reason you could not fix. Put what you tried, what failed and where you stopped in `failureDetail`.
 - `outcome: "needs_info"` when the ticket cannot be implemented without answers only a person can give. Put the questions in `questions`. Do not push.
 - `media`: the screenshots and videos to show (see above); empty when there are none.
+- `mrTitle`: the merge request title, a conventional commit with the ticket key, under 72 characters, for example `fix(user-app): add missing space in optimizer scan card prompt (USRAPP-182)`. An empty string for `failed` and `needs_info`.
+- `mrDescription`: the merge request description in Markdown, with these sections, each only when it has content: `## What` (the problem and the fix), `## Changes`, `## Behavior change`, `## Not in this MR`, `## Tests` (what ran and its result). No screenshots (the steward adds them from `media`), no `Closes` line, no footer, no `@` mentions. `summary` stays the short version for the Linear panel. An empty string for `failed` and `needs_info`.
 {{#small}}
 - `level`: `started` and `finished` are both `small` and `reason` is `null`.
 {{/small}}

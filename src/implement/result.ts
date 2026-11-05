@@ -15,10 +15,14 @@ export const ImplementResultSchema = z.object({
   level: z.object({ started: LevelSchema, finished: LevelSchema, reason: z.string().nullable() }).nullable().default(null),
   /** The design written for the ticket, shown in the agent session; null when none. */
   design: z.string().nullable().default(null),
+  /** The merge request title the agent writes: a conventional commit with the ticket key. Absent on results stored before; the agent's schema requires it. */
+  mrTitle: z.string().optional(),
+  /** The merge request description (Markdown) the agent writes, without screenshots, `Closes` or a footer; the steward appends those. */
+  mrDescription: z.string().optional(),
 });
 export type ImplementResult = z.infer<typeof ImplementResultSchema>;
 
-export const implementResultJsonSchema: Record<string, unknown> = z.toJSONSchema(ImplementResultSchema, { target: "draft-07" });
+export const implementResultJsonSchema: Record<string, unknown> = z.toJSONSchema(ImplementResultSchema.required({ mrTitle: true, mrDescription: true }), { target: "draft-07" });
 
 /** The agent names the branch type and writes the commit messages when it commits and pushes; the result only reports. */
 export const validateImplementResult = (output: unknown): { ok: true; result: ImplementResult } | { ok: false; error: string } => {
