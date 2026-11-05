@@ -219,6 +219,39 @@ const claimMr = (message = "fix the flaky adapter test"): RunContext => {
   return { jobId, attempt: attempt.number, issueId: "mr:42!7", identifier: "!7", teamKey: "", trigger, dryRun: false };
 };
 
+describe("runChat reactions on the `/agent` note", () => {
+  it("swaps its eyes for a thumbs up once it answered", async () => {
+    gitlab.reactions.set(501, ["eyes"]);
+
+    expect(await runChat(claim(createLoop()), makeDeps(new FakeBrain({ result: { reply: "Because." } })))).toEqual({ status: "succeeded" });
+
+    expect(gitlab.reactions.get(501)).toEqual(["thumbsup"]);
+  });
+
+  it("swaps its eyes for a cross when the agent could not answer", async () => {
+    gitlab.reactions.set(501, ["eyes"]);
+
+    await runChat(claim(createLoop()), makeDeps(new FakeBrain({ fail: true, error: "boom" })));
+
+    expect(gitlab.reactions.get(501)).toEqual(["x"]);
+  });
+
+  it("marks an MR it refuses with a cross", async () => {
+    await personMr({ state: "merged" });
+
+    await runChat(claimMr(), makeDeps(new FakeBrain({ result: { reply: "never" } })));
+
+    expect(gitlab.reactions.get(777)).toEqual(["x"]);
+  });
+
+  it("answers all the same when GitLab will not take the reaction", async () => {
+    gitlab.failingReactions = true;
+
+    expect(await runChat(claim(createLoop()), makeDeps(new FakeBrain({ result: { reply: "Because." } })))).toEqual({ status: "succeeded" });
+    expect(gitlab.replies).toHaveLength(1);
+  });
+});
+
 describe("runChat on a merge request the steward did not open", () => {
   it("works in the MR's own worktree at its head, may push to its branch, and answers in the note's discussion", async () => {
     const head = await personMr();

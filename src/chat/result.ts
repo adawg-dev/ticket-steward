@@ -34,5 +34,7 @@ export const StoredChatSchema = z.object({
   reply: z.string(),
   /** Why the run did not go as asked (the brain failed, its answer was unreadable); the job finishes with it as a warning. */
   warning: z.string().nullable(),
+  /** The agent did not do what was asked (its run failed, or the steward refused): the note gets a cross, not a thumbs up. */
+  failed: z.boolean().optional(),
 });
 export type StoredChat = z.infer<typeof StoredChatSchema>;

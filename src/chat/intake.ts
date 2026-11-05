@@ -10,6 +10,7 @@ import { DEFAULT_SETTINGS, type Settings } from "../settings/schema.js";
 import { ACTIVE_LOOP_STATES, loopSubject, transaction, type Loop, type LoopState, type Stores } from "../store/index.js";
 import type { TriggerEvent } from "../tracker/types.js";
 import { mrChatsEnabled, mrIdentifier, mrIssueId } from "./mr.js";
+import { ackNote } from "./reactions.js";
 import { CHAT_MARKER, NO_SESSION_REPLY } from "./result.js";
 import { latestSession } from "./session.js";
 
@@ -144,11 +145,13 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
         kind: "chat", issueId: mrIssueId(event.projectId, mrIid), identifier: mrIdentifier(mrIid), teamKey: "", loopId: null,
         projectId: event.projectId, mrIid, discussionId: note.discussionId, noteId: note.id, author: note.authorUsername, message,
       };
-      return transaction(stores.db, (): { action: ChatAction; loopId: number | null } => {
+      const queued = transaction(stores.db, (): { action: ChatAction; loopId: number | null } => {
         if (!stores.deliveries.markSeen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: null };
         stores.jobs.enqueue(mrChat);
         return { action: "chat_mr", loopId: null };
       });
+      if (queued.action === "chat_mr") await ackNote(gitlab, { projectId: event.projectId, mrIid, noteId: note.id });
+      return queued;
     }
     if (!stores.deliveries.markSeen(noteDeliveryKey(note.id))) return { action: "chat_duplicate", loopId: null };
     try {
@@ -176,6 +179,7 @@ export const chatIntake = async (deps: ChatIntakeDeps, event: GitlabWakeEvent): 
   });
   // Best effort, after the jobs are recorded: a delegate that could not be set is logged.
   if (result.action === "chat_revive") void restoreDelegate(deps, issueId);
+  if (result.action !== "chat_duplicate") await ackNote(gitlab, { projectId: event.projectId, mrIid, noteId: note.id });
   return result;
 };
 

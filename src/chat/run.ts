@@ -19,6 +19,7 @@ import { logger } from "../log.js";
 import type { Worktree } from "../workspace/worktree.js";
 import { CHAT_MARKER, NO_SESSION_REPLY, validateChatResult, type StoredChat } from "./result.js";
 import { mrChatOf, mrChatRefusal, mrWorktreeName, ticketKeyOf } from "./mr.js";
+import { settleNote } from "./reactions.js";
 import { latestSession, type AgentSession } from "./session.js";
 import { linearSessionFor, stoppedResponse, type LinearSession } from "../linear/session.js";
 import { reviveTicket } from "../linear/assignment.js";
@@ -106,6 +107,7 @@ const postReply = async (deps: PipelineDeps, answer: Answer, stored: StoredChat)
     } catch (err) {
       return { status: "publish_failed", error: `chat reply: ${errorMessage(err)}` };
     }
+    await settleNote(gitlab, { projectId: trigger.projectId, mrIid: trigger.mrIid, noteId: trigger.noteId }, stored.failed === true);
   }
   await answer.panel.finish({ type: "response", body: stored.reply });
   return stored.warning === null ? { status: "succeeded" } : { status: "succeeded", warning: stored.warning };
@@ -356,11 +358,11 @@ const finishChat = async (
   if (!report.ok) {
     const error = report.error ?? "brain run failed";
     const reply = SESSION_ERROR.test(error) ? "The agent's session could not be resumed." : "The agent could not answer: its run failed.";
-    return decide(ctx, deps, answer, { reply: withLeftover(reply, leftover), warning: `the agent's run failed: ${deps.redactor.redact(error)}` });
+    return decide(ctx, deps, answer, { reply: withLeftover(reply, leftover), warning: `the agent's run failed: ${deps.redactor.redact(error)}`, failed: true });
   }
   const validated = validateChatResult(report.output);
   if (!validated.ok) {
-    return decide(ctx, deps, answer, { reply: withLeftover("The agent's answer could not be read.", leftover), warning: `the agent's result was invalid: ${validated.error}` });
+    return decide(ctx, deps, answer, { reply: withLeftover("The agent's answer could not be read.", leftover), warning: `the agent's result was invalid: ${validated.error}`, failed: true });
   }
   recordDecisions(deps, session, validated.result.decisions);
   const media = renderMedia(await attachedMedia({ attached: report.media, items: validated.result.media, artifactsDir: spec.artifactsDir, gitlab: answer.gitlab, project: mediaProject(deps, answer, session) }));
@@ -504,7 +506,7 @@ const executeMrChat = async (ctx: RunContext, deps: PipelineDeps, answer: Answer
     return { status: "failed", error: `chat: the merge request could not be read: ${errorMessage(err)}`, retryable: true };
   }
   const refusal = mrChatRefusal(mr, { baseBranch: deps.config.workspace.baseBranch, protectedSource });
-  if (refusal !== null) return decide(ctx, deps, answer, { reply: refusal, warning: null });
+  if (refusal !== null) return decide(ctx, deps, answer, { reply: refusal, warning: null, failed: true });
   const worktreeName = mrWorktreeName(trigger.mrIid);
   const resumeSessionId = deps.stores.jobs.latestChatSession(ctx.issueId)?.sessionId ?? null;
   // Recorded before the run, so the next chat finds this one's session in the same worktree and retention keeps it.
@@ -529,7 +531,7 @@ const executeChat = async (ctx: RunContext, deps: PipelineDeps): Promise<JobOutc
   const session = latestSession(deps.stores, ctx.issueId);
   if (session === null) {
     const reply = trigger.kind === "chat" ? NO_SESSION_REPLY : NO_LINEAR_SESSION_REPLY;
-    return decide(ctx, deps, answer, { reply, warning: "the ticket has no agent session" });
+    return decide(ctx, deps, answer, { reply, warning: "the ticket has no agent session", failed: true });
   }
   return converse(ctx, deps, answer, session);
 };

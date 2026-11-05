@@ -39,6 +39,10 @@ export interface GitLabMrApi {
   /** The user's access level on the project, inherited membership included; null when they are not a member. */
   memberAccessLevel(project: ProjectRef, userId: number): Promise<number | null>;
   resolveDiscussion(project: ProjectRef, iid: number, discussionId: string): Promise<void>;
+  /** Reacts to a note on the MR with a GitLab emoji (`eyes`, `thumbsup`), as the token's user. */
+  awardNoteEmoji(project: ProjectRef, iid: number, noteId: number, name: string): Promise<void>;
+  /** Takes back the token user's own `name` reaction on the note; other people's stay. Nothing to remove is not an error. */
+  removeOwnNoteEmoji(project: ProjectRef, iid: number, noteId: number, name: string): Promise<void>;
   /** Failed jobs of the pipeline and of every downstream pipeline reached through its bridges (depth <= 3). */
   failedJobs(project: ProjectRef, pipelineId: number): Promise<FailedJob[]>;
   /** Retries the job: a new job takes its place in its pipeline, which runs again. */
@@ -82,6 +86,7 @@ const MergeRequestSchema = z.object({
   draft: z.boolean().nullish(),
   diff_refs: z.object({ base_sha: z.string().nullish() }).nullish(),
 });
+const AwardSchema = z.object({ id: z.number(), name: z.string(), user: z.object({ username: z.string() }) });
 const NoteSchema = z.object({
   id: z.number(),
   body: z.string(),
@@ -212,6 +217,19 @@ export class GitLabMrClient implements GitLabMrApi {
 
   async replyToDiscussion(project: ProjectRef, iid: number, discussionId: string, body: string): Promise<void> {
     await this.request("POST", `${this.mrPath(project, iid)}/discussions/${discussionId}/notes`, { body });
+  }
+
+  async awardNoteEmoji(project: ProjectRef, iid: number, noteId: number, name: string): Promise<void> {
+    await this.request("POST", `${this.mrPath(project, iid)}/notes/${noteId}/award_emoji?name=${encodeURIComponent(name)}`);
+  }
+
+  async removeOwnNoteEmoji(project: ProjectRef, iid: number, noteId: number, name: string): Promise<void> {
+    const me = (await this.currentUser()).username.toLowerCase();
+    const path = `${this.mrPath(project, iid)}/notes/${noteId}/award_emoji`;
+    const awards = z.array(AwardSchema).parse(await (await this.request("GET", `${path}?per_page=${PER_PAGE}`)).json());
+    for (const award of awards) {
+      if (award.name === name && award.user.username.toLowerCase() === me) await this.request("DELETE", `${path}/${award.id}`);
+    }
   }
 
   async isProtectedBranch(project: ProjectRef, branch: string): Promise<boolean> {

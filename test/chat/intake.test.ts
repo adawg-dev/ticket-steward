@@ -294,6 +294,34 @@ describe("noteIntake", () => {
     });
   });
 
+  describe("reactions", () => {
+    it("reacts with eyes to an `/agent` note it takes, on a ticket's MR and on any other MR", async () => {
+      loopIn("awaiting_review");
+      await intake("/agent why this?", { id: 900 });
+      anyMergeRequest = true;
+      await intake("/agent fix it", { id: 901 }, { branch: "adam/tidy", mrIid: 9 });
+
+      expect(gitlab.reactions.get(900)).toEqual(["eyes"]);
+      expect(gitlab.reactions.get(901)).toEqual(["eyes"]);
+    });
+
+    it("does not react to a note it denies or has no session for", async () => {
+      loopIn("awaiting_review");
+      await intake("/agent why this?", { id: 902, authorId: REPORTER });
+      await intake("/agent fix it", { id: 903 }, { branch: "adam/tidy" });
+
+      expect(gitlab.reactions.get(902)).toBeUndefined();
+      expect(gitlab.reactions.get(903)).toBeUndefined();
+    });
+
+    it("still queues the chat when GitLab will not take the reaction", async () => {
+      loopIn("awaiting_review");
+      gitlab.failingReactions = true;
+
+      expect((await intake("/agent why this?")).action).toBe("chat");
+    });
+  });
+
   it("ignores a note on a branch with no loop", async () => {
     expect((await intake("hello")).action).toBe("ignored");
     expect(queued()).toEqual([]);

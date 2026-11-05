@@ -531,6 +531,10 @@ chat: {
   `chat_failed` (the access check could not reach GitLab) for an `/agent` note. A bare `/agent` with no message is
   `chat_ignored`.
 - An `/agent` note does not wake a loop waiting for review; the loop's next poll (or any other note) does.
+- Reactions on the note: :eyes: once the chat is queued; when the reply is posted the eyes go and :thumbsup: follows,
+  or :x: when the agent did not do what was asked (its run failed, its answer was unreadable, no session, or the
+  steward refused the MR). Reactions are best effort: one GitLab refuses is logged, never a failed chat. A chat that
+  fails for good without a reply keeps its eyes.
 
 **On any merge request.** With `chat: { anyMergeRequest: true }`, an `/agent` note on an MR the steward did not open
 (no ticket session behind its branch) is an **MR chat** instead of the "No agent session" reply. The webhook answers

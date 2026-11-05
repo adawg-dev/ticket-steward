@@ -63,6 +63,24 @@ describe("GitLabMrClient", () => {
     expect(calls[1]?.url).toBe("https://g/api/v4/projects/42/protected_branches/fix%2Fa%20b");
   });
 
+  it("awards an emoji on an MR note, and removes only the steward's own award of that name", async () => {
+    const { calls, fetchImpl } = recorder([
+      reply(201, { id: 1, name: "eyes" }),
+      reply(200, { username: "steward-bot" }),
+      reply(200, [{ id: 11, name: "eyes", user: { username: "ada" } }, { id: 12, name: "eyes", user: { username: "steward-bot" } }, { id: 13, name: "rocket", user: { username: "steward-bot" } }]),
+      reply(200, {}),
+    ]);
+    const c = client(fetchImpl);
+    await c.awardNoteEmoji(42, 7, 501, "eyes");
+    await c.removeOwnNoteEmoji(42, 7, 501, "eyes");
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      "POST https://g/api/v4/projects/42/merge_requests/7/notes/501/award_emoji?name=eyes",
+      "GET https://g/api/v4/user",
+      "GET https://g/api/v4/projects/42/merge_requests/7/notes/501/award_emoji?per_page=100",
+      "DELETE https://g/api/v4/projects/42/merge_requests/7/notes/501/award_emoji/12",
+    ]);
+  });
+
   it("maps a missing head pipeline to null", async () => {
     const { fetchImpl } = recorder([reply(200, { ...mrBody, head_pipeline: null })]);
     expect((await client(fetchImpl).getMergeRequest(42, 7)).headPipeline).toBeNull();

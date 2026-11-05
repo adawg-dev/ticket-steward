@@ -115,6 +115,22 @@ export class FakeGitLabMr implements GitLabMrApi {
     return structuredClone(this.mr);
   }
 
+  /** The steward's own reactions, by note id, as awardNoteEmoji and removeOwnNoteEmoji leave them. */
+  readonly reactions = new Map<number, string[]>();
+  /** Makes every reaction call throw, as an unreachable GitLab would. */
+  failingReactions = false;
+
+  async awardNoteEmoji(_project: number | string, _iid: number, noteId: number, name: string): Promise<void> {
+    if (this.failingReactions) throw new Error("GitLab down");
+    const names = this.reactions.get(noteId) ?? [];
+    if (!names.includes(name)) this.reactions.set(noteId, [...names, name]);
+  }
+
+  async removeOwnNoteEmoji(_project: number | string, _iid: number, noteId: number, name: string): Promise<void> {
+    if (this.failingReactions) throw new Error("GitLab down");
+    this.reactions.set(noteId, (this.reactions.get(noteId) ?? []).filter((known) => known !== name));
+  }
+
   async isProtectedBranch(_project: number | string, branch: string): Promise<boolean> {
     return this.protectedBranches.has(branch);
   }
